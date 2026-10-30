@@ -488,12 +488,21 @@ static enum smoothaf_result smoothaf_adaptive_run(
         uint32_t *start)
 {
     enum smoothaf_adaptive_action action;
+    struct smoothaf_adaptive_policy policy;
     int direction;
     int abstract_step;
     int score;
     int stop;
 
-    smoothaf_adaptive_hc_init(adaptive, 0, initial_score,
+    /* Keep controller coordinates identical to physical lens movement.  The
+     * Legacy lens API has no independently validated num_steps dimension, so
+     * Adaptive HC must not schedule an abstract displacement different from
+     * the configured physical Step Size. */
+    smoothaf_adaptive_policy_default(&policy);
+    policy.min_step = smoothaf_step;
+    policy.initial_step = smoothaf_step;
+    policy.max_step = smoothaf_step;
+    smoothaf_adaptive_hc_init(adaptive, &policy, initial_score,
                               smoothaf_direction_value());
     action = smoothaf_adaptive_hc_begin(adaptive);
 
