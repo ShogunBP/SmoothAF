@@ -1,0 +1,52 @@
+# Generated ARM and host build artifacts
+*.o
+*.d
+*.dep
+*.sym
+*.mo
+*.obj
+*.exe
+*.panic
+hgstamp
+hgdiff.tmp
+
+# Keep validated artifacts explicitly tracked
+!artifacts/baseline/*.mo
+!artifacts/consolidated/smoothaf.mo
+!artifacts/releases/**/smoothaf.mo
+
+# Local camera data and symbol tables
+600D_102.SYM
+*.SYM
+platform/
+card-backups/
+firmware-dumps/
+
+# Local reports and releases
+artifacts/releases/
+artifacts/consolidated/*.mo
+artifacts/consolidated/*.dep
+artifacts/consolidated/*.sym
+artifacts/*.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Windows and editors
+Thumbs.db
+Desktop.ini
+.vs/
+.vscode/
+.idea/
+
+# Local credentials and configuration
+.env
+.env.*
+*.token
+*.secret
+credentials.*
