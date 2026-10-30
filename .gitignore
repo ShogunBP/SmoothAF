@@ -12,6 +12,7 @@ hgdiff.tmp
 
 # Keep validated artifacts explicitly tracked
 !artifacts/baseline/*.mo
+!artifacts/consolidated/
 !artifacts/consolidated/smoothaf.mo
 !artifacts/releases/**/smoothaf.mo
 
@@ -24,7 +25,6 @@ firmware-dumps/
 
 # Local reports and releases
 artifacts/releases/
-artifacts/consolidated/*.mo
 artifacts/consolidated/*.dep
 artifacts/consolidated/*.sym
 artifacts/*.log
