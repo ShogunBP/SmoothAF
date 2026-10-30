@@ -60,6 +60,7 @@ try {
     New-Item -ItemType Directory -Path $integration -Force | Out-Null
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf.c') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_core.h') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_diagnostics.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'integration\Makefile') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'integration\README.rst') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'docker\generate-strings.py') $integration -Force

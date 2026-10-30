@@ -21,7 +21,13 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 12
+    assert menu.count(".name =") == 14
+    assert '"HC Mode"' in menu
+    assert '"Debug Logging"' in menu
+    assert 'CHOICES("Legacy HC", "Adaptive HC")' in menu
+    assert "smoothaf_hc_mode, SMOOTHAF_HC_LEGACY" in source
+    assert "smoothaf_adaptive_run" in source
+    assert "lens_focus(direction, smoothaf_step, 1, 0)" in source
     assert "MENU_EOL" in menu
 
 

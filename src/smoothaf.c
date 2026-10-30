@@ -27,6 +27,10 @@
 #include <propvalues.h>
 
 #include "smoothaf_core.h"
+#include "smoothaf_diagnostics.h"
+
+#define SMOOTHAF_HC_LEGACY       0
+#define SMOOTHAF_HC_ADAPTIVE     1
 
 /* Experimental timing values for the EF 50mm f/1.8 STM.  They have not been
  * calibrated on hardware; lens_focus(wait=1) itself can block for up to about
@@ -74,8 +78,11 @@
 static CONFIG_INT("smoothaf.metric", smoothaf_metric, SMOOTHAF_METRIC_SAD);
 static CONFIG_INT("smoothaf.step", smoothaf_step, 1);
 static CONFIG_INT("smoothaf.dir", smoothaf_direction_choice, 0); /* 0=A, 1=B */
+static CONFIG_INT("smoothaf.hc_mode", smoothaf_hc_mode, SMOOTHAF_HC_LEGACY);
+static CONFIG_INT("smoothaf.debug", smoothaf_debug_logging, 0);
 
 static int smoothaf_enabled = 0;
+static struct smoothaf_log_buffer smoothaf_log;
 
 static volatile int smoothaf_status = SMOOTHAF_STATUS_IDLE;
 static volatile int smoothaf_cancel = 0;
@@ -151,6 +158,19 @@ static void smoothaf_unlock(void)
 static int smoothaf_direction_value(void)
 {
     return smoothaf_direction_choice ? 1 : -1;
+}
+
+static void smoothaf_log_event(smoothaf_log_type_t type,
+                               int32_t value1, int32_t value2, int32_t value3)
+{
+    smoothaf_log_set_enabled(&smoothaf_log, smoothaf_debug_logging);
+    if (!smoothaf_debug_logging)
+    {
+        return;
+    }
+
+    smoothaf_log.tick = (uint32_t)get_ms_clock();
+    smoothaf_log_write(&smoothaf_log, type, value1, value2, value3);
 }
 
 /* Measurement is allowed in MF: it is read-only and useful as a diagnostic.
@@ -261,6 +281,7 @@ static int smoothaf_move(int direction)
 
     /* wait=1 is intentional: one command at a time, confirmed by the core. */
     smoothaf_last_lens_called = 1;
+    smoothaf_log_event(SMOOTHAF_LOG_MOVE, direction, smoothaf_step, 0);
     result = lens_focus(direction, smoothaf_step, 1, 0);
     smoothaf_last_lens_return = result;
 
@@ -304,6 +325,7 @@ static int smoothaf_search_measure(void *ctx, int *score)
 
     smoothaf_last_mean = mean;
     smoothaf_last_score = *score;
+    smoothaf_log_event(SMOOTHAF_LOG_MEASURE, *score, mean, 0);
     return 1;
 }
 
@@ -461,15 +483,104 @@ done:
     smoothaf_last_time = (int)((uint32_t)get_ms_clock() - start);
 }
 
+static enum smoothaf_result smoothaf_adaptive_run(
+        struct smoothaf_adaptive_hc *adaptive, int initial_score,
+        uint32_t *start)
+{
+    enum smoothaf_adaptive_action action;
+    int direction;
+    int abstract_step;
+    int score;
+    int stop;
+
+    smoothaf_adaptive_hc_init(adaptive, 0, initial_score,
+                              smoothaf_direction_value());
+    action = smoothaf_adaptive_hc_begin(adaptive);
+
+    for (;;)
+    {
+        if (action == SMOOTHAF_ADAPTIVE_LOCKED)
+        {
+            return SMOOTHAF_RESULT_LOCKED;
+        }
+        if (action == SMOOTHAF_ADAPTIVE_NO_PROGRESS)
+        {
+            return SMOOTHAF_RESULT_LIMIT;
+        }
+        if (action == SMOOTHAF_ADAPTIVE_NO_CONFIDENCE)
+        {
+            return SMOOTHAF_RESULT_NO_CONFIDENCE;
+        }
+        if (action == SMOOTHAF_ADAPTIVE_LIMIT)
+        {
+            return SMOOTHAF_RESULT_LIMIT;
+        }
+
+        stop = smoothaf_search_abort(start);
+        if (stop)
+        {
+            smoothaf_log_event(SMOOTHAF_LOG_ABORT, stop, adaptive->commands,
+                               adaptive->reversals);
+            return (enum smoothaf_result)stop;
+        }
+
+        if (action == SMOOTHAF_ADAPTIVE_STEP)
+        {
+            if (!smoothaf_adaptive_hc_next_step(adaptive, &direction,
+                                                &abstract_step))
+            {
+                return SMOOTHAF_RESULT_LIMIT;
+            }
+
+            /* Adaptive HC changes its abstract search policy only.  Physical
+             * movement remains the configured Legacy Step Size. */
+            (void)abstract_step;
+            smoothaf_log_event(SMOOTHAF_LOG_CONTROLLER, direction,
+                               adaptive->step, adaptive->commands);
+            if (!smoothaf_move(direction))
+            {
+                return SMOOTHAF_RESULT_LENS_ERROR;
+            }
+
+            stop = smoothaf_search_abort(start);
+            if (stop)
+            {
+                smoothaf_log_event(SMOOTHAF_LOG_ABORT, stop,
+                                   adaptive->commands, adaptive->reversals);
+                return (enum smoothaf_result)stop;
+            }
+        }
+
+        if (!smoothaf_search_measure(0, &score))
+        {
+            return SMOOTHAF_RESULT_MEASURE_ERROR;
+        }
+        stop = smoothaf_search_abort(start);
+        if (stop)
+        {
+            smoothaf_log_event(SMOOTHAF_LOG_ABORT, stop, adaptive->commands,
+                               adaptive->reversals);
+            return (enum smoothaf_result)stop;
+        }
+
+        action = smoothaf_adaptive_hc_on_score(adaptive, score);
+        smoothaf_log_event(SMOOTHAF_LOG_CONTROLLER, action, adaptive->best,
+                           adaptive->best_pos);
+    }
+}
+
 static void smoothaf_search_task(void)
 {
     uint32_t start = (uint32_t)get_ms_clock();
+    struct smoothaf_adaptive_hc adaptive;
+    int use_adaptive;
     struct smoothaf_hc hc;
     int score = -1;
     int mean = 0;
     int reason;
     enum smoothaf_result result;
 
+    use_adaptive = smoothaf_hc_mode == SMOOTHAF_HC_ADAPTIVE;
     smoothaf_hc_init(&hc, 0, 1);
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
     smoothaf_last_commands = 0;
@@ -505,14 +616,25 @@ static void smoothaf_search_task(void)
         goto done;
     }
 
-    result = smoothaf_hc_run(&hc, score, smoothaf_direction_value(),
-                           smoothaf_search_move, smoothaf_search_measure,
-                           smoothaf_search_abort, &start);
+    if (use_adaptive)
+    {
+        result = smoothaf_adaptive_run(&adaptive, score, &start);
+        smoothaf_last_commands = adaptive.commands;
+        smoothaf_last_reversals = adaptive.reversals;
+        smoothaf_last_best = adaptive.best;
+        smoothaf_last_score = adaptive.current;
+    }
+    else
+    {
+        result = smoothaf_hc_run(&hc, score, smoothaf_direction_value(),
+                               smoothaf_search_move, smoothaf_search_measure,
+                               smoothaf_search_abort, &start);
 
-    smoothaf_last_commands = hc.commands;
-    smoothaf_last_reversals = hc.reversals;
-    smoothaf_last_best = hc.best;
-    smoothaf_last_score = hc.current;
+        smoothaf_last_commands = hc.commands;
+        smoothaf_last_reversals = hc.reversals;
+        smoothaf_last_best = hc.best;
+        smoothaf_last_score = hc.current;
+    }
 
     if (result == SMOOTHAF_RESULT_LENS_ERROR &&
         smoothaf_last_block != SMOOTHAF_BLOCK_NONE)
@@ -754,6 +876,20 @@ static struct menu_entry smoothaf_menu[] =
         .help = "Start one bounded hill-climbing search; LiveView only.",
     },
     {
+        .name = "HC Mode",
+        .priv = &smoothaf_hc_mode,
+        .min = SMOOTHAF_HC_LEGACY,
+        .max = SMOOTHAF_HC_ADAPTIVE,
+        .choices = CHOICES("Legacy HC", "Adaptive HC"),
+        .help = "Select bounded search policy; Legacy HC remains the default.",
+    },
+    {
+        .name = "Debug Logging",
+        .priv = &smoothaf_debug_logging,
+        .max = 1,
+        .help = "Enable fixed-size diagnostics logging; no heavy viewer is included.",
+    },
+    {
         .name = "Sharpness Metric",
         .priv = &smoothaf_metric,
         .min = SMOOTHAF_METRIC_SAD,
@@ -833,6 +969,16 @@ static unsigned int smoothaf_init(void)
     {
         smoothaf_direction_choice = 0;
     }
+    if (smoothaf_hc_mode < SMOOTHAF_HC_LEGACY ||
+        smoothaf_hc_mode > SMOOTHAF_HC_ADAPTIVE)
+    {
+        smoothaf_hc_mode = SMOOTHAF_HC_LEGACY;
+    }
+    if (smoothaf_debug_logging < 0 || smoothaf_debug_logging > 1)
+    {
+        smoothaf_debug_logging = 0;
+    }
+    smoothaf_log_init(&smoothaf_log);
 
     /* No lens movement on load. */
     menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
@@ -890,4 +1036,6 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_metric)
     MODULE_CONFIG(smoothaf_step)
     MODULE_CONFIG(smoothaf_direction_choice)
+    MODULE_CONFIG(smoothaf_hc_mode)
+    MODULE_CONFIG(smoothaf_debug_logging)
 MODULE_CONFIGS_END()
