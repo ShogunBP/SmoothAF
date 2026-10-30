@@ -19,6 +19,33 @@ $Image = 'smoothaf-legacy-build:bookworm'
 $OutputRoot = Join-Path $ProjectRoot 'artifacts'
 $ModulePath = Join-Path $OutputRoot 'consolidated\smoothaf.mo'
 
+if ([string]::IsNullOrWhiteSpace($LegacyRoot)) {
+    $legacyCandidates = @(
+        (Join-Path $ProjectRoot 'docs\references\magic-lantern-branch-lua_fix'),
+        (Join-Path $ProjectRoot 'docs\references\magic-lantern')
+    )
+    foreach ($candidate in $legacyCandidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            $LegacyRoot = $candidate
+            break
+        }
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($SymbolSource)) {
+    $symbolCandidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($LegacyRoot)) {
+        $symbolCandidates += Join-Path $LegacyRoot '600D_102.SYM'
+    }
+    $symbolCandidates += Join-Path $ProjectRoot 'docs\references\600D_102.SYM'
+    foreach ($candidate in $symbolCandidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $SymbolSource = $candidate
+            break
+        }
+    }
+}
+
 function Require-Command([string]$Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) { throw "Command not found: $Name" }
 }

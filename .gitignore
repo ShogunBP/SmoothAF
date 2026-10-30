@@ -50,3 +50,6 @@ Desktop.ini
 *.token
 *.secret
 credentials.*
+
+# Local Magic Lantern source tree and camera references
+/docs/references/
