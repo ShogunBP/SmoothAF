@@ -533,6 +533,80 @@ static void test_hill_climb(void)
     CHECK(hc.dir == -1 || hc.dir == 1, "direction is never zero");
 }
 
+static void test_adaptive_hill_climb(void)
+{
+    struct smoothaf_adaptive_policy policy;
+    struct smoothaf_adaptive_hc hc;
+    enum smoothaf_adaptive_action action;
+    int direction;
+    int step;
+
+    smoothaf_adaptive_policy_default(&policy);
+    CHECK(policy.min_step > 0, "adaptive policy has a positive minimum step");
+    CHECK(policy.initial_step >= policy.min_step,
+          "adaptive policy initial step is bounded");
+    CHECK(policy.initial_step <= policy.max_step,
+          "adaptive policy initial step fits the maximum");
+
+    smoothaf_adaptive_hc_init(&hc, &policy, 1000, 1);
+    action = smoothaf_adaptive_hc_begin(&hc);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive controller requests an abstract first step");
+    CHECK(smoothaf_adaptive_hc_next_step(&hc, &direction, &step),
+          "adaptive controller exposes the pending abstract step");
+    CHECK(direction == 1 && step == policy.initial_step,
+          "adaptive first step has configured direction and size");
+    CHECK(hc.commands == 1, "adaptive first step is counted");
+    CHECK(hc.pos == step, "adaptive position tracks the abstract step");
+
+    /* Improvement, bounded overshoot, return, then two confirmations. */
+    action = smoothaf_adaptive_hc_on_score(&hc, 1300);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive improvement keeps searching");
+    CHECK(hc.best == 1300, "adaptive improvement updates the best score");
+    CHECK(hc.best_pos == policy.initial_step,
+          "adaptive improvement records the abstract position");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1000);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive overshoot requests a bounded return step");
+    CHECK(hc.next_direction == -1, "adaptive overshoot reverses direction");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1300);
+    CHECK(action == SMOOTHAF_ADAPTIVE_CONFIRM,
+          "adaptive return requires confirmation");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1300);
+    CHECK(action == SMOOTHAF_ADAPTIVE_LOCKED,
+          "adaptive controller locks after confirmation");
+    CHECK(hc.confirmations == policy.confirmations,
+          "adaptive controller reaches configured confirmation count");
+
+    /* A flat scene must terminate without claiming focus. */
+    smoothaf_adaptive_hc_init(&hc, &policy, 1000, 1);
+    action = smoothaf_adaptive_hc_begin(&hc);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive flat-scene probe starts with an abstract step");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1000);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive flat-scene probe returns to the best position");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1000);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive flat-scene probe checks the opposite side");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1000);
+    CHECK(action == SMOOTHAF_ADAPTIVE_STEP,
+          "adaptive flat-scene probe returns after the opposite side");
+    action = smoothaf_adaptive_hc_on_score(&hc, 1000);
+    CHECK(action == SMOOTHAF_ADAPTIVE_NO_PROGRESS,
+          "adaptive flat scene stops on no progress");
+    CHECK(hc.commands <= policy.max_commands,
+          "adaptive flat-scene commands stay within policy");
+
+    /* Low initial scores are rejected before any abstract movement. */
+    smoothaf_adaptive_hc_init(&hc, &policy, policy.min_score - 1, 1);
+    action = smoothaf_adaptive_hc_begin(&hc);
+    CHECK(action == SMOOTHAF_ADAPTIVE_NO_CONFIDENCE,
+          "adaptive low-confidence start does not move");
+    CHECK(hc.commands == 0, "adaptive low-confidence start issues no step");
+}
+
 int main(void)
 {
     test_uyvy_offsets();
@@ -540,6 +614,7 @@ int main(void)
     test_metrics();
     test_safe_mode_panic();
     test_hill_climb();
+    test_adaptive_hill_climb();
 
     if (failures)
     {

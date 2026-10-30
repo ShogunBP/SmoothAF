@@ -331,6 +331,281 @@ static inline enum smoothaf_hc_action smoothaf_hc_on_score(struct smoothaf_hc *h
     return smoothaf_hc_next_move(hc);
 }
 
+/*
+ * Conservative adaptive hill-climbing policy.
+ *
+ * This controller deliberately stops at an abstract step boundary.  The host
+ * or camera adapter asks for a direction and step size with
+ * smoothaf_adaptive_hc_next_step(); it owns the actual focus operation and
+ * reports the resulting score with smoothaf_adaptive_hc_on_score().  No lens
+ * or platform API is referenced here.
+ */
+#define SMOOTHAF_ADAPTIVE_MIN_STEP       1
+#define SMOOTHAF_ADAPTIVE_INITIAL_STEP   1
+#define SMOOTHAF_ADAPTIVE_MAX_STEP       3
+#define SMOOTHAF_ADAPTIVE_MAX_COMMANDS   12
+#define SMOOTHAF_ADAPTIVE_MAX_REVERSALS  3
+#define SMOOTHAF_ADAPTIVE_CONFIRMATIONS  2
+#define SMOOTHAF_ADAPTIVE_MIN_SCORE      SMOOTHAF_MIN_SCORE
+
+enum smoothaf_adaptive_action
+{
+    SMOOTHAF_ADAPTIVE_STEP = 0,
+    SMOOTHAF_ADAPTIVE_CONFIRM,
+    SMOOTHAF_ADAPTIVE_LOCKED,
+    SMOOTHAF_ADAPTIVE_NO_PROGRESS,
+    SMOOTHAF_ADAPTIVE_NO_CONFIDENCE,
+    SMOOTHAF_ADAPTIVE_LIMIT,
+};
+
+struct smoothaf_adaptive_policy
+{
+    int min_step;
+    int initial_step;
+    int max_step;
+    int max_commands;
+    int max_reversals;
+    int confirmations;
+    int min_score;
+};
+
+struct smoothaf_adaptive_hc
+{
+    struct smoothaf_adaptive_policy policy;
+    int initial;
+    int current;
+    int best;
+    int best_pos;
+    int pos;
+    int direction;
+    int next_direction;
+    int step;
+    int next_step;
+    int commands;
+    int reversals;
+    int confirmations;
+    int pending;
+    int phase;
+};
+
+enum smoothaf_adaptive_phase
+{
+    SMOOTHAF_ADAPTIVE_PHASE_SEARCH = 0,
+    SMOOTHAF_ADAPTIVE_PHASE_RETURN,
+    SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE,
+    SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE_RETURN,
+    SMOOTHAF_ADAPTIVE_PHASE_CONFIRM,
+};
+
+static inline void smoothaf_adaptive_policy_default(
+        struct smoothaf_adaptive_policy *policy)
+{
+    policy->min_step = SMOOTHAF_ADAPTIVE_MIN_STEP;
+    policy->initial_step = SMOOTHAF_ADAPTIVE_INITIAL_STEP;
+    policy->max_step = SMOOTHAF_ADAPTIVE_MAX_STEP;
+    policy->max_commands = SMOOTHAF_ADAPTIVE_MAX_COMMANDS;
+    policy->max_reversals = SMOOTHAF_ADAPTIVE_MAX_REVERSALS;
+    policy->confirmations = SMOOTHAF_ADAPTIVE_CONFIRMATIONS;
+    policy->min_score = SMOOTHAF_ADAPTIVE_MIN_SCORE;
+}
+
+static inline int smoothaf_adaptive_clamp(const struct smoothaf_adaptive_policy *p,
+                                          int value)
+{
+    if (value < p->min_step) return p->min_step;
+    if (value > p->max_step) return p->max_step;
+    return value;
+}
+
+static inline void smoothaf_adaptive_hc_init(
+        struct smoothaf_adaptive_hc *hc,
+        const struct smoothaf_adaptive_policy *policy,
+        int initial,
+        int direction)
+{
+    struct smoothaf_adaptive_policy defaults;
+
+    if (!policy)
+    {
+        smoothaf_adaptive_policy_default(&defaults);
+        policy = &defaults;
+    }
+    hc->policy = *policy;
+    if (hc->policy.min_step < 1) hc->policy.min_step = 1;
+    if (hc->policy.max_step < hc->policy.min_step)
+        hc->policy.max_step = hc->policy.min_step;
+    hc->policy.initial_step = smoothaf_adaptive_clamp(
+        &hc->policy, hc->policy.initial_step);
+    if (hc->policy.max_commands < 1) hc->policy.max_commands = 1;
+    if (hc->policy.max_reversals < 0) hc->policy.max_reversals = 0;
+    if (hc->policy.confirmations < 1) hc->policy.confirmations = 1;
+
+    hc->initial = initial;
+    hc->current = initial;
+    hc->best = initial;
+    hc->best_pos = 0;
+    hc->pos = 0;
+    hc->direction = direction < 0 ? -1 : 1;
+    hc->next_direction = hc->direction;
+    hc->step = hc->policy.initial_step;
+    hc->next_step = hc->step;
+    hc->commands = 0;
+    hc->reversals = 0;
+    hc->confirmations = 0;
+    hc->pending = 0;
+    hc->phase = SMOOTHAF_ADAPTIVE_PHASE_SEARCH;
+}
+
+static inline enum smoothaf_adaptive_action smoothaf_adaptive_hc_begin(
+        struct smoothaf_adaptive_hc *hc)
+{
+    if (hc->initial < hc->policy.min_score)
+    {
+        return SMOOTHAF_ADAPTIVE_NO_CONFIDENCE;
+    }
+    if (hc->policy.max_commands <= 0)
+    {
+        return SMOOTHAF_ADAPTIVE_LIMIT;
+    }
+    hc->pending = 1;
+    hc->next_direction = hc->direction;
+    hc->next_step = hc->step;
+    return SMOOTHAF_ADAPTIVE_STEP;
+}
+
+/* Reserve one abstract step and return its direction and bounded magnitude. */
+static inline int smoothaf_adaptive_hc_next_step(
+        struct smoothaf_adaptive_hc *hc, int *direction, int *step)
+{
+    if (!hc->pending || hc->commands >= hc->policy.max_commands)
+    {
+        hc->pending = 0;
+        return 0;
+    }
+    hc->commands++;
+    hc->direction = hc->next_direction < 0 ? -1 : 1;
+    hc->step = smoothaf_adaptive_clamp(&hc->policy, hc->next_step);
+    hc->pos += hc->direction * hc->step;
+    if (direction) *direction = hc->direction;
+    if (step) *step = hc->step;
+    hc->pending = 0;
+    return 1;
+}
+
+static inline enum smoothaf_adaptive_action smoothaf_adaptive_hc_schedule(
+        struct smoothaf_adaptive_hc *hc, int direction, int step)
+{
+    if (hc->commands >= hc->policy.max_commands)
+    {
+        hc->pending = 0;
+        return SMOOTHAF_ADAPTIVE_LIMIT;
+    }
+    hc->next_direction = direction < 0 ? -1 : 1;
+    hc->next_step = smoothaf_adaptive_clamp(&hc->policy, step);
+    hc->pending = 1;
+    return SMOOTHAF_ADAPTIVE_STEP;
+}
+
+/*
+ * Feed the score observed after the last abstract step.  Equal or small
+ * changes never count as progress.  The first failed side is returned to the
+ * origin, then the opposite side is probed once; a second failed return is
+ * NO_PROGRESS.  Improvements may grow the step by one, but never beyond the
+ * policy cap.  Every successful peak requires two confirmations.
+ */
+static inline enum smoothaf_adaptive_action smoothaf_adaptive_hc_on_score(
+        struct smoothaf_adaptive_hc *hc, int score)
+{
+    int db = smoothaf_deadband(hc->best);
+
+    hc->current = score;
+    if (score < hc->policy.min_score)
+    {
+        return SMOOTHAF_ADAPTIVE_NO_CONFIDENCE;
+    }
+
+    if (hc->phase == SMOOTHAF_ADAPTIVE_PHASE_CONFIRM)
+    {
+        if (score + db < hc->best)
+        {
+            hc->confirmations = 0;
+            hc->phase = SMOOTHAF_ADAPTIVE_PHASE_RETURN;
+            return smoothaf_adaptive_hc_schedule(hc,
+                                                  hc->best_pos < hc->pos ? -1 : 1,
+                                                  hc->step);
+        }
+        hc->confirmations++;
+        if (hc->confirmations >= hc->policy.confirmations)
+        {
+            hc->pending = 0;
+            return SMOOTHAF_ADAPTIVE_LOCKED;
+        }
+        return SMOOTHAF_ADAPTIVE_CONFIRM;
+    }
+
+    if (hc->phase == SMOOTHAF_ADAPTIVE_PHASE_RETURN ||
+        hc->phase == SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE_RETURN)
+    {
+        if (score > hc->best + db)
+        {
+            hc->best = score;
+            hc->best_pos = hc->pos;
+        }
+        hc->confirmations = 1;
+        if (hc->phase == SMOOTHAF_ADAPTIVE_PHASE_RETURN &&
+            hc->best_pos == 0)
+        {
+            hc->phase = SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE;
+            hc->reversals++;
+            if (hc->reversals > hc->policy.max_reversals)
+                return SMOOTHAF_ADAPTIVE_LIMIT;
+            return smoothaf_adaptive_hc_schedule(hc, -hc->direction,
+                                                  hc->policy.min_step);
+        }
+        if (hc->phase == SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE_RETURN)
+        {
+            hc->pending = 0;
+            return SMOOTHAF_ADAPTIVE_NO_PROGRESS;
+        }
+        hc->phase = SMOOTHAF_ADAPTIVE_PHASE_CONFIRM;
+        return SMOOTHAF_ADAPTIVE_CONFIRM;
+    }
+
+    if (score > hc->best + db)
+    {
+        hc->best = score;
+        hc->best_pos = hc->pos;
+        hc->confirmations = 0;
+        if (hc->step < hc->policy.max_step) hc->step++;
+        hc->phase = SMOOTHAF_ADAPTIVE_PHASE_SEARCH;
+        return smoothaf_adaptive_hc_schedule(hc, hc->direction, hc->step);
+    }
+
+    /* A failed initial probe returns to the origin before probing opposite. */
+    if (hc->phase == SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE)
+    {
+        hc->phase = SMOOTHAF_ADAPTIVE_PHASE_OPPOSITE_RETURN;
+        hc->reversals++;
+        if (hc->reversals > hc->policy.max_reversals)
+            return SMOOTHAF_ADAPTIVE_LIMIT;
+        return smoothaf_adaptive_hc_schedule(hc, -hc->direction,
+                                              hc->policy.min_step);
+    }
+
+    if (hc->phase == SMOOTHAF_ADAPTIVE_PHASE_SEARCH)
+    {
+        hc->phase = SMOOTHAF_ADAPTIVE_PHASE_RETURN;
+        hc->reversals++;
+        if (hc->reversals > hc->policy.max_reversals)
+            return SMOOTHAF_ADAPTIVE_LIMIT;
+        return smoothaf_adaptive_hc_schedule(hc, -hc->direction,
+                                              hc->policy.min_step);
+    }
+
+    hc->pending = 0;
+    return SMOOTHAF_ADAPTIVE_NO_PROGRESS;
+}
+
 typedef int (*smoothaf_hc_move_fn)(void *ctx, int dir);
 typedef int (*smoothaf_hc_measure_fn)(void *ctx, int *score);
 typedef int (*smoothaf_hc_abort_fn)(void *ctx); /* 0 = continue, else result */
