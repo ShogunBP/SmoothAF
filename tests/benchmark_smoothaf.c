@@ -1,9 +1,10 @@
 /*
- * SmoothAF Benchmark - Comparative Benchmarks with Circular Logging
+ * SmoothAF Benchmark - Legacy Hill-Climbing Controller Benchmarks
  *
- * Host-side benchmark harness for the SmoothAF hill-climbing controller.
- * Uses fixed-size circular logging from smoothaf_diagnostics.h.
- * All timing is SIMULATED (tick counters), no physical time measurements.
+ * Host-side benchmark harness for the SmoothAF Legacy bounded hill-climbing
+ * controller (smoothaf_hc_run). Uses fixed-size circular logging from
+ * smoothaf_diagnostics.h. All timing is SIMULATED (tick counters), no
+ * physical time measurements.
  */
 
 #include <stdio.h>
@@ -24,7 +25,6 @@ struct smoothaf_bench_result
     uint32_t min_ticks;
     uint32_t max_ticks;
     uint32_t avg_ticks;
-    int success_count;
     int error_count;
     int lock_count;
     int limit_count;
@@ -50,7 +50,6 @@ static inline void smoothaf_bench_run(const char *name,
     result->min_ticks = 0xFFFFFFFF;
     result->max_ticks = 0;
     result->avg_ticks = 0;
-    result->success_count = 0;
     result->error_count = 0;
     result->lock_count = 0;
     result->limit_count = 0;
@@ -87,7 +86,7 @@ static inline void smoothaf_bench_run(const char *name,
 
         switch (r)
         {
-            case 0: result->success_count++; break;   /* SMOOTHAF_RESULT_LOCKED */
+            case 0: result->lock_count++; break;      /* SMOOTHAF_RESULT_LOCKED */
             case 1: result->limit_count++; break;     /* SMOOTHAF_RESULT_LIMIT */
             case 2: result->no_confidence_count++; break; /* SMOOTHAF_RESULT_NO_CONFIDENCE */
             case 3: result->cancel_count++; break;    /* SMOOTHAF_RESULT_CANCELLED */
@@ -106,7 +105,7 @@ static inline void smoothaf_bench_run(const char *name,
 /* Print benchmark summary to stdout (host test output) */
 static inline void smoothaf_bench_print(const struct smoothaf_bench_result *r)
 {
-    printf("=== BENCHMARK: %s (SIMULATION) ===\n", r->name);
+    printf("=== BENCHMARK: %s (SIMULATION, Legacy HC) ===\n", r->name);
     printf("  Iterations:      %d\n", r->iterations);
     printf("  Total ticks:     %u\n", r->total_ticks);
     printf("  Min ticks:       %u\n", r->min_ticks);
