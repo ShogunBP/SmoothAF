@@ -367,18 +367,18 @@ int main(void)
 {
     static const int unstable_return[] = { 900, 700, 800 };
     static const struct bench_scenario scenarios[] = {
-        { "Peak at +3", 700, peak_at_3, 0, 0, 0, 0, 0 },
-        { "Two-sided maximum at start", 1000, peak_at_0, 0, 0, 0, 0, 0 },
-        { "Wrong initial direction, peak at -3", 700, peak_at_minus3, 0, 0, 0, 0, 0 },
-        { "Flat scene", 1000, flat, 0, 0, 0, 0, 0 },
-        { "Noisy deadband", 1000, noisy, 0, 0, 0, 0, 0 },
-        { "Monotonic slope", 1000, increasing, 0, 0, 0, 0, 0 },
-        { "Cancellation after two moves", 1000, increasing, 2, 0, 0, 0, 0 },
-        { "Timeout after three moves", 1000, increasing, 0, 3, 0, 0, 0 },
-        { "Lens failure on second move", 700, peak_at_3, 0, 0, 2, 0, 0 },
-        { "Measure failure on first measurement", 700, peak_at_3, 0, 0, 0, 1, 0 },
-        { "Sharp peak", 500, sharp_peak, 0, 0, 0, 0, 0 },
-        { "Unstable return sequence", 500, peak_at_3, unstable_return, 3, 0, 0, 0 },
+        { .name = "Peak at +3", .initial_score = 700, .score_at = peak_at_3 },
+        { .name = "Two-sided maximum at start", .initial_score = 1000, .score_at = peak_at_0 },
+        { .name = "Wrong initial direction, peak at -3", .initial_score = 700, .score_at = peak_at_minus3 },
+        { .name = "Flat scene", .initial_score = 1000, .score_at = flat },
+        { .name = "Noisy deadband", .initial_score = 1000, .score_at = noisy },
+        { .name = "Monotonic slope", .initial_score = 1000, .score_at = increasing },
+        { .name = "Cancellation after two moves", .initial_score = 1000, .score_at = increasing, .cancel_after_moves = 2 },
+        { .name = "Timeout after three moves", .initial_score = 1000, .score_at = increasing, .timeout_after_moves = 3 },
+        { .name = "Lens failure on second move", .initial_score = 700, .score_at = peak_at_3, .fail_move_at = 2 },
+        { .name = "Measure failure on first measurement", .initial_score = 700, .score_at = peak_at_3, .fail_measure_at = 1 },
+        { .name = "Sharp peak", .initial_score = 500, .score_at = sharp_peak },
+        { .name = "Unstable return sequence", .initial_score = 500, .score_at = peak_at_3, .sequence = unstable_return, .sequence_length = 3 },
     };
     size_t i;
 

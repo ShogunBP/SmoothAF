@@ -538,8 +538,8 @@ static void test_adaptive_hill_climb(void)
     struct smoothaf_adaptive_policy policy;
     struct smoothaf_adaptive_hc hc;
     enum smoothaf_adaptive_action action;
-    int direction;
-    int step;
+    int direction = 0;
+    int step = 0;
 
     smoothaf_adaptive_policy_default(&policy);
     CHECK(policy.min_step > 0, "adaptive policy has a positive minimum step");
