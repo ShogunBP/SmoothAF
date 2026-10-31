@@ -1,5 +1,5 @@
 /*
- * SmoothAF 0.1 - bounded single-shot contrast focus for Magic Lantern (Legacy).
+ * SmoothAF 0.2.0 - bounded single-shot contrast focus for Magic Lantern (Legacy).
  *
  * Target: Canon EOS 600D / Rebel T3i, firmware 1.0.2, DIGIC IV,
  *         Magic Lantern Legacy Lua Fix, EF 50mm f/1.8 STM.

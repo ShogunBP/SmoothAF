@@ -1,5 +1,5 @@
 /*
- * SmoothAF 0.1 - hardware-independent core logic.
+ * SmoothAF 0.2.0 - hardware-independent core logic.
  *
  * This header contains only plain C (no Magic Lantern or DryOS types) so the
  * YUV indexing, the sharpness metrics and the bounded hill-climbing controller
