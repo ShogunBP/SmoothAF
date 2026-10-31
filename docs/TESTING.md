@@ -29,7 +29,7 @@ The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM`
 - Comparative benchmark: passed; every scenario reported `invariants=PASS` and every benchmark row remained marked `(SIMULATION)`.
 - Menu regression: passed (`SmoothAF menu regression tests passed`).
 - ARM build: passed in a temporary staging copy of the repository and Legacy tree; `Will load on: 600D`, `DEP=23`.
-- Experimental staging module: 20680 bytes, SHA-256 `19cd10ee84ad8d677375959c1bf30598be3f1e87343d111208f986ea5a675fb5`.
+- Experimental staging module: 21736 bytes, SHA-256 `42d2c12e3c9ed462c68b45d8382da542273d4861090d3053bc0edc692d19448b`.
 - Format: `ELF 32-bit LSB relocatable, ARM, EABI5`.
 - The pre-existing `artifacts/consolidated/smoothaf.mo` was preserved at 17864 bytes with SHA-256 `9a600fc9f3acd92c027095819e8bfdeea8a440c2cf16fd8f28989006d94a566c`.
 - No physical v0.5 validation or SD-card installation was performed.
