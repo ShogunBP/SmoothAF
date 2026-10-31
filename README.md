@@ -1,6 +1,6 @@
 # SmoothAF
 
-**SmoothAF v0.4.0 — Experimental**
+**SmoothAF v0.5.0 — Experimental**
 
 **Fast focus. Minimal movement.**
 
@@ -20,9 +20,11 @@ This repository is an independently organized source distribution designed to in
 - Reserved `Canon AF Assist` menu with an explicit unavailable adapter; it never moves the lens.
 - Normal AF uses separate Acquisition and Refinement budgets: 8 commands each, 16 total and 4 reversals maximum.
 - Configurable Step Size.
-- Safe Mode with `Enable` off at module load.
-- `PANIC / Emergency Stop` and explicit rearm.
-- Diagnostic measurement and one-step focus command.
+- `Enable` off at module load as explicit movement armament.
+- Cooperative `Stop`; an in-flight synchronous lens command may finish.
+- Diagnostic measurement is read-only and works with `Enable` off.
+- Diagnostic measurement calculates SAD and Laplacian from the same sample.
+- Passive Vlog Monitor with manual/N/A sampling; it never moves the lens.
 - Runtime status, blocking reason, `lens_focus()` call marker and return value.
 - Fixed 32-record Debug Logging viewer with read-only Previous/Next navigation and task-safe Clear History.
 - Reproducible host and ARM builds with Docker.
@@ -73,7 +75,8 @@ The build never accesses an SD card or modifies a Magic Lantern tree permanently
 6. Set `Step Size` only after considering the tested-lens limitations.
 7. Use `Focus Test` only after the single-step path is stable.
 8. Read `Status` for score, timing, blocking reason, task result, and `lens_focus()` diagnostics.
-9. Use `PANIC / Emergency Stop` when needed. A synchronous lens command already in flight may finish.
+9. Use `Stop` to prevent future movement. A synchronous lens command already in flight may finish.
+10. Open `Vlog Monitor` only for passive status from existing manual samples; it has no continuous sampler.
 
 Do not unload or reload the module while a task is active.
 

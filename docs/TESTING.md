@@ -19,9 +19,22 @@ Run the repository checks from PowerShell:
 .\build-smoothaf.ps1 -Release
 ```
 
-The test set covers core metrics, UYVY ROI indexing, bounds, cancellation, timeout, Safe Mode, PANIC, Rearm, task reservation, simulated lens/measurement failures, menu regression and deterministic benchmark invariants. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
+The v0.5 test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, timeout, Enable admission, task reservation, simulated lens/measurement failures, passive monitor/menu regression and deterministic benchmark invariants. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
 
 The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output `DEP=23` and `Will load on: 600D` confirm build-time resolution only.
+
+## SmoothAF v0.5 validation record
+
+- Docker host tests: passed (`All SmoothAF core tests passed`).
+- Comparative benchmark: passed; every scenario reported `invariants=PASS` and every benchmark row remained marked `(SIMULATION)`.
+- Menu regression: passed (`SmoothAF menu regression tests passed`).
+- ARM build: passed in a temporary staging copy of the repository and Legacy tree; `Will load on: 600D`, `DEP=23`.
+- Experimental staging module: 20680 bytes, SHA-256 `19cd10ee84ad8d677375959c1bf30598be3f1e87343d111208f986ea5a675fb5`.
+- Format: `ELF 32-bit LSB relocatable, ARM, EABI5`.
+- The pre-existing `artifacts/consolidated/smoothaf.mo` was preserved at 17864 bytes with SHA-256 `9a600fc9f3acd92c027095819e8bfdeea8a440c2cf16fd8f28989006d94a566c`.
+- No physical v0.5 validation or SD-card installation was performed.
+
+The ARM result proves compilation and dependency resolution for the supplied Legacy/symbol inputs only. It does not prove runtime ABI compatibility, physical movement, focus acquisition or Vlog Monitor behavior on camera.
 
 ## SmoothAF v0.4 blocked-adapter build record
 
@@ -94,7 +107,7 @@ The physical test protocol remains conservative:
 2. Copy only the module manually to `ML/MODULES/`.
 3. Confirm module load, menu visibility, `Enable=0` and no movement during loading.
 4. Start with read-only `Diagnostic > Measure`.
-5. Test one controlled `Focus Step`, then PANIC while the interface is responsive.
+5. Test one controlled `Focus Step`, then use cooperative `Stop` while the interface is responsive.
 6. Record camera, firmware, Legacy revision, lens, Step Size, initial focus condition and diagnostics.
 7. Do not test Continuous AF, Movie AF or recording-time movement in the current release.
 8. Never unload or reload during an active task.

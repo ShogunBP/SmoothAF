@@ -10,8 +10,8 @@ See [Development](DEVELOPMENT.md) for integration and build inputs, [Research](R
 
 - `Enable` starts at `0`; loading creates no task and emits no lens command.
 - Activation is manual and each search is bounded.
-- `PANIC / Emergency Stop` is lock-free: it latches panic, requests cancellation and disables future operations without acquiring `smoothaf_sem`.
-- Rearm is explicit, requires no active task, clears the latch and leaves `Enable=0`.
+- `Enable` starts at `0` and is explicit movement armament; read-only Measure does not require it.
+- `Stop` requests cooperative cancellation; a synchronous lens command already in flight may finish.
 - A task is reserved before `task_create()`; task-creation failure releases the reservation.
 - `smoothaf_sem` protects state transitions and diagnostic snapshots. The viewer does not create tasks or move the lens.
 - Movie Mode, recording, MF, Continuous AF, Follow Focus, Rack Focus and Focus Stacking remain blocked.
@@ -60,13 +60,17 @@ With `wait=1`, SmoothAF sends one synchronous command, waits for the Legacy comp
 
 The v0.4 PoC reserves a read-only `Canon AF Assist` menu but uses an unavailable adapter. It does not call `lens_autofocus()`, Lua internals, `PTP_AF_START`, `lens_setup_af()`, `module_send_keypress()` or any unverified Canon symbol. The adapter starts `UNAVAILABLE`, returns `No safe Canon C API`, creates no task and cannot move the lens. A future native implementation requires a verified C declaration, implementation/export, ABI, `600D_102.SYM` resolution, request/result correlation, cleanup, cancellation semantics and controlled hardware validation.
 
-## Diagnostics
+## Diagnostics and passive Vlog Monitor
 
 Debug Logging is off by default and uses a fixed 32-entry in-memory circular history. Records include mode, phase, score/best score, direction, movement, position, command/reversal counts, elapsed time, `lens_focus()` return value and task-end reason. The on-camera viewer supports read-only Previous/Next navigation and Clear History only when no task is active. It performs no continuous card writes and no lens movement.
 
+`Diagnostic > Measure` is a single read-only LiveView sample. It does not call `lens_focus()` and can run with `Enable=OFF`; it publishes SAD and Laplacian scores from the same ROI sample, plus mean luminance, confidence and error status.
+
+`Vlog Monitor` is passive in v0.5. Start/Stop changes only viewer state and consumes new manual samples. It has no periodic task, no automatic VRAM sampling and no lens movement. `Sampling Interval` is `manual/N/A`. Its heuristic states do not establish perfect focus, and invalid or missing samples pause or remain uncertain rather than proving blur.
+
 ## Legacy FastAF baseline and migration
 
-FastAF 0.1 is historical evidence, not evidence that the renamed SmoothAF module is physically validated. The migration renamed the module and symbols while preserving the bounded focus logic, Safe Mode, PANIC behavior, task limits and the `MENU_EOL` registration correction.
+FastAF 0.1 is historical evidence, not evidence that the renamed SmoothAF module is physically validated. The migration renamed the module and symbols while preserving the bounded focus logic, task limits and the `MENU_EOL` registration correction. PANIC, Rearm and the separate Safe Mode concept are not part of the current v0.5 controls.
 
 The historical review identified and addressed, in that baseline work:
 
@@ -81,4 +85,4 @@ Historical review findings are not claims that every old artifact has identical 
 
 ## State ownership rules
 
-Only one SmoothAF task may own movement. Measurement and controller state are bounded and deterministic in host tests. PANIC prevents future SmoothAF commands but cannot retroactively cancel a synchronous Legacy or Canon operation already sent. Any future Canon AF integration must add a separate serialized state machine and mutual exclusion with `lens_focus()`; it must not bypass these rules.
+Only one SmoothAF task may own movement. Measurement and controller state are bounded and deterministic in host tests. Stop prevents future SmoothAF commands but cannot retroactively cancel a synchronous Legacy operation already sent. Any future Canon AF integration must add a separate serialized state machine and mutual exclusion with `lens_focus()`; it must not bypass these rules.

@@ -1,5 +1,21 @@
 # Changelog
 
+## SmoothAF v0.5.0 — Experimental
+
+- Removed PANIC, Rearm and the separate Safe Mode concept from the current SmoothAF controls.
+- Preserved `Enable=OFF` at load, cooperative `Stop`, single-task ownership, movement limits, timeout and conflict gates.
+- Fixed `Diagnostic > Measure` so it is read-only, independent of Enable and computes SAD and Laplacian from the same LiveView sample.
+- Added passive `Vlog Monitor` status, scores, reference/smoothing and `manual/N/A` sampling information; it does not create a periodic task or move the lens.
+- Preserved Canon AF Assist as an unavailable, blocked adapter with no lens movement.
+- Docker host validation passed; benchmark output remains `(SIMULATION)`. ARM validation was performed in temporary staging and did not replace the consolidated artifact.
+- No physical v0.5 validation, SD-card installation, push, merge or tag was performed.
+
+### Known v0.5 limitations
+
+- The Vlog Monitor observes manual samples and is not continuous or asynchronous.
+- SAD/Laplacian scores cannot distinguish blur from scene changes, lighting changes or insufficient texture by themselves.
+- `Stop` cannot interrupt a synchronous `lens_focus(wait=1)` call already in flight; unloading during an active task remains unsafe.
+
 ## SmoothAF v0.4.0 — Canon AF Assist PoC (blocked, experimental)
 
 - Added a host-testable unavailable adapter and explicit state boundary for future Canon Native AF Assist.

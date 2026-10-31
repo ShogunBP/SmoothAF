@@ -82,7 +82,13 @@ Any future PoC must be incremental:
 3. **Focus Monitor:** only after PoC 2; use hysteresis, a consistent loss window, cooldown and operation limits; do not treat `PROP_LV_FOCUS_DATA` alone as acquired focus.
 4. **Video Compatibility:** only after separate standby tests; active recording remains blocked until exposure, frames, FPS, latency and cancellation are specifically validated.
 
-The required state machine would include `CANON_AF_IDLE`, `REQUESTED`, `FOCUSING`, `DONE`, `FAILED`, `TIMEOUT` and `CANCEL_UNSUPPORTED`, a single active request ID, mutual exclusion with all lens controllers, external timeout semantics that do not claim to cancel Canon firmware, guaranteed cleanup and no movement after PANIC, Stop, timeout or invalid result.
+The required state machine would include `CANON_AF_IDLE`, `REQUESTED`, `FOCUSING`, `DONE`, `FAILED`, `TIMEOUT` and `CANCEL_UNSUPPORTED`, a single active request ID, mutual exclusion with all lens controllers, external timeout semantics that do not claim to cancel Canon firmware, guaranteed cleanup and no movement after Stop, timeout or invalid result.
+
+## SmoothAF v0.5 passive Vlog Monitor
+
+The v0.5 monitor is a read-only viewer over manually produced measurements. It keeps SAD and Laplacian values separately, displays a conservative smoothed/reference view and reports `manual/N/A` rather than claiming a periodic sampling interval. It does not create a task, read VRAM from a menu callback, call `lens_focus()` or invoke Canon AF. Missing or invalid samples pause or remain uncertain. These states are heuristics and require physical validation; they do not prove focus quality.
+
+An asynchronous periodic monitor remains a future roadmap item. It must first be evaluated for DIGIC IV cost, timing, invalid-frame behavior, scene changes and strict exclusion from automatic lens movement.
 
 ## Current recommendation
 

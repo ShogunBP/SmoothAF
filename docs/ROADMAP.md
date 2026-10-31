@@ -8,6 +8,6 @@ These are future objectives and hypotheses, not implemented features.
 - Add safe integration tests at a reproducible Legacy seam.
 - Improve release packaging while preserving manual installation and rollback.
 - Keep the v0.4 Canon AF Assist adapter unavailable until a verified C API, ABI, symbol resolution, cancellation contract and controlled hardware evidence exist; then investigate Trigger, Repeat and Focus Monitor only through staged, manual, out-of-recording PoCs in [Research](RESEARCH.md).
-- Consider Vlog AF only after bounded movement, hysteresis, cooldown and exposure behavior are validated.
+- Consider an asynchronous Vlog Monitor only after the passive v0.5 viewer is validated. A future task must measure periodically without any automatic lens movement and must first establish DIGIC IV cost, interval, smoothing, hysteresis and invalid-frame handling.
 
-Continuous AF, Movie AF and recording-time movement are not roadmap commitments for the current release. Any future work must preserve the existing gates, PANIC behavior, explicit Rearm, single-task ownership and bounded budgets.
+Continuous AF, Movie AF and recording-time movement are not roadmap commitments for the current release. Any future work must preserve the existing gates, cooperative Stop, single-task ownership and bounded budgets.
