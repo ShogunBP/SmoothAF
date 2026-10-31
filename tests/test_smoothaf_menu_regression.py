@@ -21,7 +21,12 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 19
+    assert menu.count(".name =") == 22
+    assert '"Canon AF Assist"' in menu
+    assert '"Trigger Canon AF"' in menu
+    assert 'SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED' in source
+    assert 'smoothaf_af_assist_block_name' in source
+    assert 'smoothaf_af_assist_request' in source
     assert '"AF Mode"' in menu
     assert '"Debug Logging"' in menu
     assert 'CHOICES("Legacy HC", "Adaptive HC", "Normal AF")' in menu

@@ -21,6 +21,7 @@
 #include <string.h>
 #include "../src/smoothaf_core.h"
 #include "../src/smoothaf_diagnostics.h"
+#include "../src/smoothaf_af_assist.h"
 
 static int failures = 0;
 
@@ -31,6 +32,32 @@ static int failures = 0;
             failures++; \
         } \
     } while (0)
+
+static void test_af_assist_unavailable(void)
+{
+    struct smoothaf_af_assist assist;
+
+    smoothaf_af_assist_init(&assist);
+    CHECK(assist.state == SMOOTHAF_AF_ASSIST_UNAVAILABLE,
+          "Canon AF Assist starts unavailable");
+    CHECK(assist.block == SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED,
+          "Canon AF Assist starts blocked");
+    CHECK(smoothaf_af_assist_request(&assist,
+          SMOOTHAF_AF_ASSIST_BLOCK_NONE) ==
+          SMOOTHAF_AF_ASSIST_RESULT_UNAVAILABLE,
+          "unsupported Canon AF request is rejected");
+    CHECK(assist.state == SMOOTHAF_AF_ASSIST_UNAVAILABLE,
+          "rejected request does not enter flight");
+    CHECK(!assist.cleanup_required, "unavailable request needs no cleanup");
+    CHECK(smoothaf_af_assist_cancel(&assist) ==
+          SMOOTHAF_AF_ASSIST_RESULT_CANCELLED,
+          "cancel is deterministic");
+    CHECK(assist.state == SMOOTHAF_AF_ASSIST_CANCELLED,
+          "cancel records cancelled state");
+    smoothaf_af_assist_reset(&assist);
+    CHECK(assist.state == SMOOTHAF_AF_ASSIST_UNAVAILABLE,
+          "reset restores unavailable state");
+}
 
 static int abs_i(int v)
 {
@@ -696,6 +723,7 @@ static void test_adaptive_hill_climb(void)
 
 int main(void)
 {
+    test_af_assist_unavailable();
     test_uyvy_offsets();
     test_roi_and_geometry();
     test_metrics();

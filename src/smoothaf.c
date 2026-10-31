@@ -28,6 +28,7 @@
 
 #include "smoothaf_core.h"
 #include "smoothaf_diagnostics.h"
+#include "smoothaf_af_assist.h"
 
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
@@ -85,6 +86,7 @@ static CONFIG_INT("smoothaf.debug", smoothaf_debug_logging, 0);
 
 static int smoothaf_enabled = 0;
 static struct smoothaf_log_buffer smoothaf_log;
+static struct smoothaf_af_assist smoothaf_af_assist;
 
 static volatile int smoothaf_status = SMOOTHAF_STATUS_IDLE;
 static volatile int smoothaf_cancel = 0;
@@ -873,6 +875,20 @@ static MENU_SELECT_FUNC(smoothaf_search_select)
     smoothaf_start_task(SMOOTHAF_TASK_SEARCH);
 }
 
+static MENU_SELECT_FUNC(smoothaf_af_assist_trigger_select)
+{
+    smoothaf_af_assist_request(&smoothaf_af_assist,
+                               SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_af_assist_update)
+{
+    MENU_SET_VALUE("%s", smoothaf_af_assist_state_name(
+                   smoothaf_af_assist.state));
+    MENU_SET_HELP("%s", smoothaf_af_assist_block_name(
+                  smoothaf_af_assist.block));
+}
+
 static MENU_SELECT_FUNC(smoothaf_stop_select)
 {
     if (smoothaf_lock())
@@ -1101,6 +1117,24 @@ static struct menu_entry smoothaf_menu[] =
         .help = "Start one bounded hill-climbing search; LiveView only.",
     },
     {
+        .name = "Canon AF Assist",
+        .select = menu_open_submenu,
+        .children = (struct menu_entry[])
+        {
+            {
+                .name = "Status",
+                .update = smoothaf_af_assist_update,
+                .help = "Reserved; no safe Canon C API is available.",
+            },
+            {
+                .name = "Trigger Canon AF",
+                .select = smoothaf_af_assist_trigger_select,
+                .help = "Blocked: no safe Canon C API; no lens movement.",
+            },
+            MENU_EOL,
+        },
+    },
+    {
         .name = "AF Mode",
         .priv = &smoothaf_af_mode,
         .min = SMOOTHAF_HC_LEGACY,
@@ -1182,6 +1216,7 @@ static unsigned int smoothaf_init(void)
     smoothaf_diag_count = 0;
     smoothaf_diag_page = 0;
     smoothaf_log_init(&smoothaf_log);
+    smoothaf_af_assist_init(&smoothaf_af_assist);
 
     /* Clamp values loaded from an older config file. */
     if (smoothaf_metric < SMOOTHAF_METRIC_SAD ||
