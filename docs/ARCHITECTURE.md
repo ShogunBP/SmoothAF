@@ -62,11 +62,11 @@ The v0.4 PoC reserves a read-only `Canon AF Assist` menu but uses an unavailable
 
 ## Diagnostics and passive Vlog Monitor
 
-Debug Logging is off by default and uses a fixed 32-entry in-memory circular history. Records include mode, phase, score/best score, direction, movement, position, command/reversal counts, elapsed time, `lens_focus()` return value and task-end reason. The on-camera viewer supports read-only Previous/Next navigation and Clear History only when no task is active. It performs no continuous card writes and no lens movement.
+Debug Logging is off by default and uses a fixed 32-entry in-memory circular history. Every published measurement goes through one bounded publication path, preserving SAD, Laplacian, mean luminance and a result code; logging ON records one MEASURE event per valid or invalid completed sample, while OFF is a no-op. Semaphore acquisition failures increment a diagnostic counter instead of disappearing silently. Records include mode, phase, score/best score, direction, movement, position, command/reversal counts, elapsed time, `lens_focus()` return value and task-end reason. The on-camera viewer supports read-only Previous/Next navigation, follows newly appended records until the user navigates, and Clear History only when no task is active. It performs no continuous card writes and no lens movement.
 
 `Diagnostic > Measure` is a single read-only LiveView sample. It does not call `lens_focus()` and can run with `Enable=OFF`; it publishes SAD and Laplacian scores from the same ROI sample, plus mean luminance, confidence and error status.
 
-`Vlog Monitor` is passive in v0.5. Start/Stop changes only viewer state and consumes new manual samples. It has no periodic task, no automatic VRAM sampling and no lens movement. `Sampling Interval` is `manual/N/A`. Its heuristic states do not establish perfect focus, and invalid or missing samples pause or remain uncertain rather than proving blur.
+`Vlog Monitor` is passive in v0.5. Start resets reference, smoothing and the session sample count, then waits for a new valid measurement; it never consumes the previous global measurement as the first sample. Stop freezes the monitor-owned SAD, Laplacian, smoothed/reference values and sample count until a new session. It has no periodic task, no automatic VRAM sampling and no lens movement. `Sampling Interval` is `manual/N/A`. Its heuristic states do not establish perfect focus, and invalid or missing samples pause or remain uncertain rather than proving blur.
 
 ## Legacy FastAF baseline and migration
 

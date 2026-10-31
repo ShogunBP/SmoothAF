@@ -19,7 +19,7 @@ Run the repository checks from PowerShell:
 .\build-smoothaf.ps1 -Release
 ```
 
-The v0.5 test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, timeout, Enable admission, task reservation, simulated lens/measurement failures, passive monitor/menu regression and deterministic benchmark invariants. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
+The v0.5 test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, timeout, Enable admission, task reservation, simulated lens/measurement failures, passive monitor/menu regression and deterministic benchmark invariants. The runtime publication path now carries valid, low-confidence and invalid measurement outcomes with independent SAD/Laplacian payloads, while the fixed viewer follows newly appended records. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
 
 The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output `DEP=23` and `Will load on: 600D` confirm build-time resolution only.
 

@@ -5,7 +5,9 @@
 - Removed PANIC, Rearm and the separate Safe Mode concept from the current SmoothAF controls.
 - Preserved `Enable=OFF` at load, cooperative `Stop`, single-task ownership, movement limits, timeout and conflict gates.
 - Fixed `Diagnostic > Measure` so it is read-only, independent of Enable and computes SAD and Laplacian from the same LiveView sample.
-- Added passive `Vlog Monitor` status, scores, reference/smoothing and `manual/N/A` sampling information; it does not create a periodic task or move the lens.
+- Centralized measurement publication across Measure, Focus Step and Focus Test, including distinct valid, low-confidence and error outcomes and independent SAD/Laplacian payloads.
+- Fixed Debug Logging publication diagnostics and recent-entry navigation; semaphore publication failures are counted instead of being silent.
+- Added passive `Vlog Monitor` status, scores, reference/smoothing, session sample count and `manual/N/A` sampling information; Start waits for a new sample, Stop freezes the session, and the monitor does not create a periodic task or move the lens.
 - Preserved Canon AF Assist as an unavailable, blocked adapter with no lens movement.
 - Docker host validation passed; benchmark output remains `(SIMULATION)`. ARM validation was performed in temporary staging and did not replace the consolidated artifact.
 - No physical v0.5 validation, SD-card installation, push, merge or tag was performed.

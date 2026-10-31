@@ -124,11 +124,27 @@ static volatile int smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
 static volatile int smoothaf_monitor_reference = 0;
 static volatile int smoothaf_monitor_smoothed = 0;
 static volatile int smoothaf_monitor_possible_blur = 0;
+static volatile int smoothaf_monitor_score = 0;
+static volatile int smoothaf_monitor_sad = 0;
+static volatile int smoothaf_monitor_laplacian = 0;
+static volatile int smoothaf_monitor_samples = 0;
+static volatile int smoothaf_log_publish_failures = 0;
+static volatile int smoothaf_last_measure_code = 0;
+#define SMOOTHAF_MEASURE_OK       0
+#define SMOOTHAF_MEASURE_LOW      1
+#define SMOOTHAF_MEASURE_ERROR    2
+#define SMOOTHAF_MEASURE_WAITING  3
 static struct smoothaf_log_entry smoothaf_diag_snapshot[SMOOTHAF_DIAG_CAPACITY];
 static size_t smoothaf_diag_count = 0;
 static size_t smoothaf_diag_page = 0;
+static size_t smoothaf_diag_seen_count = 0;
 
 static struct semaphore *smoothaf_sem = 0;
+
+static void smoothaf_log_event_extended(smoothaf_log_type_t type,
+                                        int32_t value1, int32_t value2,
+                                        int32_t value3, int32_t value4,
+                                        int32_t value5);
 
 static const char *smoothaf_monitor_state_name(void)
 {
@@ -144,22 +160,19 @@ static const char *smoothaf_monitor_state_name(void)
     }
 }
 
-static void smoothaf_monitor_update_from_measurement(void)
+static void smoothaf_monitor_update_from_measurement(int score, int sad,
+                                                       int laplacian)
 {
-    int score;
-
     if (!smoothaf_monitor_enabled)
     {
-        smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
-        return;
-    }
-    if (!smoothaf_last_measure_valid)
-    {
-        smoothaf_monitor_state = SMOOTHAF_MONITOR_PAUSED;
         return;
     }
 
-    score = smoothaf_last_score;
+    smoothaf_monitor_score = score;
+    smoothaf_monitor_sad = sad;
+    smoothaf_monitor_laplacian = laplacian;
+    smoothaf_monitor_samples++;
+
     if (!smoothaf_monitor_reference)
     {
         smoothaf_monitor_reference = score;
@@ -175,6 +188,31 @@ static void smoothaf_monitor_update_from_measurement(void)
     smoothaf_monitor_state = smoothaf_monitor_possible_blur
                            ? SMOOTHAF_MONITOR_POSSIBLE_BLUR
                            : SMOOTHAF_MONITOR_STABLE;
+}
+
+static void smoothaf_publish_measurement(int score, int mean, int sad,
+                                         int laplacian, int valid, int code)
+{
+    smoothaf_last_measure_code = code;
+    smoothaf_last_mean = mean;
+    smoothaf_last_sad = sad;
+    smoothaf_last_laplacian = laplacian;
+    smoothaf_last_measure_valid = valid ? 1 : 0;
+    smoothaf_last_error = valid ? 0 : 1;
+
+    if (!valid)
+    {
+        smoothaf_last_score = -1;
+        smoothaf_log_event_extended(SMOOTHAF_LOG_ERROR, code, mean, sad,
+                                    laplacian, 0);
+        return;
+    }
+
+    smoothaf_last_score = score;
+    smoothaf_last_best = score;
+    smoothaf_monitor_update_from_measurement(score, sad, laplacian);
+    smoothaf_log_event_extended(SMOOTHAF_LOG_MEASURE, score, mean, sad,
+                                laplacian, code);
 }
 
 static const char *smoothaf_status_name(void)
@@ -241,8 +279,13 @@ static void smoothaf_log_event_extended(smoothaf_log_type_t type,
                                         int32_t value3, int32_t value4,
                                         int32_t value5)
 {
-    if (!smoothaf_debug_logging || !smoothaf_lock())
+    if (!smoothaf_debug_logging)
     {
+        return;
+    }
+    if (!smoothaf_lock())
+    {
+        smoothaf_log_publish_failures++;
         return;
     }
 
@@ -406,21 +449,24 @@ static int smoothaf_search_move(void *ctx, int dir)
 static int smoothaf_search_measure(void *ctx, int *score)
 {
     int mean = 0;
+    int sad = 0;
+    int laplacian = 0;
 
     (void)ctx;
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
     msleep(SMOOTHAF_SETTLE_MS);
 
-    if (!smoothaf_measure(score, &mean, 0, 0))
+    if (!smoothaf_measure(score, &mean, &sad, &laplacian))
     {
+        smoothaf_publish_measurement(-1, mean, sad, laplacian, 0,
+                                     SMOOTHAF_MEASURE_ERROR);
         return 0;
     }
 
-    smoothaf_last_mean = mean;
-    smoothaf_last_score = *score;
-    smoothaf_last_measure_valid = 1;
-    smoothaf_monitor_update_from_measurement();
-    smoothaf_log_event(SMOOTHAF_LOG_MEASURE, *score, mean, 0);
+    smoothaf_publish_measurement(*score, mean, sad, laplacian, 1,
+                                 smoothaf_has_confidence(*score, mean)
+                                 ? SMOOTHAF_MEASURE_OK
+                                 : SMOOTHAF_MEASURE_LOW);
     return 1;
 }
 
@@ -490,7 +536,8 @@ static void smoothaf_measure_task(void)
     if (reason)
     {
         smoothaf_last_block = reason;
-        smoothaf_last_error = 1;
+        smoothaf_publish_measurement(-1, 0, 0, 0, 0,
+                                     SMOOTHAF_MEASURE_ERROR);
         smoothaf_status = (reason == SMOOTHAF_BLOCK_CANCELLED ||
                          reason == SMOOTHAF_BLOCK_DISABLED)
                         ? SMOOTHAF_STATUS_CANCELLED
@@ -500,21 +547,16 @@ static void smoothaf_measure_task(void)
 
     if (!smoothaf_measure(&score, &mean, &sad, &laplacian))
     {
-        smoothaf_last_score = -1;
-        smoothaf_last_measure_valid = 0;
-        smoothaf_last_error = 1;
+        smoothaf_publish_measurement(-1, mean, sad, laplacian, 0,
+                                     SMOOTHAF_MEASURE_ERROR);
         smoothaf_status = SMOOTHAF_STATUS_ERROR;
         goto done;
     }
 
-    smoothaf_last_score = score;
-    smoothaf_last_best = score;
-    smoothaf_last_mean = mean;
-    smoothaf_last_sad = sad;
-    smoothaf_last_laplacian = laplacian;
-    smoothaf_last_measure_valid = 1;
-    smoothaf_monitor_update_from_measurement();
-    smoothaf_log_event(SMOOTHAF_LOG_MEASURE, score, mean, 0);
+    smoothaf_publish_measurement(score, mean, sad, laplacian, 1,
+                                 smoothaf_has_confidence(score, mean)
+                                 ? SMOOTHAF_MEASURE_OK
+                                 : SMOOTHAF_MEASURE_LOW);
     smoothaf_status = smoothaf_has_confidence(score, mean)
                     ? SMOOTHAF_STATUS_IDLE
                     : SMOOTHAF_STATUS_NO_CONFIDENCE;
@@ -571,17 +613,26 @@ static void smoothaf_step_task(void)
 
     msleep(SMOOTHAF_SETTLE_MS);
 
-    if (!smoothaf_measure(&score, &mean, 0, 0))
     {
-        smoothaf_last_error = 1;
-        smoothaf_status = SMOOTHAF_STATUS_ERROR;
-        goto done;
-    }
+        int sad = 0;
+        int laplacian = 0;
 
-    smoothaf_last_score = score;
-    smoothaf_last_best = score;
-    smoothaf_last_mean = mean;
-    smoothaf_status = SMOOTHAF_STATUS_IDLE;
+        if (!smoothaf_measure(&score, &mean, &sad, &laplacian))
+        {
+            smoothaf_publish_measurement(-1, mean, sad, laplacian, 0,
+                                         SMOOTHAF_MEASURE_ERROR);
+            smoothaf_status = SMOOTHAF_STATUS_ERROR;
+            goto done;
+        }
+
+        smoothaf_publish_measurement(score, mean, sad, laplacian, 1,
+                                     smoothaf_has_confidence(score, mean)
+                                     ? SMOOTHAF_MEASURE_OK
+                                     : SMOOTHAF_MEASURE_LOW);
+    }
+    smoothaf_status = smoothaf_has_confidence(score, mean)
+                    ? SMOOTHAF_STATUS_IDLE
+                    : SMOOTHAF_STATUS_NO_CONFIDENCE;
 
 done:
     smoothaf_last_time = (int)((uint32_t)get_ms_clock() - start);
@@ -765,17 +816,23 @@ static void smoothaf_search_task(void)
         goto done;
     }
 
-    if (!smoothaf_measure(&score, &mean, 0, 0))
     {
-        smoothaf_last_score = -1;
-        smoothaf_last_error = 1;
-        smoothaf_status = SMOOTHAF_STATUS_ERROR;
-        goto done;
-    }
+        int sad = 0;
+        int laplacian = 0;
 
-    smoothaf_last_score = score;
-    smoothaf_last_best = score;
-    smoothaf_last_mean = mean;
+        if (!smoothaf_measure(&score, &mean, &sad, &laplacian))
+        {
+            smoothaf_publish_measurement(-1, mean, sad, laplacian, 0,
+                                         SMOOTHAF_MEASURE_ERROR);
+            smoothaf_status = SMOOTHAF_STATUS_ERROR;
+            goto done;
+        }
+
+        smoothaf_publish_measurement(score, mean, sad, laplacian, 1,
+                                     smoothaf_has_confidence(score, mean)
+                                     ? SMOOTHAF_MEASURE_OK
+                                     : SMOOTHAF_MEASURE_LOW);
+    }
 
     if (!smoothaf_has_confidence(score, mean))
     {
@@ -972,28 +1029,39 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
     {
         smoothaf_monitor_reference = 0;
         smoothaf_monitor_smoothed = 0;
-        smoothaf_monitor_update_from_measurement();
+        smoothaf_monitor_possible_blur = 0;
+        smoothaf_monitor_score = 0;
+        smoothaf_monitor_sad = 0;
+        smoothaf_monitor_laplacian = 0;
+        smoothaf_monitor_samples = 0;
+        smoothaf_monitor_state = SMOOTHAF_MONITOR_MONITORING;
     }
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_status_update)
 {
     MENU_SET_VALUE("%s", smoothaf_monitor_state_name());
-    MENU_SET_HELP("SAD=%d Lap=%d smooth=%d ref=%d blur=%s interval=manual",
-                  (int)smoothaf_last_sad, (int)smoothaf_last_laplacian,
+    MENU_SET_HELP("SAD=%d Lap=%d smooth=%d ref=%d samples=%d blur=%s interval=manual",
+                  (int)smoothaf_monitor_sad, (int)smoothaf_monitor_laplacian,
                   (int)smoothaf_monitor_smoothed,
                   (int)smoothaf_monitor_reference,
+                  (int)smoothaf_monitor_samples,
                   smoothaf_monitor_possible_blur ? "yes" : "no");
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_sad_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_last_sad);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor_sad);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_laplacian_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_last_laplacian);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor_laplacian);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_samples_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor_samples);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_smoothed_update)
@@ -1070,6 +1138,11 @@ static void smoothaf_diag_refresh(void)
                                                 smoothaf_diag_snapshot,
                                                 SMOOTHAF_DIAG_CAPACITY);
     smoothaf_unlock();
+    if (smoothaf_diag_count > smoothaf_diag_seen_count)
+    {
+        smoothaf_diag_page = smoothaf_diag_count - 1;
+        smoothaf_diag_seen_count = smoothaf_diag_count;
+    }
     if (smoothaf_diag_count == 0)
     {
         smoothaf_diag_page = 0;
@@ -1163,6 +1236,7 @@ static MENU_SELECT_FUNC(smoothaf_diag_clear_select)
         smoothaf_log_clear(&smoothaf_log);
         smoothaf_diag_count = 0;
         smoothaf_diag_page = 0;
+        smoothaf_diag_seen_count = 0;
     }
     smoothaf_unlock();
 }
@@ -1173,7 +1247,7 @@ static struct menu_entry smoothaf_menu[] =
         .name = "Enable",
         .priv = &smoothaf_enabled,
         .max = 1,
-        .help = "Enable explicit measurements and focus commands; never moves automatically.",
+        .help = "Enable lens movement only; Measure and passive Vlog Monitor do not depend on it.",
     },
     {
         .name = "Vlog Monitor",
@@ -1214,6 +1288,11 @@ static struct menu_entry smoothaf_menu[] =
                 .name = "Possible Blur",
                 .update = smoothaf_monitor_blur_update,
                 .help = "Heuristic only; scene changes and lighting can invalidate it.",
+            },
+            {
+                .name = "Sample Count",
+                .update = smoothaf_monitor_samples_update,
+                .help = "Valid manual samples in the current monitoring session.",
             },
             {
                 .name = "Sampling Interval",
@@ -1312,6 +1391,16 @@ static struct menu_entry smoothaf_menu[] =
         .help = "Enable fixed-size diagnostics logging; use Diagnostic Log Page/Entry to review it.",
     },
     {
+        .name = "Log Count",
+        .update = smoothaf_diag_page_update,
+        .help = "Current retained diagnostic records; capacity is 32.",
+    },
+    {
+        .name = "Log Failures",
+        .priv = (void *)&smoothaf_log_publish_failures,
+        .help = "Diagnostic events that could not acquire the state semaphore.",
+    },
+    {
         .name = "Sharpness Metric",
         .priv = &smoothaf_metric,
         .min = SMOOTHAF_METRIC_SAD,
@@ -1367,6 +1456,12 @@ static unsigned int smoothaf_init(void)
     smoothaf_monitor_reference = 0;
     smoothaf_monitor_smoothed = 0;
     smoothaf_monitor_possible_blur = 0;
+    smoothaf_monitor_score = 0;
+    smoothaf_monitor_sad = 0;
+    smoothaf_monitor_laplacian = 0;
+    smoothaf_monitor_samples = 0;
+    smoothaf_log_publish_failures = 0;
+    smoothaf_last_measure_code = SMOOTHAF_MEASURE_WAITING;
     smoothaf_last_best = 0;
     smoothaf_last_mean = 0;
     smoothaf_last_time = 0;
@@ -1375,6 +1470,7 @@ static unsigned int smoothaf_init(void)
     smoothaf_last_reversals = 0;
     smoothaf_diag_count = 0;
     smoothaf_diag_page = 0;
+    smoothaf_diag_seen_count = 0;
     smoothaf_log_init(&smoothaf_log);
     smoothaf_af_assist_init(&smoothaf_af_assist);
 

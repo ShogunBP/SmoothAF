@@ -21,7 +21,7 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 29
+    assert menu.count(".name =") == 32
     assert '"Vlog Monitor"' in menu
     assert '"Start/Stop Monitoring"' in menu
     assert '"Monitor Status"' in menu

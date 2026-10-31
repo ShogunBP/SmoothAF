@@ -86,7 +86,7 @@ The required state machine would include `CANON_AF_IDLE`, `REQUESTED`, `FOCUSING
 
 ## SmoothAF v0.5 passive Vlog Monitor
 
-The v0.5 monitor is a read-only viewer over manually produced measurements. It keeps SAD and Laplacian values separately, displays a conservative smoothed/reference view and reports `manual/N/A` rather than claiming a periodic sampling interval. It does not create a task, read VRAM from a menu callback, call `lens_focus()` or invoke Canon AF. Missing or invalid samples pause or remain uncertain. These states are heuristics and require physical validation; they do not prove focus quality.
+The v0.5 monitor is a read-only viewer over manually produced measurements. A centralized publication path keeps SAD and Laplacian values separate, rejects invalid samples as valid scores, and supplies only new valid samples to an active monitoring session. Start resets the session reference, smoothing and sample count; Stop freezes the monitor-owned values. It displays a conservative smoothed/reference view and reports `manual/N/A` rather than claiming a periodic sampling interval. It does not create a task, read VRAM from a menu callback, call `lens_focus()` or invoke Canon AF. Missing or invalid samples remain outside the valid sample count. These states are heuristics and require physical validation; they do not prove focus quality.
 
 An asynchronous periodic monitor remains a future roadmap item. It must first be evaluated for DIGIC IV cost, timing, invalid-frame behavior, scene changes and strict exclusion from automatic lens movement.
 
