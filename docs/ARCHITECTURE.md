@@ -10,79 +10,40 @@ See [Development](DEVELOPMENT.md) for integration and build inputs, [Research](R
 
 - `Enable` starts at `0`; loading creates no task and emits no lens command.
 - Activation is manual and each search is bounded.
-- `Enable` starts at `0` and is explicit movement armament; read-only Measure does not require it.
-- `Stop` requests cooperative cancellation; a synchronous lens command already in flight may finish.
+- Read-only Measure and the asynchronous Vlog Monitor never require movement enablement.
+- Stop requests cooperative cancellation; a synchronous lens command already in flight may finish.
 - A task is reserved before `task_create()`; task-creation failure releases the reservation.
-- `smoothaf_sem` protects state transitions and diagnostic snapshots. The viewer does not create tasks or move the lens.
+- `smoothaf_sem` protects control state and diagnostic snapshots. VRAM reads and sleeps occur outside the semaphore.
 - Movie Mode, recording, MF, Continuous AF, Follow Focus, Rack Focus and Focus Stacking remain blocked.
 - Timeout and cancellation are checked between synchronous lens commands. A `lens_focus()` command already in flight may finish.
 - Do not unload, reload or replace the module while a task is active. The Legacy loader does not provide a general task join/kill guarantee.
 
-There is no global arbitration across every Magic Lantern module. SmoothAF applies the public conflict gates available to it and maintains one SmoothAF task at a time.
+There is no global arbitration across every Magic Lantern module. SmoothAF maintains one task at a time; manual operations take priority over the next monitor sample.
 
 ## Focus controllers
 
-### Legacy HC
+Legacy HC remains the default bounded controller and preserves `lens_focus(direction, smoothaf_step, 1, 0)`. Adaptive HC remains experimental. Normal AF remains bounded single-shot. None of these changes alter the existing movement limits or introduce continuous AF.
 
-Legacy HC is the default and fallback controller. It uses bounded hill-climbing with the existing physical call:
+## Asynchronous passive Vlog Monitor
 
-```c
-lens_focus(direction, smoothaf_step, 1, 0)
-```
+The v0.6 monitor uses the existing shared SmoothAF task with `SMOOTHAF_TASK_MONITOR`; it does not create a task per sample. Start is explicit and the monitor is disabled during module load. The first sample is immediate, then the next deadline is computed from the previous completion time. Slow samples increment overrun/skipped metrics and never create catch-up work.
 
-The controller uses a central 64×64 UYVY/YUV422 region and integer-only SAD or Laplacian scores. UYVY luminance is read at `row[x * 2 + 1]`; the runtime VRAM pitch is respected.
+The monitor reads the same central 64x64 UYVY/YUV422 ROI through `smoothaf_measure()`. SAD, Laplacian and mean luminance come from the same frame. The monitor never calls `lens_focus()`, half-shutter, Canon AF, exposure controls or VRAM writes. Menu callbacks only change flags/configuration or display snapshots.
 
-### Adaptive HC
+States include `IDLE`, `MONITORING`, `STABLE`, `POSSIBLE_BLUR`, `UNCERTAIN`, `PAUSED` and `ERROR`. Blur requires persistent loss with separate entry/recovery thresholds. Low-confidence, invalid, low-texture and lighting-change samples do not become score zero and do not lower the sharpness reference. The reference adapts only conservatively while stable. `STABLE` is not a claim of perfect focus.
 
-Adaptive HC is selectable experimental behavior. It retains explicit command and reversal limits while adapting its policy to the configured step size. Simulated travel is not a physical performance claim.
+Sampling intervals are 1000 ms, 500 ms (default), 250 ms and 100 ms experimental. Movie and recording gates pause acquisition without backlog. Stop is cooperative and freezes the session; unload with a still-running task remains unsafe under Legacy.
 
-### Normal AF
+## Diagnostics
 
-Normal AF is a bounded, single-shot controller with two phases:
+Debug Logging remains off by default and uses the fixed 32-entry circular history. Manual completed measurements preserve the v0.5 logging contract. Automatic samples update in-memory metrics only; the monitor logs only start/stop and important state transitions, not every sample. Snapshots and formatting occur outside extended hardware work, and no continuous card writes are performed.
 
-- Acquisition: SAD-oriented coarse search, at most 8 commands.
-- Refinement: Laplacian-oriented refinement, at most 8 commands.
-- Total: at most 16 commands and 4 reversals.
-
-The controller is not continuous AF and does not extend the `lens_focus()` API or physical command limits. Large initial defocus can exceed its bounded reach.
-
-## Lens API boundary
-
-The Legacy declaration is:
-
-```c
-int lens_focus(int num_steps, int stepsize, int wait, int extra_delay);
-```
-
-With `wait=1`, SmoothAF sends one synchronous command, waits for the Legacy completion path and records the return value. A return of success means the Legacy error flag was not set; it does not independently prove physical movement or acquired focus. See [Research](RESEARCH.md) for the separate Canon AF investigation.
+`Diagnostic > Measure` remains a single read-only LiveView sample and can run with `Enable=OFF`. The diagnostic viewer remains read-only with Previous/Next navigation and Clear History only while no SmoothAF task is active.
 
 ## Canon AF Assist boundary
 
-The v0.4 PoC reserves a read-only `Canon AF Assist` menu but uses an unavailable adapter. It does not call `lens_autofocus()`, Lua internals, `PTP_AF_START`, `lens_setup_af()`, `module_send_keypress()` or any unverified Canon symbol. The adapter starts `UNAVAILABLE`, returns `No safe Canon C API`, creates no task and cannot move the lens. A future native implementation requires a verified C declaration, implementation/export, ABI, `600D_102.SYM` resolution, request/result correlation, cleanup, cancellation semantics and controlled hardware validation.
+Canon AF Assist remains unavailable and blocked. SmoothAF does not call `lens_autofocus()`, Lua internals, `PTP_AF_START`, `lens_setup_af()`, `module_send_keypress()` or an unverified Canon symbol. No v0.6 feature implements automatic autofocus.
 
-## Diagnostics and passive Vlog Monitor
+## State ownership and unload limits
 
-Debug Logging is off by default and uses a fixed 32-entry in-memory circular history. Every published measurement goes through one bounded publication path, preserving SAD, Laplacian, mean luminance and a result code; logging ON records one MEASURE event per valid or invalid completed sample, while OFF is a no-op. Semaphore acquisition failures increment a diagnostic counter instead of disappearing silently. Records include mode, phase, score/best score, direction, movement, position, command/reversal counts, elapsed time, `lens_focus()` return value and task-end reason. The on-camera viewer supports read-only Previous/Next navigation, follows newly appended records until the user navigates, and Clear History only when no task is active. It performs no continuous card writes and no lens movement.
-
-`Diagnostic > Measure` is a single read-only LiveView sample. It does not call `lens_focus()` and can run with `Enable=OFF`; it publishes SAD and Laplacian scores from the same ROI sample, plus mean luminance, confidence and error status.
-
-`Vlog Monitor` is passive in v0.5. Start resets reference, smoothing and the session sample count, then waits for a new valid measurement; it never consumes the previous global measurement as the first sample. Stop freezes the monitor-owned SAD, Laplacian, smoothed/reference values and sample count until a new session. It has no periodic task, no automatic VRAM sampling and no lens movement. `Sampling Interval` is `manual/N/A`. Its heuristic states do not establish perfect focus, and invalid or missing samples pause or remain uncertain rather than proving blur.
-
-## Legacy FastAF baseline and migration
-
-FastAF 0.1 is historical evidence, not evidence that the renamed SmoothAF module is physically validated. The migration renamed the module and symbols while preserving the bounded focus logic, task limits and the `MENU_EOL` registration correction. PANIC, Rearm and the separate Safe Mode concept are not part of the current v0.5 controls.
-
-The historical review identified and addressed, in that baseline work:
-
-- alignment with the Legacy `Makefile.modules` convention;
-- reservation before task creation and task-create failure handling;
-- cancellation checks between commands and after measurement;
-- explicit blocks for focus conflicts;
-- UYVY indexing as `row[x * 2 + 1]`;
-- bounded commands, synchronous `lens_focus(wait=1)` and explicit unload restrictions.
-
-Historical review findings are not claims that every old artifact has identical provenance. The preserved FastAF records and their differing hashes are listed in [Testing](TESTING.md).
-
-## State ownership rules
-
-Only one SmoothAF task may own movement. Measurement and controller state are bounded and deterministic in host tests. Stop prevents future SmoothAF commands but cannot retroactively cancel a synchronous Legacy operation already sent. Any future Canon AF integration must add a separate serialized state machine and mutual exclusion with `lens_focus()`; it must not bypass these rules.
+Only one SmoothAF task may own runtime work. Stop prevents future SmoothAF commands and monitor samples but cannot retroactively cancel a synchronous Legacy operation already sent. The Legacy loader may ignore `deinit()` return values and offers no general join/kill guarantee; unloading while a task is active remains unsafe.

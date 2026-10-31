@@ -19,9 +19,25 @@ Run the repository checks from PowerShell:
 .\build-smoothaf.ps1 -Release
 ```
 
-The v0.5 test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, timeout, Enable admission, task reservation, simulated lens/measurement failures, passive monitor/menu regression and deterministic benchmark invariants. The runtime publication path now carries valid, low-confidence and invalid measurement outcomes with independent SAD/Laplacian payloads, while the fixed viewer follows newly appended records. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
+The v0.6 test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, timeout, task reservation, simulated lens/measurement failures, asynchronous monitor scheduling, intervals, wrap-around, hysteresis, lighting uncertainty, passive menu regression and deterministic benchmark invariants. Monitor tests use a fake logical clock and no real camera task or VRAM. Automatic samples update fixed in-memory metrics and do not create one diagnostic record per sample. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
 
 The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output `DEP=23` and `Will load on: 600D` confirm build-time resolution only.
+
+## SmoothAF v0.6 validation record
+
+- Branch: `feature/vlog-monitor-async-v0.6`.
+- Docker host tests: passed (`All SmoothAF core tests passed`).
+- Monitor tests: passed (`SmoothAF monitor tests passed`).
+- Comparative benchmark: passed; scenarios reported `invariants=PASS` and output remained `(SIMULATION)`.
+- Menu regression: passed (`SmoothAF menu regression tests passed`).
+- ARM build: passed in a temporary staging copy of the Legacy tree using `600D_102.SYM`; the original Legacy tree was not modified.
+- Build output: `Will load on: 600D`, `DEP=23`.
+- Experimental module: `artifacts/v0.6/smoothaf.mo`, 24200 bytes, SHA-256 `9909e7c650530765bd94ac424c9d986d10f615ff3918eade70e32ee943a78e01`.
+- Format: `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)`.
+- No physical v0.6 validation or SD-card installation was performed.
+- The Legacy loader has no general task join/kill guarantee. A task that remains active after deinit's bounded wait is an unload hazard; do not unload, reload or replace the module while a task is active.
+
+The v0.6 result proves compilation and dependency resolution for the supplied Legacy/symbol inputs only. It does not prove runtime ABI compatibility, physical movement, monitor timing on camera, or focus-quality classification.
 
 ## SmoothAF v0.5 validation record
 
