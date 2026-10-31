@@ -23,6 +23,8 @@ This repository is an independently organized source distribution designed to in
 - Asynchronous passive `Vlog Monitor` using one shared SmoothAF task.
 - Sampling intervals of 1000 ms, 500 ms (default), 250 ms and 100 ms experimental.
 - No backlog: each sample schedules the next one from completion time.
+- `Vlog Monitor > Monitor Performance` exposes task state, configured/actual start-to-start interval, duration last/average/max, attempts, valid/invalid, blocked/skipped, overruns and last error.
+- Actual interval is start-to-start; the first sample has no interval. Duration covers an executed measurement, including invalid results. Blocked and skipped cycles are not counted once per polling sleep.
 - Hysteresis, persistent blur detection, low-confidence handling and lighting-change uncertainty.
 - Fixed 32-record Debug Logging viewer with read-only navigation and task-safe Clear History.
 - Docker host and ARM build validation.

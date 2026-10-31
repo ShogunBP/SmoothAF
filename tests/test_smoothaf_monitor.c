@@ -44,6 +44,17 @@ int main(void)
     smoothaf_monitor_accept(&m, &s, 110);
     CHECK(m.have_reference && m.reference == 1000, "first sample initializes reference");
     CHECK(m.metrics.valid == 1, "valid sample counted");
+    CHECK(m.metrics.duration_last == 12 && m.metrics.duration_max == 12,
+          "sample duration tracked");
+    smoothaf_monitor_record_start(&m, 120);
+    smoothaf_monitor_record_start(&m, 620);
+    CHECK(m.metrics.have_interval && m.metrics.actual_interval_ms == 500,
+          "actual interval uses start-to-start");
+    { struct smoothaf_monitor_snapshot snapshot;
+      smoothaf_monitor_snapshot(&m, &snapshot);
+      CHECK(snapshot.attempts == m.metrics.attempts &&
+            snapshot.duration_average == 12,
+            "performance snapshot is consistent"); }
 
     s = sample(100, 120, 1, 1);
     smoothaf_monitor_accept(&m, &s, 600);

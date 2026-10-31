@@ -28,7 +28,7 @@ Legacy HC remains the default bounded controller and preserves `lens_focus(direc
 
 The v0.6 monitor uses the existing shared SmoothAF task with `SMOOTHAF_TASK_MONITOR`; it does not create a task per sample. Start is explicit and the monitor is disabled during module load. The first sample is immediate, then the next deadline is computed from the previous completion time. Slow samples increment overrun/skipped metrics and never create catch-up work.
 
-The monitor reads the same central 64x64 UYVY/YUV422 ROI through `smoothaf_measure()`. SAD, Laplacian and mean luminance come from the same frame. The monitor never calls `lens_focus()`, half-shutter, Canon AF, exposure controls or VRAM writes. Menu callbacks only change flags/configuration or display snapshots.
+The monitor reads the same central 64x64 UYVY/YUV422 ROI through `smoothaf_measure()`. SAD, Laplacian and mean luminance come from the same frame. The monitor exposes a lightweight performance snapshot with task state, configured and actual start-to-start interval, attempt/result counters, duration and overrun data. Menu callbacks only format this snapshot. The monitor never calls `lens_focus()`, half-shutter, Canon AF, exposure controls or VRAM writes. Menu callbacks only change flags/configuration or display snapshots.
 
 States include `IDLE`, `MONITORING`, `STABLE`, `POSSIBLE_BLUR`, `UNCERTAIN`, `PAUSED` and `ERROR`. Blur requires persistent loss with separate entry/recovery thresholds. Low-confidence, invalid, low-texture and lighting-change samples do not become score zero and do not lower the sharpness reference. The reference adapts only conservatively while stable. `STABLE` is not a claim of perfect focus.
 

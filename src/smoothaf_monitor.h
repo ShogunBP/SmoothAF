@@ -50,8 +50,35 @@ struct smoothaf_monitor_metrics
     uint32_t duration_total;
     uint32_t duration_last;
     uint32_t duration_max;
+    uint32_t duration_count;
+    uint32_t actual_interval_ms;
+    uint32_t previous_start_ms;
+    uint32_t last_start_ms;
+    uint32_t last_error;
+    int have_start;
+    int have_interval;
     uint32_t last_sample_ms;
     uint32_t next_due_ms;
+};
+
+struct smoothaf_monitor_snapshot
+{
+    int state;
+    int enabled;
+    int interval_index;
+    uint32_t interval_ms;
+    uint32_t actual_interval_ms;
+    uint32_t duration_last;
+    uint32_t duration_average;
+    uint32_t duration_max;
+    uint32_t attempts;
+    uint32_t valid;
+    uint32_t invalid;
+    uint32_t low_confidence;
+    uint32_t blocked;
+    uint32_t skipped;
+    uint32_t overruns;
+    uint32_t last_error;
 };
 
 struct smoothaf_monitor
@@ -141,6 +168,13 @@ static inline void smoothaf_monitor_init(struct smoothaf_monitor *m, int metric,
     m->metrics.duration_total = 0;
     m->metrics.duration_last = 0;
     m->metrics.duration_max = 0;
+    m->metrics.duration_count = 0;
+    m->metrics.actual_interval_ms = 0;
+    m->metrics.previous_start_ms = 0;
+    m->metrics.last_start_ms = 0;
+    m->metrics.last_error = 0;
+    m->metrics.have_start = 0;
+    m->metrics.have_interval = 0;
     m->metrics.last_sample_ms = 0;
     m->metrics.next_due_ms = 0;
 }
@@ -183,6 +217,67 @@ static inline void smoothaf_monitor_record_skip(struct smoothaf_monitor *m)
     if (m->metrics.skipped != UINT32_MAX) m->metrics.skipped++;
 }
 
+static inline void smoothaf_monitor_record_error(struct smoothaf_monitor *m,
+                                                 uint32_t error)
+{
+    m->metrics.last_error = error;
+}
+
+static inline void smoothaf_monitor_record_start(struct smoothaf_monitor *m,
+                                                 uint32_t started_at)
+{
+    if (m->metrics.have_start)
+    {
+        m->metrics.actual_interval_ms = started_at - m->metrics.last_start_ms;
+        m->metrics.have_interval = 1;
+    }
+    m->metrics.previous_start_ms = m->metrics.last_start_ms;
+    m->metrics.last_start_ms = started_at;
+    m->metrics.have_start = 1;
+}
+
+static inline void smoothaf_monitor_record_duration(struct smoothaf_monitor *m,
+                                                    uint32_t duration_ms)
+{
+    m->metrics.duration_last = duration_ms;
+    if (m->metrics.duration_max < duration_ms)
+        m->metrics.duration_max = duration_ms;
+    if (m->metrics.duration_total <= UINT32_MAX - duration_ms)
+        m->metrics.duration_total += duration_ms;
+    else
+        m->metrics.duration_total = UINT32_MAX;
+    if (m->metrics.duration_count != UINT32_MAX)
+        m->metrics.duration_count++;
+}
+
+static inline uint32_t smoothaf_monitor_duration_average(
+    const struct smoothaf_monitor *m)
+{
+    if (!m->metrics.duration_count) return 0;
+    return m->metrics.duration_total / m->metrics.duration_count;
+}
+
+static inline void smoothaf_monitor_snapshot(
+    const struct smoothaf_monitor *m, struct smoothaf_monitor_snapshot *s)
+{
+    s->state = m->state;
+    s->enabled = m->enabled;
+    s->interval_index = m->interval_index;
+    s->interval_ms = smoothaf_monitor_interval_ms(m->interval_index);
+    s->actual_interval_ms = m->metrics.actual_interval_ms;
+    s->duration_last = m->metrics.duration_last;
+    s->duration_average = smoothaf_monitor_duration_average(m);
+    s->duration_max = m->metrics.duration_max;
+    s->attempts = m->metrics.attempts;
+    s->valid = m->metrics.valid;
+    s->invalid = m->metrics.invalid;
+    s->low_confidence = m->metrics.low_confidence;
+    s->blocked = m->metrics.blocked;
+    s->skipped = m->metrics.skipped;
+    s->overruns = m->metrics.overruns;
+    s->last_error = m->metrics.last_error;
+}
+
 static inline void smoothaf_monitor_schedule_after(struct smoothaf_monitor *m,
                                                    uint32_t completed_at)
 {
@@ -196,7 +291,7 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
 {
     int lighting;
     int low;
-    if (m->metrics.attempts != UINT32_MAX) m->metrics.attempts++;
+    smoothaf_monitor_record_duration(m, s->duration_ms);
     if (!s->valid)
     {
         if (m->metrics.invalid != UINT32_MAX) m->metrics.invalid++;
@@ -209,10 +304,6 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
     m->score = s->score;
     m->sad = s->sad;
     m->laplacian = s->laplacian;
-    m->metrics.duration_last = s->duration_ms;
-    m->metrics.duration_total += s->duration_ms;
-    if (s->duration_ms > m->metrics.duration_max)
-        m->metrics.duration_max = s->duration_ms;
     m->metrics.last_sample_ms = now;
     low = !s->confident;
     if (low && m->metrics.low_confidence != UINT32_MAX)

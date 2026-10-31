@@ -543,6 +543,9 @@ static void smoothaf_monitor_task(void)
             if (smoothaf_measure_block_reason())
             {
                 smoothaf_monitor_record_blocked(&smoothaf_monitor);
+                smoothaf_monitor_record_skip(&smoothaf_monitor);
+                smoothaf_monitor_schedule_after(&smoothaf_monitor,
+                                                (uint32_t)get_ms_clock());
                 smoothaf_monitor_transition(&smoothaf_monitor,
                                             SMOOTHAF_MONITOR_PAUSED);
                 smoothaf_monitor_log_transitions();
@@ -551,6 +554,9 @@ static void smoothaf_monitor_task(void)
             }
 
             start = (uint32_t)get_ms_clock();
+            smoothaf_monitor_record_start(&smoothaf_monitor, start);
+            if (smoothaf_monitor.metrics.attempts != UINT32_MAX)
+                smoothaf_monitor.metrics.attempts++;
             valid = smoothaf_measure(&score, &mean, &sad, &laplacian);
             completed = (uint32_t)get_ms_clock();
             sample.score = score;
@@ -563,6 +569,10 @@ static void smoothaf_monitor_task(void)
                           ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN
                           : SMOOTHAF_MONITOR_METRIC_SAD;
             sample.duration_ms = completed - start;
+            if (sample.duration_ms > smoothaf_monitor_interval_ms(
+                    smoothaf_monitor.interval_index) &&
+                smoothaf_monitor.metrics.overruns != UINT32_MAX)
+                smoothaf_monitor.metrics.overruns++;
             smoothaf_monitor_accept(&smoothaf_monitor, &sample, completed);
             smoothaf_monitor_log_transitions();
         }
@@ -1111,6 +1121,37 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
     }
 }
 
+static const char *smoothaf_monitor_task_state_name(void)
+{
+    if (smoothaf_task_running)
+        return smoothaf_task_stop_requested ? "STOPPING" : "RUNNING";
+    return smoothaf_task_exited ? "EXITED" : "STOPPED";
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_performance_update)
+{
+    struct smoothaf_monitor_snapshot snapshot;
+    smoothaf_monitor_snapshot(&smoothaf_monitor, &snapshot);
+    MENU_SET_VALUE("%s", smoothaf_monitor_task_state_name());
+    MENU_SET_HELP("cfg=%ums actual=%ums%s last=%ums avg=%ums max=%ums "
+                  "attempts=%u valid=%u invalid=%u lowconf=%u blocked=%u "
+                  "skipped=%u overruns=%u error=%u",
+                  (unsigned)snapshot.interval_ms,
+                  (unsigned)snapshot.actual_interval_ms,
+                  snapshot.actual_interval_ms ? "" : " (N/A)",
+                  (unsigned)snapshot.duration_last,
+                  (unsigned)snapshot.duration_average,
+                  (unsigned)snapshot.duration_max,
+                  (unsigned)snapshot.attempts,
+                  (unsigned)snapshot.valid,
+                  (unsigned)snapshot.invalid,
+                  (unsigned)snapshot.low_confidence,
+                  (unsigned)snapshot.blocked,
+                  (unsigned)snapshot.skipped,
+                  (unsigned)snapshot.overruns,
+                  (unsigned)snapshot.last_error);
+}
+
 static MENU_UPDATE_FUNC(smoothaf_monitor_status_update)
 {
     MENU_SET_VALUE("%s", smoothaf_monitor_state_name());
@@ -1332,12 +1373,17 @@ static struct menu_entry smoothaf_menu[] =
             {
                 .name = "Start/Stop Monitoring",
                 .select = smoothaf_monitor_toggle_select,
-                .help = "Toggle passive viewing only; no periodic task or lens movement.",
+                .help = "Toggle periodic read-only monitoring; no automatic lens movement.",
             },
             {
                 .name = "Monitor Status",
                 .update = smoothaf_monitor_status_update,
-                .help = "Passive state from existing measurements; no automatic sampling.",
+                .help = "Periodic read-only sharpness monitoring; no automatic lens movement.",
+            },
+            {
+                .name = "Monitor Performance",
+                .update = smoothaf_monitor_performance_update,
+                .help = "Task state and read-only sampling performance snapshot.",
             },
             {
                 .name = "SAD Score",
@@ -1367,7 +1413,7 @@ static struct menu_entry smoothaf_menu[] =
             {
                 .name = "Sample Count",
                 .update = smoothaf_monitor_samples_update,
-                .help = "Valid manual samples in the current monitoring session.",
+                .help = "Automatic monitor sampling attempts in the current session.",
             },
             {
                 .name = "Sampling Interval",
