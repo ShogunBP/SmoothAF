@@ -32,7 +32,7 @@ The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM`
 - Menu regression: passed (`SmoothAF menu regression tests passed`).
 - ARM build: passed in a temporary staging copy of the Legacy tree using `600D_102.SYM`; the original Legacy tree was not modified.
 - Build output: `Will load on: 600D`, `DEP=23`.
-- Experimental module: `artifacts/v0.6/smoothaf.mo`, 24200 bytes, SHA-256 `9909e7c650530765bd94ac424c9d986d10f615ff3918eade70e32ee943a78e01`.
+- Experimental module: `artifacts/v0.6/smoothaf.mo`, 24352 bytes, SHA-256 `7d55bb2d98f7d73bf2c8620623519f84afe85a1eb3ec23467ddf30e98254ddce`.
 - Format: `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)`.
 - No physical v0.6 validation or SD-card installation was performed.
 - The Legacy loader has no general task join/kill guarantee. A task that remains active after deinit's bounded wait is an unload hazard; do not unload, reload or replace the module while a task is active.

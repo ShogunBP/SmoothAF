@@ -9,7 +9,7 @@
 - Automatic samples do not create one log record each; only monitor session and important transitions use the fixed 32-entry history.
 - Preserved manual Measure, Legacy HC, Adaptive HC, Normal AF, Movie/recording gates and all lens movement boundaries.
 - The monitor never calls `lens_focus()`, Canon AF, half-shutter, exposure controls or VRAM writes.
-- ARM staging build passed with `Will load on: 600D`, `DEP=23`, ELF ARM EABI5, 24200 bytes and SHA-256 `9909e7c650530765bd94ac424c9d986d10f615ff3918eade70e32ee943a78e01`.
+- ARM staging build passed with `Will load on: 600D`, `DEP=23`, ELF ARM EABI5, 24352 bytes and SHA-256 `7d55bb2d98f7d73bf2c8620623519f84afe85a1eb3ec23467ddf30e98254ddce`.
 - Host core, monitor, benchmark and menu regression checks passed.
 - No automatic autofocus, physical v0.6 validation, SD-card installation, push, merge or tag was performed.
 
