@@ -25,9 +25,9 @@ The build and host tests do not replace controlled hardware validation. Do not c
 
 The `feature/normal-af-v0.3` branch adds a bounded, single-shot Normal AF acquisition/refinement controller while preserving Legacy HC and Adaptive HC. The current ARM build produced:
 
-- Size: 15820 bytes.
-- SHA-256: `a62ffc176c10704113475a3adbc730791abd9ec134fa32ea9b2df386f51af06a`.
+- Size: 16460 bytes.
+- SHA-256: `b7639ab3afca22ddc55b39e6b0f949363c16fd29aa62f2c1bd4d41a89ba1f8cb`.
 - Dependency check: 23 dependencies; `Will load on: 600D`.
-- Release: `artifacts/releases/smoothaf-a62ffc176c10704113475a3adbc730791abd9ec134fa32ea9b2df386f51af06a`.
+- Release: `artifacts/releases/smoothaf-b7639ab3afca22ddc55b39e6b0f949363c16fd29aa62f2c1bd4d41a89ba1f8cb`.
 
-The build includes the fixed 32-record Debug Logging viewer with read-only page navigation and task-safe Clear History. The comparative benchmark executes Legacy HC, Adaptive HC and Normal AF over the same deterministic scenarios and labels all measurements `(SIMULATION)`. Normal AF has not been physically validated, and no continuous AF or recording-time movement is enabled.
+The build includes the fixed 32-record Debug Logging viewer with read-only page navigation, decoded event payloads and task-safe Clear History. Controller and task-end records preserve position, direction, scores, commands and reversals. The comparative benchmark executes Legacy HC, Adaptive HC and Normal AF at simulated Step Sizes 1, 2 and 3 over the same deterministic scenarios and labels all measurements `(SIMULATION)`. Normal AF has not been physically validated, and no continuous AF or recording-time movement is enabled.

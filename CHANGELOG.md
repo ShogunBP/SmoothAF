@@ -1,5 +1,22 @@
 # Changelog
 
+## SmoothAF v0.3.0 — Experimental
+
+- Added bounded single-shot `Normal AF` with separate Acquisition and Refinement phases.
+- Preserved Legacy HC as the default/fallback and Adaptive HC as an experimental mode.
+- Added a fixed 32-record read-only Debug Logging viewer with Previous/Next navigation and task-safe Clear History.
+- Extended controller diagnostics with explicit movement, measurement, position and task-result payloads.
+- Preserved the physical call `lens_focus(direction, smoothaf_step, 1, 0)` and existing command/reversal limits.
+- Extended the deterministic Legacy/Adaptive/Normal benchmark; all benchmark output remains `(SIMULATION)`.
+- Host tests, menu regression and ARM build validation remain local checks only. Normal AF has not been physically validated.
+- No push, merge, new tag, firmware update or SD-card installation was performed for v0.3.
+
+### Known v0.3 limitations
+
+- Large focus-distance changes may still exceed the bounded search reach.
+- Adaptive HC simulated travel depends on Step Size; this does not establish physical superiority.
+- Continuous AF and recording-time movement remain disabled.
+
 ## SmoothAF v0.2.0 — Experimental
 
 - Preserved Legacy HC as the default bounded focus controller.

@@ -29,6 +29,7 @@ struct bench_scenario
     int timeout_after_moves;
     int fail_move_at;
     int fail_measure_at;
+    int step_size;
 };
 
 struct sim_state
@@ -206,7 +207,8 @@ static enum smoothaf_result adaptive_result(enum smoothaf_adaptive_action action
 }
 
 static enum smoothaf_result run_normal_once(
-        const struct bench_scenario *scenario, struct bench_result *out)
+        const struct bench_scenario *scenario, int physical_step,
+        struct bench_result *out)
 {
     struct smoothaf_normal_af af;
     struct sim_state sim;
@@ -218,7 +220,7 @@ static enum smoothaf_result run_normal_once(
 
     sim_reset(&sim, scenario);
     sim.ticks += SIM_CONTROL_TICKS;
-    smoothaf_normal_af_init(&af, scenario->initial_score, 1, 1);
+    smoothaf_normal_af_init(&af, scenario->initial_score, 1, physical_step);
     action = smoothaf_normal_af_begin(&af);
 
     for (;;)
@@ -290,7 +292,8 @@ static enum smoothaf_result run_normal_once(
 }
 
 static enum smoothaf_result run_adaptive_once(
-        const struct bench_scenario *scenario, struct bench_result *out)
+        const struct bench_scenario *scenario, int physical_step,
+        struct bench_result *out)
 {
     struct smoothaf_adaptive_hc hc;
     struct smoothaf_adaptive_policy policy;
@@ -304,6 +307,9 @@ static enum smoothaf_result run_adaptive_once(
     sim_reset(&sim, scenario);
     sim.ticks += SIM_CONTROL_TICKS;
     smoothaf_adaptive_policy_default(&policy);
+    policy.min_step = physical_step;
+    policy.initial_step = physical_step;
+    policy.max_step = physical_step;
     smoothaf_adaptive_hc_init(&hc, &policy, scenario->initial_score, 1);
     action = smoothaf_adaptive_hc_begin(&hc);
 
@@ -433,41 +439,45 @@ static void benchmark_scenario(const struct bench_scenario *scenario)
     struct bench_result adaptive;
     struct bench_result normal;
     int i;
+    int step;
     int invariant_failures = 0;
 
-    /* Repetition confirms deterministic output; the printed row is one run. */
-    for (i = 0; i < BENCH_REPETITIONS; i++)
+    for (step = 1; step <= 3; step++)
     {
-        struct bench_result legacy_i;
-        struct bench_result adaptive_i;
-        struct bench_result normal_i;
-        run_legacy_once(scenario, &legacy_i);
-        run_adaptive_once(scenario, &adaptive_i);
-        run_normal_once(scenario, &normal_i);
-        if (i == 0)
+        /* Repetition confirms deterministic output; the printed row is one run. */
+        for (i = 0; i < BENCH_REPETITIONS; i++)
         {
-            legacy = legacy_i;
-            adaptive = adaptive_i;
-            normal = normal_i;
+            struct bench_result legacy_i;
+            struct bench_result adaptive_i;
+            struct bench_result normal_i;
+            run_legacy_once(scenario, &legacy_i);
+            run_adaptive_once(scenario, step, &adaptive_i);
+            run_normal_once(scenario, step, &normal_i);
+            if (i == 0)
+            {
+                legacy = legacy_i;
+                adaptive = adaptive_i;
+                normal = normal_i;
+            }
+            else if (memcmp(&legacy, &legacy_i, sizeof(legacy)) != 0 ||
+                    memcmp(&adaptive, &adaptive_i, sizeof(adaptive)) != 0 ||
+                    memcmp(&normal, &normal_i, sizeof(normal)) != 0)
+            {
+                invariant_failures++;
+            }
         }
-        else if (memcmp(&legacy, &legacy_i, sizeof(legacy)) != 0 ||
-                memcmp(&adaptive, &adaptive_i, sizeof(adaptive)) != 0 ||
-                memcmp(&normal, &normal_i, sizeof(normal)) != 0)
-        {
+
+        if (!invariant_ok(&legacy, 0) || !invariant_ok(&adaptive, 1) ||
+            !invariant_ok(&normal, 2))
             invariant_failures++;
-        }
+
+        printf("Scenario: %s (Step Size=%d, same deterministic input, repetitions=%d)\n",
+               scenario->name, step, BENCH_REPETITIONS);
+        print_result("Legacy", &legacy);
+        print_result("Adaptive", &adaptive);
+        print_result("Normal", &normal);
+        printf("  invariants=%s\n\n", invariant_failures ? "FAIL" : "PASS");
     }
-
-    if (!invariant_ok(&legacy, 0) || !invariant_ok(&adaptive, 1) ||
-        !invariant_ok(&normal, 2))
-        invariant_failures++;
-
-    printf("Scenario: %s (same deterministic input, repetitions=%d)\n",
-           scenario->name, BENCH_REPETITIONS);
-    print_result("Legacy", &legacy);
-    print_result("Adaptive", &adaptive);
-    print_result("Normal", &normal);
-    printf("  invariants=%s\n\n", invariant_failures ? "FAIL" : "PASS");
     if (invariant_failures)
         printf("BENCHMARK INVARIANT FAILURE\n");
 }

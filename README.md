@@ -1,6 +1,6 @@
 # SmoothAF
 
-**SmoothAF v0.2.0 — Experimental**
+**SmoothAF v0.3.0 — Experimental**
 
 **Fast focus. Minimal movement.**
 
@@ -15,12 +15,15 @@ This repository is an independently organized source distribution designed to in
 ## Features
 
 - Contrast autofocus using SAD and Laplacian metrics.
-- Bounded hill-climbing search.
+- Bounded hill-climbing search with `Legacy HC` as the default.
+- Experimental `Adaptive HC` and bounded single-shot `Normal AF` modes.
+- Normal AF uses separate Acquisition and Refinement budgets: 8 commands each, 16 total and 4 reversals maximum.
 - Configurable Step Size.
 - Safe Mode with `Enable` off at module load.
 - `PANIC / Emergency Stop` and explicit rearm.
 - Diagnostic measurement and one-step focus command.
 - Runtime status, blocking reason, `lens_focus()` call marker and return value.
+- Fixed 32-record Debug Logging viewer with read-only Previous/Next navigation and task-safe Clear History.
 - Reproducible host and ARM builds with Docker.
 
 ## Compatibility
@@ -92,9 +95,11 @@ Do not unload or reload the module while a task is active.
 - `lens_focus()` returning success does not by itself prove physical movement.
 - SmoothAF v0.2.0 is experimental and has no continuous AF.
 - The recorded physical tests reported successful module loading, working menus and micro-adjustments, but did not recover large focus-distance changes reliably.
-- Debug Logging stores a fixed internal history but v0.2.0 has no complete on-camera history viewer.
+- Debug Logging is off by default and stores only a fixed 32-record in-memory history. The v0.3 viewer is read-only; navigation never starts a task or moves the lens, and Clear History is accepted only when no task is active.
 - The recorded EF 50mm f/1.8 STM tests used Step Size 3; Step Sizes 1 and 2 did not work in those tests.
 - Legacy HC and Adaptive HC results below are not a controlled same-scene comparison and do not establish that Adaptive HC is superior.
+- Normal AF, the viewer changes and all host benchmarks in v0.3 remain experimental; Normal AF has not been physically validated. Benchmark output is simulation only.
+- Adaptive HC's simulated maximum travel depends on Step Size (12, 24 or 36 units for Steps 1, 2 or 3); this is not a physical performance claim. Normal AF does not increase the lens API or command limits.
 
 ### Recorded physical observations
 
