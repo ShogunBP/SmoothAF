@@ -20,3 +20,14 @@ The v0.2.0 physical observations supplied for this release used an EOS 600D / Re
 The reported observations confirm module loading, working menus and micro-adjustments. Large focus-distance changes were not recovered reliably, Debug Logging had no complete on-camera history viewer, and Step Sizes 1 and 2 did not work in the recorded tests. These observations do not establish Adaptive HC superiority or compatibility beyond the stated setup.
 
 The build and host tests do not replace controlled hardware validation. Do not claim broad camera compatibility or continuous AF; continuous AF is not implemented.
+
+## SmoothAF 0.3 experimental branch
+
+The `feature/normal-af-v0.3` branch adds a bounded, single-shot Normal AF acquisition/refinement controller while preserving Legacy HC and Adaptive HC. Its ARM build produced:
+
+- Size: 13188 bytes.
+- SHA-256: `48a003f2e20186a61f115c9034ffc34b88fc2117b097a0621ba0edd2b5c34e28`.
+- Dependency check: 23 dependencies; `Will load on: 600D`.
+- Release: `artifacts/releases/smoothaf-48a003f2e20186a61f115c9034ffc34b88fc2117b097a0621ba0edd2b5c34e28`.
+
+This is an experimental build. Normal AF has not been physically validated, and no continuous AF or recording-time movement is enabled.
