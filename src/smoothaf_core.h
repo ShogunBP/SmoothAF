@@ -129,27 +129,10 @@ static inline int smoothaf_has_confidence(int score, int mean)
     return mean >= SMOOTHAF_MIN_LUMA && score >= SMOOTHAF_MIN_SCORE;
 }
 
-/* Safe-mode gate helpers.  PANIC writes are intentionally lock-free: they
- * must remain usable if the focus task owns or cannot acquire the semaphore. */
-static inline void smoothaf_panic_latch(volatile int *enabled,
-                                       volatile int *cancel,
-                                       volatile int *panic)
+/* Movement still requires explicit Enable and an idle task reservation. */
+static inline int smoothaf_can_start(int enabled, int running)
 {
-    *panic = 1;
-    *cancel = 1;
-    *enabled = 0;
-}
-
-static inline void smoothaf_panic_rearm(volatile int *cancel,
-                                       volatile int *panic)
-{
-    *panic = 0;
-    *cancel = 0;
-}
-
-static inline int smoothaf_can_start(int enabled, int panic, int running)
-{
-    return enabled && !panic && !running;
+    return enabled && !running;
 }
 
 /*
@@ -158,61 +141,59 @@ static inline int smoothaf_can_start(int enabled, int panic, int running)
  * the caller must have validated the geometry with smoothaf_geometry_ok().
  * Integer only, no allocation.
  */
-static inline int smoothaf_measure_roi(const uint8_t *base, int pitch,
-                                     int metric, int *mean_out)
+static inline void smoothaf_measure_all(const uint8_t *base, int pitch,
+                                        int *sad_out, int *laplacian_out,
+                                        int *mean_out)
 {
-    int score = 0;
+    int sad = 0;
+    int laplacian = 0;
     int luma = 0;
     int samples = 0;
     int x;
     int y;
 
-    if (metric != SMOOTHAF_METRIC_LAPLACIAN)
+    for (y = 0; y < SMOOTHAF_ROI_SIZE - 2; y += SMOOTHAF_SAMPLE_STEP)
     {
-        metric = SMOOTHAF_METRIC_SAD;
-    }
-
-    if (metric == SMOOTHAF_METRIC_LAPLACIAN)
-    {
-        for (y = 1; y < SMOOTHAF_ROI_SIZE - 1; y += SMOOTHAF_SAMPLE_STEP)
+        const uint8_t *row = base + y * pitch;
+        const uint8_t *row2 = row + 2 * pitch;
+        for (x = 0; x < SMOOTHAF_ROI_SIZE - 2; x += SMOOTHAF_SAMPLE_STEP)
         {
-            const uint8_t *row = base + y * pitch;
-            const uint8_t *prev = row - pitch;
-            const uint8_t *next = row + pitch;
-            for (x = 1; x < SMOOTHAF_ROI_SIZE - 1; x += SMOOTHAF_SAMPLE_STEP)
-            {
-                int center = smoothaf_y(row, x);
-                int lap = smoothaf_y(prev, x) + smoothaf_y(next, x) +
-                          smoothaf_y(row, x - 1) + smoothaf_y(row, x + 1) -
-                          4 * center;
-                score += smoothaf_abs(lap);
-                luma += center;
-                samples++;
-            }
-        }
-    }
-    else
-    {
-        for (y = 0; y < SMOOTHAF_ROI_SIZE - 2; y += SMOOTHAF_SAMPLE_STEP)
-        {
-            const uint8_t *row = base + y * pitch;
-            const uint8_t *row2 = row + 2 * pitch;
-            for (x = 0; x < SMOOTHAF_ROI_SIZE - 2; x += SMOOTHAF_SAMPLE_STEP)
-            {
-                int center = smoothaf_y(row, x);
-                score += smoothaf_abs(smoothaf_y(row, x + 2) - center);
-                score += smoothaf_abs(smoothaf_y(row2, x) - center);
-                luma += center;
-                samples++;
-            }
+            int center = smoothaf_y(row, x);
+            sad += smoothaf_abs(smoothaf_y(row, x + 2) - center);
+            sad += smoothaf_abs(smoothaf_y(row2, x) - center);
+            luma += center;
+            samples++;
         }
     }
 
-    if (mean_out)
+    for (y = 1; y < SMOOTHAF_ROI_SIZE - 1; y += SMOOTHAF_SAMPLE_STEP)
     {
-        *mean_out = samples ? luma / samples : 0;
+        const uint8_t *row = base + y * pitch;
+        const uint8_t *prev = row - pitch;
+        const uint8_t *next = row + pitch;
+        for (x = 1; x < SMOOTHAF_ROI_SIZE - 1; x += SMOOTHAF_SAMPLE_STEP)
+        {
+            int center = smoothaf_y(row, x);
+            int lap = smoothaf_y(prev, x) + smoothaf_y(next, x) +
+                      smoothaf_y(row, x - 1) + smoothaf_y(row, x + 1) -
+                      4 * center;
+            laplacian += smoothaf_abs(lap);
+        }
     }
-    return score;
+
+    if (sad_out) *sad_out = sad;
+    if (laplacian_out) *laplacian_out = laplacian;
+    if (mean_out) *mean_out = samples ? luma / samples : 0;
+}
+
+static inline int smoothaf_measure_roi(const uint8_t *base, int pitch,
+                                     int metric, int *mean_out)
+{
+    int sad;
+    int laplacian;
+
+    smoothaf_measure_all(base, pitch, &sad, &laplacian, mean_out);
+    return metric == SMOOTHAF_METRIC_LAPLACIAN ? laplacian : sad;
 }
 
 static inline void smoothaf_hc_init(struct smoothaf_hc *hc, int initial, int dir)

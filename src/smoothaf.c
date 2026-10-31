@@ -74,6 +74,8 @@
 #define SMOOTHAF_BLOCK_PARAMS         11
 #define SMOOTHAF_BLOCK_SEMAPHORE      12
 #define SMOOTHAF_BLOCK_TASK_CREATE   13
+#define SMOOTHAF_BLOCK_FRAME         14
+#define SMOOTHAF_BLOCK_GEOMETRY      15
 
 /* Persisted settings.  Enable is deliberately NOT persisted: it must always
  * start disabled, even after a module reload. */
@@ -90,10 +92,12 @@ static struct smoothaf_af_assist smoothaf_af_assist;
 
 static volatile int smoothaf_status = SMOOTHAF_STATUS_IDLE;
 static volatile int smoothaf_cancel = 0;
-static volatile int smoothaf_panic = 0;
 static volatile int smoothaf_task_running = 0;
 
 static volatile int smoothaf_last_score = 0;
+static volatile int smoothaf_last_sad = 0;
+static volatile int smoothaf_last_laplacian = 0;
+static volatile int smoothaf_last_measure_valid = 0;
 static volatile int smoothaf_last_best = 0;
 static volatile int smoothaf_last_mean = 0;
 static volatile int smoothaf_last_time = 0;
@@ -106,11 +110,72 @@ static volatile int smoothaf_last_lens_called = 0;
 static volatile int smoothaf_last_lens_return = 0;
 static volatile int smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
 static volatile int smoothaf_last_phase = 0;
+
+#define SMOOTHAF_MONITOR_IDLE          0
+#define SMOOTHAF_MONITOR_MONITORING    1
+#define SMOOTHAF_MONITOR_POSSIBLE_BLUR 2
+#define SMOOTHAF_MONITOR_UNCERTAIN     3
+#define SMOOTHAF_MONITOR_STABLE        4
+#define SMOOTHAF_MONITOR_PAUSED        5
+#define SMOOTHAF_MONITOR_ERROR         6
+
+static volatile int smoothaf_monitor_enabled = 0;
+static volatile int smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
+static volatile int smoothaf_monitor_reference = 0;
+static volatile int smoothaf_monitor_smoothed = 0;
+static volatile int smoothaf_monitor_possible_blur = 0;
 static struct smoothaf_log_entry smoothaf_diag_snapshot[SMOOTHAF_DIAG_CAPACITY];
 static size_t smoothaf_diag_count = 0;
 static size_t smoothaf_diag_page = 0;
 
 static struct semaphore *smoothaf_sem = 0;
+
+static const char *smoothaf_monitor_state_name(void)
+{
+    switch (smoothaf_monitor_state)
+    {
+        case SMOOTHAF_MONITOR_MONITORING:    return "MONITORING";
+        case SMOOTHAF_MONITOR_POSSIBLE_BLUR: return "POSSIBLE_BLUR";
+        case SMOOTHAF_MONITOR_UNCERTAIN:     return "UNCERTAIN";
+        case SMOOTHAF_MONITOR_STABLE:        return "STABLE";
+        case SMOOTHAF_MONITOR_PAUSED:        return "PAUSED";
+        case SMOOTHAF_MONITOR_ERROR:         return "ERROR";
+        default:                             return "IDLE";
+    }
+}
+
+static void smoothaf_monitor_update_from_measurement(void)
+{
+    int score;
+
+    if (!smoothaf_monitor_enabled)
+    {
+        smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
+        return;
+    }
+    if (!smoothaf_last_measure_valid)
+    {
+        smoothaf_monitor_state = SMOOTHAF_MONITOR_PAUSED;
+        return;
+    }
+
+    score = smoothaf_last_score;
+    if (!smoothaf_monitor_reference)
+    {
+        smoothaf_monitor_reference = score;
+        smoothaf_monitor_smoothed = score;
+        smoothaf_monitor_possible_blur = 0;
+        smoothaf_monitor_state = SMOOTHAF_MONITOR_MONITORING;
+        return;
+    }
+
+    smoothaf_monitor_smoothed = (smoothaf_monitor_smoothed * 3 + score) / 4;
+    smoothaf_monitor_possible_blur =
+        smoothaf_monitor_smoothed < (smoothaf_monitor_reference * 3) / 4;
+    smoothaf_monitor_state = smoothaf_monitor_possible_blur
+                           ? SMOOTHAF_MONITOR_POSSIBLE_BLUR
+                           : SMOOTHAF_MONITOR_STABLE;
+}
 
 static const char *smoothaf_status_name(void)
 {
@@ -146,6 +211,8 @@ static const char *smoothaf_block_name(int reason)
         case SMOOTHAF_BLOCK_PARAMS:        return "Invalid parameters";
         case SMOOTHAF_BLOCK_SEMAPHORE:     return "Semaphore unavailable";
         case SMOOTHAF_BLOCK_TASK_CREATE:   return "Task creation failed";
+        case SMOOTHAF_BLOCK_FRAME:         return "Invalid frame";
+        case SMOOTHAF_BLOCK_GEOMETRY:      return "Invalid geometry";
         default:                         return "None";
     }
 }
@@ -196,8 +263,6 @@ static void smoothaf_log_event(smoothaf_log_type_t type,
  * Lens movement and the search use the stricter smoothaf_block_reason(). */
 static int smoothaf_measure_block_reason(void)
 {
-    if (smoothaf_panic) return SMOOTHAF_BLOCK_CANCELLED;
-    if (!smoothaf_enabled) return SMOOTHAF_BLOCK_DISABLED;
     if (smoothaf_cancel) return SMOOTHAF_BLOCK_CANCELLED;
     if (!lv) return SMOOTHAF_BLOCK_NO_LV;
     if (is_movie_mode()) return SMOOTHAF_BLOCK_MOVIE;
@@ -229,17 +294,21 @@ static int smoothaf_block_reason(void)
 
 /* Read the central 64x64 ROI from the current YUV422 LiveView buffer.
  * Returns 1 on success, 0 when the buffer or the camera state is unusable. */
-static int smoothaf_measure(int *score_out, int *mean_out)
+static int smoothaf_measure(int *score_out, int *mean_out,
+                            int *sad_out, int *laplacian_out)
 {
     struct vram_info *vram;
     const uint8_t *base;
     int left;
     int top;
-    int score;
+    int sad;
+    int laplacian;
     int mean;
 
     if (score_out) *score_out = -1;
     if (mean_out) *mean_out = 0;
+    if (sad_out) *sad_out = 0;
+    if (laplacian_out) *laplacian_out = 0;
 
     if (!lv) return 0;
     if (is_movie_mode() || RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW)
@@ -257,11 +326,16 @@ static int smoothaf_measure(int *score_out, int *mean_out)
      * left/top are >= 0, left is even, and the last read byte is inside the
      * last ROI row (pitch >= width * 2). */
     base = vram->vram + top * vram->pitch + left * 2;
+    smoothaf_measure_all(base, vram->pitch, &sad, &laplacian, &mean);
 
-    score = smoothaf_measure_roi(base, vram->pitch, smoothaf_metric, &mean);
-
-    if (score_out) *score_out = score;
+    if (score_out)
+    {
+        *score_out = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
+                   ? laplacian : sad;
+    }
     if (mean_out) *mean_out = mean;
+    if (sad_out) *sad_out = sad;
+    if (laplacian_out) *laplacian_out = laplacian;
     return 1;
 }
 
@@ -337,13 +411,15 @@ static int smoothaf_search_measure(void *ctx, int *score)
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
     msleep(SMOOTHAF_SETTLE_MS);
 
-    if (!smoothaf_measure(score, &mean))
+    if (!smoothaf_measure(score, &mean, 0, 0))
     {
         return 0;
     }
 
     smoothaf_last_mean = mean;
     smoothaf_last_score = *score;
+    smoothaf_last_measure_valid = 1;
+    smoothaf_monitor_update_from_measurement();
     smoothaf_log_event(SMOOTHAF_LOG_MEASURE, *score, mean, 0);
     return 1;
 }
@@ -403,10 +479,13 @@ static void smoothaf_measure_task(void)
     uint32_t start = (uint32_t)get_ms_clock();
     int score = -1;
     int mean = 0;
+    int sad = 0;
+    int laplacian = 0;
     int reason;
 
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
 
+    smoothaf_last_measure_valid = 0;
     reason = smoothaf_measure_block_reason();
     if (reason)
     {
@@ -419,9 +498,10 @@ static void smoothaf_measure_task(void)
         goto done;
     }
 
-    if (!smoothaf_measure(&score, &mean))
+    if (!smoothaf_measure(&score, &mean, &sad, &laplacian))
     {
         smoothaf_last_score = -1;
+        smoothaf_last_measure_valid = 0;
         smoothaf_last_error = 1;
         smoothaf_status = SMOOTHAF_STATUS_ERROR;
         goto done;
@@ -430,6 +510,11 @@ static void smoothaf_measure_task(void)
     smoothaf_last_score = score;
     smoothaf_last_best = score;
     smoothaf_last_mean = mean;
+    smoothaf_last_sad = sad;
+    smoothaf_last_laplacian = laplacian;
+    smoothaf_last_measure_valid = 1;
+    smoothaf_monitor_update_from_measurement();
+    smoothaf_log_event(SMOOTHAF_LOG_MEASURE, score, mean, 0);
     smoothaf_status = smoothaf_has_confidence(score, mean)
                     ? SMOOTHAF_STATUS_IDLE
                     : SMOOTHAF_STATUS_NO_CONFIDENCE;
@@ -486,7 +571,7 @@ static void smoothaf_step_task(void)
 
     msleep(SMOOTHAF_SETTLE_MS);
 
-    if (!smoothaf_measure(&score, &mean))
+    if (!smoothaf_measure(&score, &mean, 0, 0))
     {
         smoothaf_last_error = 1;
         smoothaf_status = SMOOTHAF_STATUS_ERROR;
@@ -680,7 +765,7 @@ static void smoothaf_search_task(void)
         goto done;
     }
 
-    if (!smoothaf_measure(&score, &mean))
+    if (!smoothaf_measure(&score, &mean, 0, 0))
     {
         smoothaf_last_score = -1;
         smoothaf_last_error = 1;
@@ -799,7 +884,7 @@ static int smoothaf_is_task_running(void)
 
 /* Reserve the running state before creating the task, so a second menu action
  * cannot create a second task before the first one starts. */
-static int smoothaf_start_task(int task_id)
+static int smoothaf_start_task(int task_id, int requires_enable)
 {
     struct task *task;
 
@@ -813,14 +898,14 @@ static int smoothaf_start_task(int task_id)
         return 0;
     }
 
-    if (!smoothaf_can_start(smoothaf_enabled, smoothaf_panic, smoothaf_task_running))
+    if ((requires_enable && !smoothaf_enabled) || smoothaf_task_running)
     {
         smoothaf_unlock();
         return 0;
     }
 
     smoothaf_task_running = 1;
-    /* A normal start clears Stop, but never clears a latched PANIC. */
+    /* A new explicit start clears the previous cooperative Stop request. */
     smoothaf_cancel = 0;
     smoothaf_last_error = 0;
     smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
@@ -862,17 +947,68 @@ static int smoothaf_start_task(int task_id)
 
 static MENU_SELECT_FUNC(smoothaf_measure_select)
 {
-    smoothaf_start_task(SMOOTHAF_TASK_MEASURE);
+    smoothaf_start_task(SMOOTHAF_TASK_MEASURE, 0);
 }
 
 static MENU_SELECT_FUNC(smoothaf_step_select)
 {
-    smoothaf_start_task(SMOOTHAF_TASK_STEP);
+    smoothaf_start_task(SMOOTHAF_TASK_STEP, 1);
 }
 
 static MENU_SELECT_FUNC(smoothaf_search_select)
 {
-    smoothaf_start_task(SMOOTHAF_TASK_SEARCH);
+    smoothaf_start_task(SMOOTHAF_TASK_SEARCH, 1);
+}
+
+static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
+{
+    smoothaf_monitor_enabled = !smoothaf_monitor_enabled;
+    if (!smoothaf_monitor_enabled)
+    {
+        smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
+        smoothaf_monitor_possible_blur = 0;
+    }
+    else
+    {
+        smoothaf_monitor_reference = 0;
+        smoothaf_monitor_smoothed = 0;
+        smoothaf_monitor_update_from_measurement();
+    }
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_status_update)
+{
+    MENU_SET_VALUE("%s", smoothaf_monitor_state_name());
+    MENU_SET_HELP("SAD=%d Lap=%d smooth=%d ref=%d blur=%s interval=manual",
+                  (int)smoothaf_last_sad, (int)smoothaf_last_laplacian,
+                  (int)smoothaf_monitor_smoothed,
+                  (int)smoothaf_monitor_reference,
+                  smoothaf_monitor_possible_blur ? "yes" : "no");
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_sad_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_last_sad);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_laplacian_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_last_laplacian);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_smoothed_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor_smoothed);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_reference_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor_reference);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_blur_update)
+{
+    MENU_SET_VALUE("%s", smoothaf_monitor_possible_blur ? "YES" : "NO");
 }
 
 static MENU_SELECT_FUNC(smoothaf_af_assist_trigger_select)
@@ -900,27 +1036,6 @@ static MENU_SELECT_FUNC(smoothaf_stop_select)
         }
         smoothaf_unlock();
     }
-}
-
-/* Emergency path: do not wait for the control semaphore.  The aligned
- * volatile flags are the only state written here, so PANIC remains usable
- * while the focus task is blocked in lens_focus() or holds smoothaf_sem. */
-static MENU_SELECT_FUNC(smoothaf_panic_select)
-{
-    smoothaf_panic_latch(&smoothaf_enabled, &smoothaf_cancel, &smoothaf_panic);
-    smoothaf_status = SMOOTHAF_STATUS_CANCELLED;
-}
-
-static MENU_SELECT_FUNC(smoothaf_rearm_select)
-{
-    if (smoothaf_task_running)
-    {
-        return;
-    }
-
-    smoothaf_panic_rearm(&smoothaf_cancel, &smoothaf_panic);
-    smoothaf_enabled = 0;
-    smoothaf_status = SMOOTHAF_STATUS_IDLE;
 }
 
 static MENU_UPDATE_FUNC(smoothaf_status_update)
@@ -1061,6 +1176,54 @@ static struct menu_entry smoothaf_menu[] =
         .help = "Enable explicit measurements and focus commands; never moves automatically.",
     },
     {
+        .name = "Vlog Monitor",
+        .select = menu_open_submenu,
+        .children = (struct menu_entry[])
+        {
+            {
+                .name = "Start/Stop Monitoring",
+                .select = smoothaf_monitor_toggle_select,
+                .help = "Toggle passive viewing only; no periodic task or lens movement.",
+            },
+            {
+                .name = "Monitor Status",
+                .update = smoothaf_monitor_status_update,
+                .help = "Passive state from existing measurements; no automatic sampling.",
+            },
+            {
+                .name = "SAD Score",
+                .update = smoothaf_monitor_sad_update,
+                .help = "Latest read-only SAD score.",
+            },
+            {
+                .name = "Laplacian Score",
+                .update = smoothaf_monitor_laplacian_update,
+                .help = "Latest read-only Laplacian score.",
+            },
+            {
+                .name = "Smoothed Score",
+                .update = smoothaf_monitor_smoothed_update,
+                .help = "Conservative smoothing of available manual samples.",
+            },
+            {
+                .name = "Reference Score",
+                .update = smoothaf_monitor_reference_update,
+                .help = "Reference from the first available sample; not a focus guarantee.",
+            },
+            {
+                .name = "Possible Blur",
+                .update = smoothaf_monitor_blur_update,
+                .help = "Heuristic only; scene changes and lighting can invalidate it.",
+            },
+            {
+                .name = "Sampling Interval",
+                .priv = 0,
+                .help = "manual/N/A: this v0.5 monitor has no periodic sampler.",
+            },
+            MENU_EOL,
+        },
+    },
+    {
         .name = "Diagnostic",
         .select = menu_open_submenu,
         .children = (struct menu_entry[])
@@ -1068,7 +1231,7 @@ static struct menu_entry smoothaf_menu[] =
             {
                 .name = "Measure",
                 .select = smoothaf_measure_select,
-                .help = "Read-only measurement of the central 64x64 ROI.",
+                .help = "Read-only measurement of the central 64x64 ROI; Enable may remain off.",
             },
             {
                 .name = "Focus Step",
@@ -1172,16 +1335,6 @@ static struct menu_entry smoothaf_menu[] =
         .select = smoothaf_stop_select,
         .help = "Cancel future movement; a synchronous lens command may finish first.",
     },
-    {
-        .name = "PANIC / Emergency Stop",
-        .select = smoothaf_panic_select,
-        .help = "Latch cancellation and disable focus; does not interrupt lens_focus().",
-    },
-    {
-        .name = "Rearm Safe Mode",
-        .select = smoothaf_rearm_select,
-        .help = "Clear PANIC only after the previous task has ended; Enable remains off.",
-    },
 };
 
 /* ---------------------------------------------------------------- */
@@ -1199,7 +1352,6 @@ static unsigned int smoothaf_init(void)
     /* Enable is never persisted: always start disabled. */
     smoothaf_enabled = 0;
     smoothaf_cancel = 0;
-    smoothaf_panic = 0;
     smoothaf_task_running = 0;
     smoothaf_status = SMOOTHAF_STATUS_IDLE;
     smoothaf_last_error = 0;
@@ -1207,6 +1359,14 @@ static unsigned int smoothaf_init(void)
     smoothaf_last_lens_called = 0;
     smoothaf_last_lens_return = 0;
     smoothaf_last_score = 0;
+    smoothaf_last_sad = 0;
+    smoothaf_last_laplacian = 0;
+    smoothaf_last_measure_valid = 0;
+    smoothaf_monitor_enabled = 0;
+    smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
+    smoothaf_monitor_reference = 0;
+    smoothaf_monitor_smoothed = 0;
+    smoothaf_monitor_possible_blur = 0;
     smoothaf_last_best = 0;
     smoothaf_last_mean = 0;
     smoothaf_last_time = 0;
@@ -1262,7 +1422,6 @@ static unsigned int smoothaf_deinit(void)
     {
         smoothaf_enabled = 0;
         smoothaf_cancel = 1;
-        smoothaf_panic = 1;
         smoothaf_unlock();
     }
     else
@@ -1271,7 +1430,6 @@ static unsigned int smoothaf_deinit(void)
          * unavailable during shutdown. */
         smoothaf_enabled = 0;
         smoothaf_cancel = 1;
-        smoothaf_panic = 1;
     }
 
     /* lens_focus(wait=1) cannot be interrupted.  Wait for the task to observe

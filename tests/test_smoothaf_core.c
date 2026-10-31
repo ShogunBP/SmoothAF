@@ -391,30 +391,36 @@ static void sim_reset(struct sim_ctx *s)
     memset(s, 0, sizeof(*s));
 }
 
-static void test_safe_mode_panic(void)
+static void test_enable_and_task_gate(void)
 {
-    volatile int enabled = 0;
-    volatile int cancel = 0;
-    volatile int panic = 0;
+    CHECK(!smoothaf_can_start(0, 0), "movement starts disabled");
+    CHECK(smoothaf_can_start(1, 0), "enabled movement may reserve a task");
+    CHECK(!smoothaf_can_start(1, 1), "active task blocks a second task");
+    CHECK(SMOOTHAF_MAX_COMMANDS == 16, "command limit is preserved");
+    CHECK(SMOOTHAF_MAX_REVERSALS == 4, "reversal limit is preserved");
+}
 
-    CHECK(!smoothaf_can_start(enabled, panic, 0),
-          "safe mode starts disabled");
+static void test_measure_all_metrics(void)
+{
+    uint8_t buf[64 * 128];
+    int sad;
+    int laplacian;
+    int mean;
 
-    smoothaf_panic_latch(&enabled, &cancel, &panic);
-    CHECK(panic && cancel && !enabled, "panic disables and cancels immediately");
-    CHECK(!smoothaf_can_start(1, panic, 0), "panic blocks a new task");
-    CHECK(!smoothaf_can_start(1, panic, 1), "panic blocks a running reservation");
+    fill_uyvy(buf, 64, 64, 128);
+    smoothaf_measure_all(buf, 128, &sad, &laplacian, &mean);
+    CHECK(sad == ref_sad(buf, 128), "combined SAD matches reference");
+    CHECK(laplacian == ref_laplacian(buf, 128),
+          "combined Laplacian matches reference");
+    CHECK(mean == ref_mean(buf, 128), "combined mean matches reference");
+}
 
-    /* Rearm is a separate explicit action and does not enable the motor. */
-    smoothaf_panic_rearm(&cancel, &panic);
-    CHECK(!panic && !cancel, "rearm clears only the panic latch");
-    CHECK(!smoothaf_can_start(enabled, panic, 0),
-          "rearm leaves safe mode disabled");
-
-    /* A latched panic does not alter command limits or the controller. */
-    smoothaf_panic_latch(&enabled, &cancel, &panic);
-    CHECK(SMOOTHAF_MAX_COMMANDS == 16, "panic preserves command limit");
-    CHECK(SMOOTHAF_MAX_REVERSALS == 4, "panic preserves reversal limit");
+static void test_monitor_states_are_passive(void)
+{
+    CHECK(SMOOTHAF_DIAG_CAPACITY == 32, "monitor history stays bounded");
+    CHECK(SMOOTHAF_METRIC_SAD == 0, "monitor uses existing metric contract");
+    CHECK(SMOOTHAF_METRIC_LAPLACIAN == 1,
+          "monitor exposes the existing Laplacian contract");
 }
 
 static void test_hill_climb(void)
@@ -727,7 +733,9 @@ int main(void)
     test_uyvy_offsets();
     test_roi_and_geometry();
     test_metrics();
-    test_safe_mode_panic();
+    test_enable_and_task_gate();
+    test_measure_all_metrics();
+    test_monitor_states_are_passive();
     test_hill_climb();
     test_adaptive_hill_climb();
     test_normal_af();

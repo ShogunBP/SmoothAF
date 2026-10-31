@@ -21,7 +21,16 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 22
+    assert menu.count(".name =") == 29
+    assert '"Vlog Monitor"' in menu
+    assert '"Start/Stop Monitoring"' in menu
+    assert '"Monitor Status"' in menu
+    assert '"SAD Score"' in menu
+    assert '"Laplacian Score"' in menu
+    assert '"Smoothed Score"' in menu
+    assert '"Reference Score"' in menu
+    assert '"Possible Blur"' in menu
+    assert '"Sampling Interval"' in menu
     assert '"Canon AF Assist"' in menu
     assert '"Trigger Canon AF"' in menu
     assert 'SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED' in source
@@ -40,6 +49,14 @@ def test_all_smoothaf_menu_entries_have_names():
     assert '"Previous"' in menu
     assert '"Next"' in menu
     assert '"Clear History"' in menu
+    assert '"PANIC / Emergency Stop"' not in menu
+    assert '"Rearm Safe Mode"' not in menu
+    assert 'smoothaf_panic' not in source
+    assert 'Safe Mode' not in source
+    assert 'Rearm' not in source
+    assert 'task_create' not in menu.split('"Vlog Monitor"', 1)[1].split('"Diagnostic"', 1)[0]
+    assert 'lens_focus' not in menu.split('"Vlog Monitor"', 1)[1].split('"Diagnostic"', 1)[0]
+    assert 'get_yuv422_vram' not in menu.split('"Vlog Monitor"', 1)[1].split('"Diagnostic"', 1)[0]
     assert "smoothaf_diag_previous_select" in source
     assert "smoothaf_diag_next_select" in source
     assert "smoothaf_log_clear(&smoothaf_log)" in source

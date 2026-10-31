@@ -42,7 +42,6 @@ enum smoothaf_af_assist_block
     SMOOTHAF_AF_ASSIST_BLOCK_NONE = 0,
     SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED,
     SMOOTHAF_AF_ASSIST_BLOCK_DISABLED,
-    SMOOTHAF_AF_ASSIST_BLOCK_PANIC,
     SMOOTHAF_AF_ASSIST_BLOCK_ACTIVE,
     SMOOTHAF_AF_ASSIST_BLOCK_LIVEVIEW,
     SMOOTHAF_AF_ASSIST_BLOCK_MOVIE,
@@ -93,7 +92,6 @@ static inline const char *smoothaf_af_assist_block_name(
     switch (block)
     {
         case SMOOTHAF_AF_ASSIST_BLOCK_DISABLED:      return "Enable is OFF";
-        case SMOOTHAF_AF_ASSIST_BLOCK_PANIC:         return "PANIC is latched";
         case SMOOTHAF_AF_ASSIST_BLOCK_ACTIVE:        return "AF Assist is active";
         case SMOOTHAF_AF_ASSIST_BLOCK_LIVEVIEW:     return "LiveView is unavailable";
         case SMOOTHAF_AF_ASSIST_BLOCK_MOVIE:        return "Movie mode";
