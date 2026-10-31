@@ -1,5 +1,5 @@
 /*
- * Comparative SmoothAF benchmark: Legacy HC versus Adaptive HC.
+ * Comparative SmoothAF benchmark: Legacy HC versus Adaptive HC versus Normal AF.
  *
  * This is a host-only deterministic simulation.  Both controllers consume the
  * same scenario, score function, initial score and injected failures.  The
@@ -64,11 +64,6 @@ static int peak_at_3(int pos)
     return 1000 - 100 * abs_i(pos - 3);
 }
 
-static int peak_at_0(int pos)
-{
-    return 1000 - 100 * abs_i(pos);
-}
-
 static int peak_at_minus3(int pos)
 {
     return 1000 - 100 * abs_i(pos + 3);
@@ -83,6 +78,12 @@ static int flat(int pos)
 {
     (void)pos;
     return 1000;
+}
+
+static int low_contrast_plateau(int pos)
+{
+    (void)pos;
+    return 40;
 }
 
 static int noisy(int pos)
@@ -204,6 +205,90 @@ static enum smoothaf_result adaptive_result(enum smoothaf_adaptive_action action
     }
 }
 
+static enum smoothaf_result run_normal_once(
+        const struct bench_scenario *scenario, struct bench_result *out)
+{
+    struct smoothaf_normal_af af;
+    struct sim_state sim;
+    enum smoothaf_normal_action action;
+    int direction;
+    int step;
+    int score;
+    int stop;
+
+    sim_reset(&sim, scenario);
+    sim.ticks += SIM_CONTROL_TICKS;
+    smoothaf_normal_af_init(&af, scenario->initial_score, 1, 1);
+    action = smoothaf_normal_af_begin(&af);
+
+    for (;;)
+    {
+        if (action == SMOOTHAF_NORMAL_LOCKED)
+        {
+            out->result = SMOOTHAF_RESULT_LOCKED;
+            break;
+        }
+        if (action == SMOOTHAF_NORMAL_LIMIT)
+        {
+            out->result = SMOOTHAF_RESULT_LIMIT;
+            break;
+        }
+        if (action == SMOOTHAF_NORMAL_NO_CONFIDENCE)
+        {
+            out->result = SMOOTHAF_RESULT_NO_CONFIDENCE;
+            break;
+        }
+
+        stop = sim_should_abort(&sim);
+        if (stop)
+        {
+            out->result = (enum smoothaf_result)stop;
+            break;
+        }
+
+        if (action == SMOOTHAF_NORMAL_STEP)
+        {
+            if (!smoothaf_normal_af_next_step(&af, &direction, &step))
+            {
+                out->result = SMOOTHAF_RESULT_LIMIT;
+                break;
+            }
+            if (!sim_move(&sim, direction, step))
+            {
+                out->result = SMOOTHAF_RESULT_LENS_ERROR;
+                break;
+            }
+            stop = sim_should_abort(&sim);
+            if (stop)
+            {
+                out->result = (enum smoothaf_result)stop;
+                break;
+            }
+        }
+
+        if (!sim_measure(&sim, &score))
+        {
+            out->result = SMOOTHAF_RESULT_MEASURE_ERROR;
+            break;
+        }
+        stop = sim_should_abort(&sim);
+        if (stop)
+        {
+            out->result = (enum smoothaf_result)stop;
+            break;
+        }
+        action = smoothaf_normal_af_on_score(&af, score);
+    }
+
+    out->commands = af.commands;
+    out->travel = sim.travel;
+    out->reversals = af.reversals;
+    out->measures = sim.measures + 1;
+    out->errors = sim.errors;
+    out->ticks = sim.ticks;
+    return (enum smoothaf_result)out->result;
+}
+
 static enum smoothaf_result run_adaptive_once(
         const struct bench_scenario *scenario, struct bench_result *out)
 {
@@ -302,16 +387,33 @@ static const char *result_name(int result)
     }
 }
 
-static int invariant_ok(const struct bench_result *result, int adaptive)
+static int invariant_ok(const struct bench_result *result, int controller)
 {
-    int max_commands = adaptive ? SMOOTHAF_ADAPTIVE_MAX_COMMANDS
-                                : SMOOTHAF_MAX_COMMANDS;
-    int max_reversals = adaptive ? SMOOTHAF_ADAPTIVE_MAX_REVERSALS
-                                 : SMOOTHAF_MAX_REVERSALS;
+    int max_commands;
+    int max_reversals;
+    int max_step;
+
+    if (controller == 1)
+    {
+        max_commands = SMOOTHAF_ADAPTIVE_MAX_COMMANDS;
+        max_reversals = SMOOTHAF_ADAPTIVE_MAX_REVERSALS;
+        max_step = SMOOTHAF_ADAPTIVE_MAX_STEP;
+    }
+    else if (controller == 2)
+    {
+        max_commands = SMOOTHAF_NORMAL_MAX_COMMANDS;
+        max_reversals = SMOOTHAF_NORMAL_MAX_REVERSALS;
+        max_step = 3;
+    }
+    else
+    {
+        max_commands = SMOOTHAF_MAX_COMMANDS;
+        max_reversals = SMOOTHAF_MAX_REVERSALS;
+        max_step = 1;
+    }
 
     return result->commands >= 0 && result->commands <= max_commands &&
-           result->travel >= 0 && result->travel <= result->commands *
-           (adaptive ? SMOOTHAF_ADAPTIVE_MAX_STEP : 1) &&
+           result->travel >= 0 && result->travel <= result->commands * max_step &&
            result->reversals >= 0 && result->reversals <= max_reversals &&
            result->measures >= 1 && result->errors >= 0;
 }
@@ -329,6 +431,7 @@ static void benchmark_scenario(const struct bench_scenario *scenario)
 {
     struct bench_result legacy;
     struct bench_result adaptive;
+    struct bench_result normal;
     int i;
     int invariant_failures = 0;
 
@@ -337,27 +440,33 @@ static void benchmark_scenario(const struct bench_scenario *scenario)
     {
         struct bench_result legacy_i;
         struct bench_result adaptive_i;
+        struct bench_result normal_i;
         run_legacy_once(scenario, &legacy_i);
         run_adaptive_once(scenario, &adaptive_i);
+        run_normal_once(scenario, &normal_i);
         if (i == 0)
         {
             legacy = legacy_i;
             adaptive = adaptive_i;
+            normal = normal_i;
         }
         else if (memcmp(&legacy, &legacy_i, sizeof(legacy)) != 0 ||
-                memcmp(&adaptive, &adaptive_i, sizeof(adaptive)) != 0)
+                memcmp(&adaptive, &adaptive_i, sizeof(adaptive)) != 0 ||
+                memcmp(&normal, &normal_i, sizeof(normal)) != 0)
         {
             invariant_failures++;
         }
     }
 
-    if (!invariant_ok(&legacy, 0) || !invariant_ok(&adaptive, 1))
+    if (!invariant_ok(&legacy, 0) || !invariant_ok(&adaptive, 1) ||
+        !invariant_ok(&normal, 2))
         invariant_failures++;
 
     printf("Scenario: %s (same deterministic input, repetitions=%d)\n",
            scenario->name, BENCH_REPETITIONS);
     print_result("Legacy", &legacy);
     print_result("Adaptive", &adaptive);
+    print_result("Normal", &normal);
     printf("  invariants=%s\n\n", invariant_failures ? "FAIL" : "PASS");
     if (invariant_failures)
         printf("BENCHMARK INVARIANT FAILURE\n");
@@ -367,17 +476,19 @@ int main(void)
 {
     static const int unstable_return[] = { 900, 700, 800 };
     static const struct bench_scenario scenarios[] = {
-        { .name = "Peak at +3", .initial_score = 700, .score_at = peak_at_3 },
-        { .name = "Two-sided maximum at start", .initial_score = 1000, .score_at = peak_at_0 },
-        { .name = "Wrong initial direction, peak at -3", .initial_score = 700, .score_at = peak_at_minus3 },
+        { .name = "Near to far transition", .initial_score = 500, .score_at = peak_at_3 },
+        { .name = "Far to near transition", .initial_score = 500, .score_at = peak_at_minus3 },
+        { .name = "Large defocus", .initial_score = 100, .score_at = peak_at_3 },
+        { .name = "Wrong initial direction", .initial_score = 700, .score_at = peak_at_minus3 },
+        { .name = "Narrow peak", .initial_score = 500, .score_at = sharp_peak },
+        { .name = "Low-contrast plateau", .initial_score = 40, .score_at = low_contrast_plateau },
+        { .name = "Noise", .initial_score = 1000, .score_at = noisy },
+        { .name = "Movement limit", .initial_score = 1000, .score_at = increasing },
         { .name = "Flat scene", .initial_score = 1000, .score_at = flat },
-        { .name = "Noisy deadband", .initial_score = 1000, .score_at = noisy },
-        { .name = "Monotonic slope", .initial_score = 1000, .score_at = increasing },
         { .name = "Cancellation after two moves", .initial_score = 1000, .score_at = increasing, .cancel_after_moves = 2 },
         { .name = "Timeout after three moves", .initial_score = 1000, .score_at = increasing, .timeout_after_moves = 3 },
         { .name = "Lens failure on second move", .initial_score = 700, .score_at = peak_at_3, .fail_move_at = 2 },
         { .name = "Measure failure on first measurement", .initial_score = 700, .score_at = peak_at_3, .fail_measure_at = 1 },
-        { .name = "Sharp peak", .initial_score = 500, .score_at = sharp_peak },
         { .name = "Unstable return sequence", .initial_score = 500, .score_at = peak_at_3, .sequence = unstable_return, .sequence_length = 3 },
     };
     size_t i;

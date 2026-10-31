@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../src/smoothaf_core.h"
+#include "../src/smoothaf_diagnostics.h"
 
 static int failures = 0;
 
@@ -533,6 +534,38 @@ static void test_hill_climb(void)
     CHECK(hc.dir == -1 || hc.dir == 1, "direction is never zero");
 }
 
+static void test_diagnostics(void)
+{
+    struct smoothaf_log_buffer log;
+    struct smoothaf_log_entry snapshot[SMOOTHAF_DIAG_CAPACITY];
+    size_t count;
+    size_t i;
+
+    smoothaf_log_init(&log);
+    smoothaf_log_write(&log, SMOOTHAF_LOG_MOVE, 1, 2, 3);
+    CHECK(log.count == 0, "logging is off by default");
+
+    smoothaf_log_set_enabled(&log, 1);
+    for (i = 0; i < SMOOTHAF_DIAG_CAPACITY + 3; i++)
+    {
+        smoothaf_log_tick(&log, 10);
+        smoothaf_log_write(&log, SMOOTHAF_LOG_MEASURE, (int)i, 0, 0);
+    }
+    CHECK(log.count == SMOOTHAF_DIAG_CAPACITY, "logging keeps fixed capacity");
+    CHECK(log.dropped == 3, "logging counts overwritten records");
+    count = smoothaf_log_snapshot(&log, snapshot, SMOOTHAF_DIAG_CAPACITY);
+    CHECK(count == SMOOTHAF_DIAG_CAPACITY, "snapshot copies all retained records");
+    CHECK(snapshot[0].value1 == 3, "snapshot starts at oldest retained record");
+    CHECK(snapshot[SMOOTHAF_DIAG_CAPACITY - 1].value1 == 34,
+          "snapshot ends at newest retained record");
+    CHECK(strcmp(smoothaf_log_type_name(SMOOTHAF_LOG_MEASURE), "MEASURE") == 0,
+          "diagnostic type has a stable display name");
+
+    smoothaf_log_clear(&log);
+    CHECK(smoothaf_log_snapshot(&log, snapshot, SMOOTHAF_DIAG_CAPACITY) == 0,
+          "clear removes all records");
+}
+
 static void test_normal_af(void)
 {
     struct smoothaf_normal_af af;
@@ -552,12 +585,16 @@ static void test_normal_af(void)
     CHECK(action == SMOOTHAF_NORMAL_STEP,
           "normal AF continues acquisition after improvement");
     CHECK(af.best == 1400, "normal AF records acquisition best score");
+    CHECK(af.acquisition_commands <= SMOOTHAF_NORMAL_ACQUISITION_COMMANDS,
+          "normal AF acquisition has its own command budget");
 
     action = smoothaf_normal_af_on_score(&af, 1000);
     CHECK(action == SMOOTHAF_NORMAL_STEP,
           "normal AF enters bounded refinement after failed acquisition");
     CHECK(af.phase == SMOOTHAF_NORMAL_PHASE_REFINEMENT,
           "normal AF reports refinement phase");
+    CHECK(af.refinement_commands == 0,
+          "normal AF starts refinement with a separate budget");
 
     action = smoothaf_normal_af_on_score(&af, 1400);
     CHECK(action == SMOOTHAF_NORMAL_STEP || action == SMOOTHAF_NORMAL_CONFIRM,
@@ -653,6 +690,7 @@ int main(void)
     test_hill_climb();
     test_adaptive_hill_climb();
     test_normal_af();
+    test_diagnostics();
 
     if (failures)
     {

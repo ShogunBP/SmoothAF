@@ -641,6 +641,9 @@ struct smoothaf_normal_af
     int confirmations;
     int phase;
     int pending;
+    int acquisition_commands;
+    int refinement_commands;
+    int improved;
 };
 
 static inline void smoothaf_normal_af_init(struct smoothaf_normal_af *af,
@@ -658,6 +661,9 @@ static inline void smoothaf_normal_af_init(struct smoothaf_normal_af *af,
     af->confirmations = 0;
     af->phase = SMOOTHAF_NORMAL_PHASE_ACQUISITION;
     af->pending = 0;
+    af->acquisition_commands = 0;
+    af->refinement_commands = 0;
+    af->improved = 0;
 }
 
 static inline enum smoothaf_normal_action smoothaf_normal_af_begin(
@@ -677,15 +683,19 @@ static inline int smoothaf_normal_af_next_step(struct smoothaf_normal_af *af,
     int phase_limit = af->phase == SMOOTHAF_NORMAL_PHASE_ACQUISITION
                     ? SMOOTHAF_NORMAL_ACQUISITION_COMMANDS
                     : SMOOTHAF_NORMAL_REFINEMENT_COMMANDS;
+    int phase_commands = af->phase == SMOOTHAF_NORMAL_PHASE_ACQUISITION
+                       ? af->acquisition_commands : af->refinement_commands;
     if (!af->pending || af->commands >= SMOOTHAF_NORMAL_MAX_COMMANDS ||
-        af->commands >= phase_limit +
-        (af->phase == SMOOTHAF_NORMAL_PHASE_REFINEMENT
-         ? SMOOTHAF_NORMAL_ACQUISITION_COMMANDS : 0))
+        phase_commands >= phase_limit)
     {
         af->pending = 0;
         return 0;
     }
     af->commands++;
+    if (af->phase == SMOOTHAF_NORMAL_PHASE_ACQUISITION)
+        af->acquisition_commands++;
+    else
+        af->refinement_commands++;
     af->pos += af->direction * af->step;
     af->pending = 0;
     if (direction) *direction = af->direction;
@@ -717,6 +727,7 @@ static inline enum smoothaf_normal_action smoothaf_normal_af_on_score(
         af->best = score;
         af->best_pos = af->pos;
         af->confirmations = 0;
+        af->improved = 1;
         return smoothaf_normal_af_schedule(af, af->direction);
     }
 
@@ -746,7 +757,8 @@ static inline enum smoothaf_normal_action smoothaf_normal_af_on_score(
     {
         af->phase = SMOOTHAF_NORMAL_PHASE_DONE;
         af->pending = 0;
-        return SMOOTHAF_NORMAL_LOCKED;
+        return af->improved ? SMOOTHAF_NORMAL_LOCKED
+                            : SMOOTHAF_NORMAL_NO_CONFIDENCE;
     }
     return smoothaf_normal_af_schedule(af, -af->direction);
 }

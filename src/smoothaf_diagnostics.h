@@ -134,14 +134,40 @@ static inline size_t smoothaf_log_read_all(const struct smoothaf_log_buffer *log
                                            size_t max_entries)
 {
     size_t n = log->count < max_entries ? log->count : max_entries;
+    size_t start;
+    size_t i;
+
     if (n == 0) return 0;
 
-    size_t start = (log->head + SMOOTHAF_DIAG_CAPACITY - log->count) % SMOOTHAF_DIAG_CAPACITY;
-    for (size_t i = 0; i < n; i++)
+    start = (log->head + SMOOTHAF_DIAG_CAPACITY - log->count) % SMOOTHAF_DIAG_CAPACITY;
+    for (i = 0; i < n; i++)
     {
         out[i] = log->entries[(start + i) % SMOOTHAF_DIAG_CAPACITY];
     }
     return n;
+}
+
+/* Copy one bounded, chronological snapshot for read-only viewers. */
+static inline size_t smoothaf_log_snapshot(const struct smoothaf_log_buffer *log,
+                                           struct smoothaf_log_entry *out,
+                                           size_t max_entries)
+{
+    return smoothaf_log_read_all(log, out, max_entries);
+}
+
+static inline const char *smoothaf_log_type_name(smoothaf_log_type_t type)
+{
+    switch (type)
+    {
+        case SMOOTHAF_LOG_MOVE:        return "MOVE";
+        case SMOOTHAF_LOG_MEASURE:     return "MEASURE";
+        case SMOOTHAF_LOG_CONTROLLER:  return "CONTROL";
+        case SMOOTHAF_LOG_ABORT:       return "ABORT";
+        case SMOOTHAF_LOG_ERROR:       return "ERROR";
+        case SMOOTHAF_LOG_BENCH_START: return "BENCH+";
+        case SMOOTHAF_LOG_BENCH_END:   return "BENCH-";
+        default:                       return "NONE";
+    }
 }
 
 /* Clear buffer */
