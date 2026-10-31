@@ -96,6 +96,8 @@ static struct smoothaf_af_assist smoothaf_af_assist;
 static volatile int smoothaf_status = SMOOTHAF_STATUS_IDLE;
 static volatile int smoothaf_cancel = 0;
 static volatile int smoothaf_task_running = 0;
+static volatile int smoothaf_task_stop_requested = 0;
+static volatile int smoothaf_task_exited = 1;
 
 static volatile int smoothaf_last_score = 0;
 static volatile int smoothaf_last_sad = 0;
@@ -532,7 +534,8 @@ static void smoothaf_monitor_task(void)
     int valid;
     struct smoothaf_monitor_sample sample;
 
-    while (smoothaf_monitor.enabled && !smoothaf_cancel && !smoothaf_monitor_deinit)
+    while (smoothaf_monitor.enabled && !smoothaf_cancel &&
+           !smoothaf_monitor_deinit && !smoothaf_task_stop_requested)
     {
         if (smoothaf_monitor_due((uint32_t)get_ms_clock(),
                                  smoothaf_monitor.metrics.next_due_ms))
@@ -966,12 +969,16 @@ static void smoothaf_task_entry(void *arg)
     if (smoothaf_lock())
     {
         smoothaf_task_running = 0;
+        smoothaf_task_stop_requested = 0;
+        smoothaf_task_exited = 1;
         smoothaf_unlock();
     }
     else
     {
         /* Shutdown may already have made the semaphore unavailable. */
         smoothaf_task_running = 0;
+        smoothaf_task_stop_requested = 0;
+        smoothaf_task_exited = 1;
     }
 }
 
@@ -1073,6 +1080,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
 {
     if (smoothaf_monitor.enabled)
     {
+        smoothaf_task_stop_requested = 1;
         smoothaf_monitor_stop(&smoothaf_monitor);
         smoothaf_monitor_task_requested = 0;
         smoothaf_monitor_deinit = 0;
@@ -1080,7 +1088,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
         return;
     }
 
-    if (smoothaf_is_task_running())
+    if (smoothaf_is_task_running() || !smoothaf_task_exited)
     {
         smoothaf_monitor_transition(&smoothaf_monitor, SMOOTHAF_MONITOR_ERROR);
         smoothaf_monitor_log_transitions();
@@ -1090,6 +1098,8 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
                            (uint32_t)get_ms_clock());
     smoothaf_monitor_task_requested = 1;
     smoothaf_monitor_deinit = 0;
+    smoothaf_task_stop_requested = 0;
+    smoothaf_task_exited = 0;
     smoothaf_cancel = 0;
     smoothaf_monitor_log_transitions();
     if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))
@@ -1510,6 +1520,8 @@ static unsigned int smoothaf_init(void)
     smoothaf_enabled = 0;
     smoothaf_cancel = 0;
     smoothaf_task_running = 0;
+    smoothaf_task_stop_requested = 0;
+    smoothaf_task_exited = 1;
     smoothaf_status = SMOOTHAF_STATUS_IDLE;
     smoothaf_last_error = 0;
     smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
@@ -1581,6 +1593,7 @@ static unsigned int smoothaf_deinit(void)
     int i;
 
     smoothaf_monitor_deinit = 1;
+    smoothaf_task_stop_requested = 1;
     smoothaf_monitor_stop(&smoothaf_monitor);
     if (smoothaf_lock())
     {
@@ -1600,7 +1613,8 @@ static unsigned int smoothaf_deinit(void)
      * cancellation, but do not block shutdown forever.  The Legacy loader
      * calls deinit() but provides no task join/kill guarantee; a late task
      * therefore remains an unload hazard after this bounded wait. */
-    for (i = 0; i < SMOOTHAF_DEINIT_WAIT_MS / 10 && smoothaf_is_task_running(); i++)
+    for (i = 0; i < SMOOTHAF_DEINIT_WAIT_MS / 10 &&
+         (smoothaf_is_task_running() || !smoothaf_task_exited); i++)
     {
         msleep(10);
     }
@@ -1608,7 +1622,7 @@ static unsigned int smoothaf_deinit(void)
     /* The Legacy loader ignores this return value and does not provide a task
      * join/kill API.  A task still running after the bounded wait therefore
      * remains an unresolved unload hazard; do not claim that this is safe. */
-    if (smoothaf_is_task_running())
+    if (smoothaf_is_task_running() || !smoothaf_task_exited)
     {
         smoothaf_last_error = 1;
         smoothaf_last_block = SMOOTHAF_BLOCK_CANCELLED;

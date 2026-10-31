@@ -37,6 +37,8 @@ def test_all_smoothaf_menu_entries_have_names():
     assert '100 ms' in menu
     assert 'SMOOTHAF_TASK_MONITOR' in source
     assert 'smoothaf_monitor_task' in source
+    assert 'smoothaf_task_exited' in source
+    assert 'smoothaf_task_stop_requested' in source
     assert '"Sample Count"' in menu
     assert '"Log Count"' in menu
     assert '"Log Failures"' in menu
