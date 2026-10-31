@@ -27,6 +27,7 @@
 #include <propvalues.h>
 
 #include "smoothaf_core.h"
+#include "smoothaf_monitor.h"
 #include "smoothaf_diagnostics.h"
 #include "smoothaf_af_assist.h"
 
@@ -48,6 +49,7 @@
 #define SMOOTHAF_TASK_MEASURE     1
 #define SMOOTHAF_TASK_STEP        2
 #define SMOOTHAF_TASK_SEARCH      3
+#define SMOOTHAF_TASK_MONITOR     4
 
 #define SMOOTHAF_STATUS_IDLE          0
 #define SMOOTHAF_STATUS_MEASURING     1
@@ -85,6 +87,7 @@ static CONFIG_INT("smoothaf.dir", smoothaf_direction_choice, 0); /* 0=A, 1=B */
 static CONFIG_INT("smoothaf.hc_mode", smoothaf_hc_mode, SMOOTHAF_HC_LEGACY);
 static CONFIG_INT("smoothaf.af_mode", smoothaf_af_mode, -1);
 static CONFIG_INT("smoothaf.debug", smoothaf_debug_logging, 0);
+static CONFIG_INT("smoothaf.monitor_interval", smoothaf_monitor_interval, SMOOTHAF_MONITOR_INTERVAL_DEFAULT);
 
 static int smoothaf_enabled = 0;
 static struct smoothaf_log_buffer smoothaf_log;
@@ -111,23 +114,9 @@ static volatile int smoothaf_last_lens_return = 0;
 static volatile int smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
 static volatile int smoothaf_last_phase = 0;
 
-#define SMOOTHAF_MONITOR_IDLE          0
-#define SMOOTHAF_MONITOR_MONITORING    1
-#define SMOOTHAF_MONITOR_POSSIBLE_BLUR 2
-#define SMOOTHAF_MONITOR_UNCERTAIN     3
-#define SMOOTHAF_MONITOR_STABLE        4
-#define SMOOTHAF_MONITOR_PAUSED        5
-#define SMOOTHAF_MONITOR_ERROR         6
-
-static volatile int smoothaf_monitor_enabled = 0;
-static volatile int smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
-static volatile int smoothaf_monitor_reference = 0;
-static volatile int smoothaf_monitor_smoothed = 0;
-static volatile int smoothaf_monitor_possible_blur = 0;
-static volatile int smoothaf_monitor_score = 0;
-static volatile int smoothaf_monitor_sad = 0;
-static volatile int smoothaf_monitor_laplacian = 0;
-static volatile int smoothaf_monitor_samples = 0;
+static struct smoothaf_monitor smoothaf_monitor;
+static volatile int smoothaf_monitor_task_requested = 0;
+static volatile int smoothaf_monitor_deinit = 0;
 static volatile int smoothaf_log_publish_failures = 0;
 static volatile int smoothaf_last_measure_code = 0;
 #define SMOOTHAF_MEASURE_OK       0
@@ -145,10 +134,11 @@ static void smoothaf_log_event_extended(smoothaf_log_type_t type,
                                         int32_t value1, int32_t value2,
                                         int32_t value3, int32_t value4,
                                         int32_t value5);
+static int smoothaf_is_task_running(void);
 
 static const char *smoothaf_monitor_state_name(void)
 {
-    switch (smoothaf_monitor_state)
+    switch (smoothaf_monitor.state)
     {
         case SMOOTHAF_MONITOR_MONITORING:    return "MONITORING";
         case SMOOTHAF_MONITOR_POSSIBLE_BLUR: return "POSSIBLE_BLUR";
@@ -160,34 +150,42 @@ static const char *smoothaf_monitor_state_name(void)
     }
 }
 
-static void smoothaf_monitor_update_from_measurement(int score, int sad,
-                                                       int laplacian)
+static void smoothaf_monitor_log_transitions(void)
 {
-    if (!smoothaf_monitor_enabled)
+    int from;
+    int to;
+    if (smoothaf_monitor_take_transition(&smoothaf_monitor, &from, &to))
     {
-        return;
+        smoothaf_log_event_extended(SMOOTHAF_LOG_MONITOR, from, to,
+                                    smoothaf_monitor.reference,
+                                    smoothaf_monitor.smoothed,
+                                    smoothaf_monitor.metrics.valid);
     }
+}
 
-    smoothaf_monitor_score = score;
-    smoothaf_monitor_sad = sad;
-    smoothaf_monitor_laplacian = laplacian;
-    smoothaf_monitor_samples++;
-
-    if (!smoothaf_monitor_reference)
-    {
-        smoothaf_monitor_reference = score;
-        smoothaf_monitor_smoothed = score;
-        smoothaf_monitor_possible_blur = 0;
-        smoothaf_monitor_state = SMOOTHAF_MONITOR_MONITORING;
+static void smoothaf_monitor_update_from_measurement(int score, int mean,
+                                                       int sad, int laplacian,
+                                                       int valid, int code,
+                                                       uint32_t duration)
+{
+    struct smoothaf_monitor_sample sample;
+    if (!smoothaf_monitor.enabled)
         return;
-    }
 
-    smoothaf_monitor_smoothed = (smoothaf_monitor_smoothed * 3 + score) / 4;
-    smoothaf_monitor_possible_blur =
-        smoothaf_monitor_smoothed < (smoothaf_monitor_reference * 3) / 4;
-    smoothaf_monitor_state = smoothaf_monitor_possible_blur
-                           ? SMOOTHAF_MONITOR_POSSIBLE_BLUR
-                           : SMOOTHAF_MONITOR_STABLE;
+    sample.score = score;
+    sample.mean = mean;
+    sample.sad = sad;
+    sample.laplacian = laplacian;
+    sample.valid = valid;
+    sample.confident = valid && smoothaf_has_confidence(score, mean);
+    sample.metric = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
+                  ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN
+                  : SMOOTHAF_MONITOR_METRIC_SAD;
+    sample.duration_ms = duration;
+    (void)code;
+    smoothaf_monitor_accept(&smoothaf_monitor, &sample,
+                            (uint32_t)get_ms_clock());
+    smoothaf_monitor_log_transitions();
 }
 
 static void smoothaf_publish_measurement(int score, int mean, int sad,
@@ -203,6 +201,8 @@ static void smoothaf_publish_measurement(int score, int mean, int sad,
     if (!valid)
     {
         smoothaf_last_score = -1;
+        smoothaf_monitor_update_from_measurement(-1, mean, sad, laplacian,
+                                                 0, code, 0);
         smoothaf_log_event_extended(SMOOTHAF_LOG_ERROR, code, mean, sad,
                                     laplacian, 0);
         return;
@@ -210,7 +210,8 @@ static void smoothaf_publish_measurement(int score, int mean, int sad,
 
     smoothaf_last_score = score;
     smoothaf_last_best = score;
-    smoothaf_monitor_update_from_measurement(score, sad, laplacian);
+    smoothaf_monitor_update_from_measurement(score, mean, sad, laplacian,
+                                             1, code, 0);
     smoothaf_log_event_extended(SMOOTHAF_LOG_MEASURE, score, mean, sad,
                                 laplacian, code);
 }
@@ -519,6 +520,56 @@ static int smoothaf_status_from_result(enum smoothaf_result result)
 /* ---------------------------------------------------------------- */
 /* Tasks                                                             */
 /* ---------------------------------------------------------------- */
+
+static void smoothaf_monitor_task(void)
+{
+    uint32_t completed;
+    uint32_t start;
+    int score = -1;
+    int mean = 0;
+    int sad = 0;
+    int laplacian = 0;
+    int valid;
+    struct smoothaf_monitor_sample sample;
+
+    while (smoothaf_monitor.enabled && !smoothaf_cancel && !smoothaf_monitor_deinit)
+    {
+        if (smoothaf_monitor_due((uint32_t)get_ms_clock(),
+                                 smoothaf_monitor.metrics.next_due_ms))
+        {
+            if (smoothaf_measure_block_reason())
+            {
+                smoothaf_monitor_record_blocked(&smoothaf_monitor);
+                smoothaf_monitor_transition(&smoothaf_monitor,
+                                            SMOOTHAF_MONITOR_PAUSED);
+                smoothaf_monitor_log_transitions();
+                msleep(20);
+                continue;
+            }
+
+            start = (uint32_t)get_ms_clock();
+            valid = smoothaf_measure(&score, &mean, &sad, &laplacian);
+            completed = (uint32_t)get_ms_clock();
+            sample.score = score;
+            sample.mean = mean;
+            sample.sad = sad;
+            sample.laplacian = laplacian;
+            sample.valid = valid;
+            sample.confident = valid && smoothaf_has_confidence(score, mean);
+            sample.metric = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
+                          ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN
+                          : SMOOTHAF_MONITOR_METRIC_SAD;
+            sample.duration_ms = completed - start;
+            smoothaf_monitor_accept(&smoothaf_monitor, &sample, completed);
+            smoothaf_monitor_log_transitions();
+        }
+        else
+        {
+            msleep(20);
+        }
+    }
+    smoothaf_monitor_task_requested = 0;
+}
 
 static void smoothaf_measure_task(void)
 {
@@ -906,6 +957,7 @@ static void smoothaf_task_entry(void *arg)
         case SMOOTHAF_TASK_MEASURE: smoothaf_measure_task(); break;
         case SMOOTHAF_TASK_STEP:    smoothaf_step_task();    break;
         case SMOOTHAF_TASK_SEARCH:  smoothaf_search_task();  break;
+        case SMOOTHAF_TASK_MONITOR: smoothaf_monitor_task(); break;
         default: break;
     }
 
@@ -1019,64 +1071,77 @@ static MENU_SELECT_FUNC(smoothaf_search_select)
 
 static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
 {
-    smoothaf_monitor_enabled = !smoothaf_monitor_enabled;
-    if (!smoothaf_monitor_enabled)
+    if (smoothaf_monitor.enabled)
     {
-        smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
-        smoothaf_monitor_possible_blur = 0;
+        smoothaf_monitor_stop(&smoothaf_monitor);
+        smoothaf_monitor_task_requested = 0;
+        smoothaf_monitor_deinit = 0;
+        smoothaf_monitor_log_transitions();
+        return;
     }
-    else
+
+    if (smoothaf_is_task_running())
     {
-        smoothaf_monitor_reference = 0;
-        smoothaf_monitor_smoothed = 0;
-        smoothaf_monitor_possible_blur = 0;
-        smoothaf_monitor_score = 0;
-        smoothaf_monitor_sad = 0;
-        smoothaf_monitor_laplacian = 0;
-        smoothaf_monitor_samples = 0;
-        smoothaf_monitor_state = SMOOTHAF_MONITOR_MONITORING;
+        smoothaf_monitor_transition(&smoothaf_monitor, SMOOTHAF_MONITOR_ERROR);
+        smoothaf_monitor_log_transitions();
+        return;
+    }
+    smoothaf_monitor_start(&smoothaf_monitor, smoothaf_metric,
+                           (uint32_t)get_ms_clock());
+    smoothaf_monitor_task_requested = 1;
+    smoothaf_monitor_deinit = 0;
+    smoothaf_cancel = 0;
+    smoothaf_monitor_log_transitions();
+    if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))
+    {
+        smoothaf_monitor_stop(&smoothaf_monitor);
+        smoothaf_monitor_task_requested = 0;
+        smoothaf_monitor_transition(&smoothaf_monitor, SMOOTHAF_MONITOR_ERROR);
+        smoothaf_monitor_log_transitions();
     }
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_status_update)
 {
     MENU_SET_VALUE("%s", smoothaf_monitor_state_name());
-    MENU_SET_HELP("SAD=%d Lap=%d smooth=%d ref=%d samples=%d blur=%s interval=manual",
-                  (int)smoothaf_monitor_sad, (int)smoothaf_monitor_laplacian,
-                  (int)smoothaf_monitor_smoothed,
-                  (int)smoothaf_monitor_reference,
-                  (int)smoothaf_monitor_samples,
-                  smoothaf_monitor_possible_blur ? "yes" : "no");
+    MENU_SET_HELP("SAD=%d Lap=%d smooth=%d ref=%d samples=%d blur=%s interval=%ums",
+                  (int)smoothaf_monitor.sad,
+                  (int)smoothaf_monitor.laplacian,
+                  (int)smoothaf_monitor.smoothed,
+                  (int)smoothaf_monitor.reference,
+                  (int)smoothaf_monitor.metrics.attempts,
+                  smoothaf_monitor.possible_blur ? "yes" : "no",
+                  (unsigned)smoothaf_monitor_interval_ms(smoothaf_monitor.interval_index));
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_sad_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_monitor_sad);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor.sad);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_laplacian_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_monitor_laplacian);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor.laplacian);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_samples_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_monitor_samples);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor.metrics.attempts);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_smoothed_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_monitor_smoothed);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor.smoothed);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_reference_update)
 {
-    MENU_SET_VALUE("%d", (int)smoothaf_monitor_reference);
+    MENU_SET_VALUE("%d", (int)smoothaf_monitor.reference);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_blur_update)
 {
-    MENU_SET_VALUE("%s", smoothaf_monitor_possible_blur ? "YES" : "NO");
+    MENU_SET_VALUE("%s", smoothaf_monitor.possible_blur ? "YES" : "NO");
 }
 
 static MENU_SELECT_FUNC(smoothaf_af_assist_trigger_select)
@@ -1296,8 +1361,11 @@ static struct menu_entry smoothaf_menu[] =
             },
             {
                 .name = "Sampling Interval",
-                .priv = 0,
-                .help = "manual/N/A: this v0.5 monitor has no periodic sampler.",
+                .priv = &smoothaf_monitor_interval,
+                .min = SMOOTHAF_MONITOR_INTERVAL_1000,
+                .max = SMOOTHAF_MONITOR_INTERVAL_100,
+                .choices = CHOICES("1000 ms", "500 ms", "250 ms", "100 ms"),
+                .help = "Periodic read-only sampling; 100 ms is experimental.",
             },
             MENU_EOL,
         },
@@ -1451,15 +1519,10 @@ static unsigned int smoothaf_init(void)
     smoothaf_last_sad = 0;
     smoothaf_last_laplacian = 0;
     smoothaf_last_measure_valid = 0;
-    smoothaf_monitor_enabled = 0;
-    smoothaf_monitor_state = SMOOTHAF_MONITOR_IDLE;
-    smoothaf_monitor_reference = 0;
-    smoothaf_monitor_smoothed = 0;
-    smoothaf_monitor_possible_blur = 0;
-    smoothaf_monitor_score = 0;
-    smoothaf_monitor_sad = 0;
-    smoothaf_monitor_laplacian = 0;
-    smoothaf_monitor_samples = 0;
+    smoothaf_monitor_init(&smoothaf_monitor, smoothaf_metric,
+                          SMOOTHAF_MONITOR_INTERVAL_DEFAULT);
+    smoothaf_monitor_task_requested = 0;
+    smoothaf_monitor_deinit = 0;
     smoothaf_log_publish_failures = 0;
     smoothaf_last_measure_code = SMOOTHAF_MEASURE_WAITING;
     smoothaf_last_best = 0;
@@ -1503,6 +1566,9 @@ static unsigned int smoothaf_init(void)
     {
         smoothaf_debug_logging = 0;
     }
+    smoothaf_monitor_interval = smoothaf_monitor_normalize_interval(
+        smoothaf_monitor_interval);
+    smoothaf_monitor.interval_index = smoothaf_monitor_interval;
     smoothaf_log_init(&smoothaf_log);
 
     /* No lens movement on load. */
@@ -1514,6 +1580,8 @@ static unsigned int smoothaf_deinit(void)
 {
     int i;
 
+    smoothaf_monitor_deinit = 1;
+    smoothaf_monitor_stop(&smoothaf_monitor);
     if (smoothaf_lock())
     {
         smoothaf_enabled = 0;
@@ -1561,4 +1629,5 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_direction_choice)
     MODULE_CONFIG(smoothaf_hc_mode)
     MODULE_CONFIG(smoothaf_debug_logging)
+    MODULE_CONFIG(smoothaf_monitor_interval)
 MODULE_CONFIGS_END()

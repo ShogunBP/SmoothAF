@@ -27,6 +27,7 @@ typedef enum
     SMOOTHAF_LOG_BENCH_START,
     SMOOTHAF_LOG_BENCH_END,
     SMOOTHAF_LOG_TASK_END,
+    SMOOTHAF_LOG_MONITOR,
 } smoothaf_log_type_t;
 
 /* Single log entry - fixed size, no pointers.  value1..value5 are the
@@ -207,6 +208,7 @@ static inline const char *smoothaf_log_type_name(smoothaf_log_type_t type)
         case SMOOTHAF_LOG_BENCH_START: return "BENCH+";
         case SMOOTHAF_LOG_BENCH_END:   return "BENCH-";
         case SMOOTHAF_LOG_TASK_END:    return "TASK-END";
+        case SMOOTHAF_LOG_MONITOR:     return "MONITOR";
         default:                       return "NONE";
     }
 }
