@@ -51,15 +51,7 @@ On failure, power the camera off, remove the module using a computer or card rea
 
 ## Building
 
-Requirements:
-
-- Windows PowerShell 5.1 or PowerShell 7.
-- Docker Desktop with a running daemon.
-- Docker Desktop with permission to build the `smoothaf-legacy-build:bookworm` image from `docker/Dockerfile`.
-- A compatible Magic Lantern Legacy Lua Fix source tree for integration.
-- The private `600D_102.SYM` file supplied separately by the camera owner. It is intentionally not tracked here.
-
-From the repository root:
+Requirements and private Legacy integration inputs are documented in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The short command set is:
 
 ```powershell
 .\build-smoothaf.ps1
@@ -68,7 +60,7 @@ From the repository root:
 .\build-smoothaf.ps1 -Release
 ```
 
-The build creates the Docker image, runs the host tests with `-TestOnly`, copies the project into a temporary Legacy tree, generates module strings, builds the ARM module with `make clean all` (never `nodep`), checks dependencies, and computes SHA-256. The build never accesses an SD card or modifies a Magic Lantern tree permanently. `-Release` additionally writes a hash-named copy under `artifacts/releases/`.
+The build never accesses an SD card or modifies a Magic Lantern tree permanently. ARM hashes, dependency checks and physical-validation limits are recorded in [docs/TESTING.md](docs/TESTING.md).
 
 ## Usage
 
@@ -112,14 +104,14 @@ These observations were supplied for an EOS 600D / Rebel T3i with firmware 1.0.2
 
 The module loaded on the camera, the menus worked and micro-adjustments were observed. Large changes in focus distance were not recovered reliably. These observations do not validate compatibility with other cameras, firmware, lenses or Legacy revisions.
 
-## Roadmap
+## Documentation
 
-Possible future work, not implemented in this release:
-
-- More systematic calibration across supported lenses.
-- Better recovery and diagnostics for out-of-focus starting positions.
-- Additional hardware validation across supported Legacy ports.
-- Improved packaging and release automation.
+- [Architecture](docs/ARCHITECTURE.md) — runtime model, controllers, diagnostics and safety boundaries.
+- [Development](docs/DEVELOPMENT.md) — Legacy integration, private inputs and build workflow.
+- [Research](docs/RESEARCH.md) — Focus Peaking and Canon AF research, evidence classes and future PoCs.
+- [Testing](docs/TESTING.md) — host, ARM, simulation and physical validation records.
+- [Roadmap](docs/ROADMAP.md) — future objectives and explicit non-goals.
+- [Changelog](CHANGELOG.md) — release history.
 
 ## Contributing
 

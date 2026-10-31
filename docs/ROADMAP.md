@@ -1,12 +1,13 @@
-# Roadmap
+# SmoothAF Roadmap
 
-These are future objectives, not implemented features.
+These are future objectives and hypotheses, not implemented features.
 
-- Develop SmoothAF 0.3 Normal AF as a bounded single-shot acquisition and refinement mode.
-- Audit Magic Lantern Focus Peaking and keep it separate from overlay rendering; do not assume yellow overlay points are a focus-distance metric.
-- Add an on-camera paginated viewer for the fixed diagnostic history without continuous allocation or card writes.
-- Calibrate focus step behavior across additional tested lenses.
-- Improve recovery when the starting focus position is far from the target without unbounded scanning.
-- Validate more Legacy camera ports only when real symbol tables and physical hardware are available.
+- Calibrate focus-step behavior across additional tested lenses.
+- Improve bounded recovery when the starting focus position is far from the target without unbounded scanning.
+- Validate additional Legacy camera ports only when matching symbol tables and physical hardware are available.
+- Add safe integration tests at a reproducible Legacy seam.
 - Improve release packaging while preserving manual installation and rollback.
-- Add integration tests where a safe, reproducible Legacy seam exists.
+- Investigate Canon AF Trigger, Repeat and Focus Monitor only through the staged, manual, out-of-recording PoCs in [Research](RESEARCH.md).
+- Consider Vlog AF only after bounded movement, hysteresis, cooldown and exposure behavior are validated.
+
+Continuous AF, Movie AF and recording-time movement are not roadmap commitments for the current release. Any future work must preserve the existing gates, PANIC behavior, explicit Rearm, single-task ownership and bounded budgets.
