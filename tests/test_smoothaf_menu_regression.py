@@ -21,15 +21,24 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 14
+    assert menu.count(".name =") == 19
     assert '"AF Mode"' in menu
     assert '"Debug Logging"' in menu
     assert 'CHOICES("Legacy HC", "Adaptive HC", "Normal AF")' in menu
-    assert "smoothaf_af_mode, SMOOTHAF_HC_LEGACY" in source
+    assert 'CONFIG_INT("smoothaf.af_mode", smoothaf_af_mode, -1)' in source
     assert "smoothaf_normal_run" in source
     assert "smoothaf_adaptive_run" in source
     assert "lens_focus(direction, smoothaf_step, 1, 0)" in source
     assert "MENU_EOL" in menu
+    assert '"Log Page"' in menu
+    assert '"Log Entry"' in menu
+    assert '"Previous"' in menu
+    assert '"Next"' in menu
+    assert '"Clear History"' in menu
+    assert "smoothaf_diag_previous_select" in source
+    assert "smoothaf_diag_next_select" in source
+    assert "smoothaf_log_clear(&smoothaf_log)" in source
+    assert "smoothaf_start_task" not in menu.split('"Log Page"', 1)[1].split("MENU_EOL", 1)[0]
 
 
 if __name__ == "__main__":

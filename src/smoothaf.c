@@ -102,6 +102,11 @@ static volatile int smoothaf_last_commands = 0;
 static volatile int smoothaf_last_reversals = 0;
 static volatile int smoothaf_last_lens_called = 0;
 static volatile int smoothaf_last_lens_return = 0;
+static volatile int smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
+static volatile int smoothaf_last_phase = 0;
+static struct smoothaf_log_entry smoothaf_diag_snapshot[SMOOTHAF_DIAG_CAPACITY];
+static size_t smoothaf_diag_count = 0;
+static size_t smoothaf_diag_page = 0;
 
 static struct semaphore *smoothaf_sem = 0;
 
@@ -494,6 +499,7 @@ static enum smoothaf_result smoothaf_normal_run(
     int step;
     int score;
     int stop;
+    int physical_step;
 
     smoothaf_normal_af_init(normal, initial_score,
                             smoothaf_direction_value(), smoothaf_step);
@@ -515,7 +521,9 @@ static enum smoothaf_result smoothaf_normal_run(
         {
             if (!smoothaf_normal_af_next_step(normal, &direction, &step))
                 return SMOOTHAF_RESULT_LIMIT;
-            (void)step;
+            physical_step = smoothaf_step;
+            if (step != physical_step)
+                return SMOOTHAF_RESULT_ERROR;
             if (!smoothaf_move(direction))
                 return SMOOTHAF_RESULT_LENS_ERROR;
             stop = smoothaf_search_abort(start);
@@ -905,6 +913,79 @@ static MENU_UPDATE_FUNC(smoothaf_status_update)
     }
 }
 
+static void smoothaf_diag_refresh(void)
+{
+    smoothaf_diag_count = smoothaf_log_snapshot(&smoothaf_log,
+                                                smoothaf_diag_snapshot,
+                                                SMOOTHAF_DIAG_CAPACITY);
+    if (smoothaf_diag_count == 0)
+    {
+        smoothaf_diag_page = 0;
+    }
+    else if (smoothaf_diag_page >= smoothaf_diag_count)
+    {
+        smoothaf_diag_page = smoothaf_diag_count - 1;
+    }
+}
+
+static MENU_UPDATE_FUNC(smoothaf_diag_page_update)
+{
+    smoothaf_diag_refresh();
+    MENU_SET_VALUE("%d/%d", smoothaf_diag_count ? (int)smoothaf_diag_page + 1 : 0,
+                   (int)smoothaf_diag_count);
+    MENU_SET_HELP("Logging %s; Previous/Next select a fixed snapshot.",
+                  smoothaf_debug_logging ? "ON" : "OFF");
+}
+
+static MENU_UPDATE_FUNC(smoothaf_diag_entry_update)
+{
+    struct smoothaf_log_entry *record;
+
+    smoothaf_diag_refresh();
+    if (smoothaf_diag_count == 0)
+    {
+        MENU_SET_VALUE("empty");
+        MENU_SET_HELP("No records. Enable Debug Logging before a task.");
+        return;
+    }
+
+    record = &smoothaf_diag_snapshot[smoothaf_diag_page];
+    MENU_SET_VALUE("%s t=%ums", smoothaf_log_type_name(record->type),
+                   (unsigned)record->timestamp_ms);
+    MENU_SET_HELP("v1=%d v2=%d v3=%d status=%s call=%d ret=%d",
+                  (int)record->value1, (int)record->value2, (int)record->value3,
+                  smoothaf_status_name(), smoothaf_last_lens_called,
+                  smoothaf_last_lens_return);
+}
+
+static MENU_SELECT_FUNC(smoothaf_diag_previous_select)
+{
+    smoothaf_diag_refresh();
+    if (smoothaf_diag_page > 0)
+    {
+        smoothaf_diag_page--;
+    }
+}
+
+static MENU_SELECT_FUNC(smoothaf_diag_next_select)
+{
+    smoothaf_diag_refresh();
+    if (smoothaf_diag_count && smoothaf_diag_page + 1 < smoothaf_diag_count)
+    {
+        smoothaf_diag_page++;
+    }
+}
+
+static MENU_SELECT_FUNC(smoothaf_diag_clear_select)
+{
+    if (!smoothaf_task_running)
+    {
+        smoothaf_log_clear(&smoothaf_log);
+        smoothaf_diag_count = 0;
+        smoothaf_diag_page = 0;
+    }
+}
+
 static struct menu_entry smoothaf_menu[] =
 {
     {
@@ -936,6 +1017,31 @@ static struct menu_entry smoothaf_menu[] =
                 .choices = CHOICES("Direction A", "Direction B"),
                 .help = "Relative motor direction; not near/far.",
             },
+            {
+                .name = "Log Page",
+                .update = smoothaf_diag_page_update,
+                .help = "Read-only page number in the fixed 32-record snapshot.",
+            },
+            {
+                .name = "Log Entry",
+                .update = smoothaf_diag_entry_update,
+                .help = "Read-only diagnostic record; navigation never moves the lens.",
+            },
+            {
+                .name = "Previous",
+                .select = smoothaf_diag_previous_select,
+                .help = "Show the previous diagnostic record.",
+            },
+            {
+                .name = "Next",
+                .select = smoothaf_diag_next_select,
+                .help = "Show the next diagnostic record.",
+            },
+            {
+                .name = "Clear History",
+                .select = smoothaf_diag_clear_select,
+                .help = "Clear records only when no SmoothAF task is active.",
+            },
             MENU_EOL,
         },
     },
@@ -956,7 +1062,7 @@ static struct menu_entry smoothaf_menu[] =
         .name = "Debug Logging",
         .priv = &smoothaf_debug_logging,
         .max = 1,
-        .help = "Enable fixed-size diagnostics logging; no heavy viewer is included.",
+        .help = "Enable fixed-size diagnostics logging; use Diagnostic Log Page/Entry to review it.",
     },
     {
         .name = "Sharpness Metric",
@@ -1023,6 +1129,9 @@ static unsigned int smoothaf_init(void)
     smoothaf_last_focus_pos = 0;
     smoothaf_last_commands = 0;
     smoothaf_last_reversals = 0;
+    smoothaf_diag_count = 0;
+    smoothaf_diag_page = 0;
+    smoothaf_log_init(&smoothaf_log);
 
     /* Clamp values loaded from an older config file. */
     if (smoothaf_metric < SMOOTHAF_METRIC_SAD ||
