@@ -562,6 +562,19 @@ static void test_diagnostics(void)
           "diagnostic type has a stable display name");
 
     smoothaf_log_clear(&log);
+    smoothaf_log_set_enabled(&log, 1);
+    SMOOTHAF_LOG_WRITE_CONTROLLER(&log, 7, 800, -3, 5, -1);
+    CHECK(log.entries[0].value1 == 7 && log.entries[0].value2 == 800 &&
+          log.entries[0].value3 == -3 && log.entries[0].value4 == 5 &&
+          log.entries[0].value5 == -1,
+          "controller logging preserves the complete payload");
+    SMOOTHAF_LOG_WRITE_TASK_END(&log, SMOOTHAF_RESULT_LIMIT, 800, 5, 12, 3);
+    CHECK(log.entries[1].type == SMOOTHAF_LOG_TASK_END &&
+          log.entries[1].value1 == SMOOTHAF_RESULT_LIMIT &&
+          log.entries[1].value4 == 12 && log.entries[1].value5 == 3,
+          "task-end logging preserves result counters");
+
+    smoothaf_log_clear(&log);
     CHECK(smoothaf_log_snapshot(&log, snapshot, SMOOTHAF_DIAG_CAPACITY) == 0,
           "clear removes all records");
 }

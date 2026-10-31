@@ -167,17 +167,27 @@ static int smoothaf_direction_value(void)
     return smoothaf_direction_choice ? 1 : -1;
 }
 
-static void smoothaf_log_event(smoothaf_log_type_t type,
-                               int32_t value1, int32_t value2, int32_t value3)
+static void smoothaf_log_event_extended(smoothaf_log_type_t type,
+                                        int32_t value1, int32_t value2,
+                                        int32_t value3, int32_t value4,
+                                        int32_t value5)
 {
-    smoothaf_log_set_enabled(&smoothaf_log, smoothaf_debug_logging);
-    if (!smoothaf_debug_logging)
+    if (!smoothaf_debug_logging || !smoothaf_lock())
     {
         return;
     }
 
+    smoothaf_log_set_enabled(&smoothaf_log, 1);
     smoothaf_log.tick = (uint32_t)get_ms_clock();
-    smoothaf_log_write(&smoothaf_log, type, value1, value2, value3);
+    smoothaf_log_write_extended(&smoothaf_log, type, value1, value2, value3,
+                                value4, value5);
+    smoothaf_unlock();
+}
+
+static void smoothaf_log_event(smoothaf_log_type_t type,
+                               int32_t value1, int32_t value2, int32_t value3)
+{
+    smoothaf_log_event_extended(type, value1, value2, value3, 0, 0);
 }
 
 /* Measurement is allowed in MF: it is read-only and useful as a diagnostic.
@@ -601,8 +611,9 @@ static enum smoothaf_result smoothaf_adaptive_run(
             /* Adaptive HC changes its abstract search policy only.  Physical
              * movement remains the configured Legacy Step Size. */
             (void)abstract_step;
-            smoothaf_log_event(SMOOTHAF_LOG_CONTROLLER, direction,
-                               adaptive->step, adaptive->commands);
+            smoothaf_log_event_extended(SMOOTHAF_LOG_CONTROLLER, direction,
+                                        adaptive->best, adaptive->best_pos,
+                                        adaptive->pos, adaptive->direction);
             if (!smoothaf_move(direction))
             {
                 return SMOOTHAF_RESULT_LENS_ERROR;
@@ -646,7 +657,7 @@ static void smoothaf_search_task(void)
     int score = -1;
     int mean = 0;
     int reason;
-    enum smoothaf_result result;
+    enum smoothaf_result result = SMOOTHAF_RESULT_ERROR;
 
     use_adaptive = smoothaf_af_mode == SMOOTHAF_HC_ADAPTIVE;
     use_normal = smoothaf_af_mode == SMOOTHAF_AF_NORMAL;
@@ -736,6 +747,10 @@ static void smoothaf_search_task(void)
 
 done:
     smoothaf_last_time = (int)((uint32_t)get_ms_clock() - start);
+    smoothaf_log_event_extended(SMOOTHAF_LOG_TASK_END, result,
+                                smoothaf_last_best, smoothaf_last_focus_pos,
+                                smoothaf_last_commands,
+                                smoothaf_last_reversals);
 }
 
 static void smoothaf_task_entry(void *arg)
@@ -915,9 +930,15 @@ static MENU_UPDATE_FUNC(smoothaf_status_update)
 
 static void smoothaf_diag_refresh(void)
 {
+    if (!smoothaf_lock())
+    {
+        return;
+    }
+
     smoothaf_diag_count = smoothaf_log_snapshot(&smoothaf_log,
                                                 smoothaf_diag_snapshot,
                                                 SMOOTHAF_DIAG_CAPACITY);
+    smoothaf_unlock();
     if (smoothaf_diag_count == 0)
     {
         smoothaf_diag_page = 0;
@@ -952,10 +973,33 @@ static MENU_UPDATE_FUNC(smoothaf_diag_entry_update)
     record = &smoothaf_diag_snapshot[smoothaf_diag_page];
     MENU_SET_VALUE("%s t=%ums", smoothaf_log_type_name(record->type),
                    (unsigned)record->timestamp_ms);
-    MENU_SET_HELP("v1=%d v2=%d v3=%d status=%s call=%d ret=%d",
-                  (int)record->value1, (int)record->value2, (int)record->value3,
-                  smoothaf_status_name(), smoothaf_last_lens_called,
-                  smoothaf_last_lens_return);
+    switch (record->type)
+    {
+        case SMOOTHAF_LOG_MOVE:
+            MENU_SET_HELP("dir=%d step=%d pos=%d", (int)record->value1,
+                          (int)record->value2, (int)record->value3);
+            break;
+        case SMOOTHAF_LOG_MEASURE:
+            MENU_SET_HELP("score=%d mean=%d pos=%d", (int)record->value1,
+                          (int)record->value2, (int)record->value3);
+            break;
+        case SMOOTHAF_LOG_CONTROLLER:
+            MENU_SET_HELP("action=%d best=%d bpos=%d pos=%d dir=%d",
+                          (int)record->value1, (int)record->value2,
+                          (int)record->value3, (int)record->value4,
+                          (int)record->value5);
+            break;
+        case SMOOTHAF_LOG_TASK_END:
+            MENU_SET_HELP("result=%d best=%d pos=%d cmds=%d rev=%d",
+                          (int)record->value1, (int)record->value2,
+                          (int)record->value3, (int)record->value4,
+                          (int)record->value5);
+            break;
+        default:
+            MENU_SET_HELP("v1=%d v2=%d v3=%d", (int)record->value1,
+                          (int)record->value2, (int)record->value3);
+            break;
+    }
 }
 
 static MENU_SELECT_FUNC(smoothaf_diag_previous_select)
@@ -978,12 +1022,18 @@ static MENU_SELECT_FUNC(smoothaf_diag_next_select)
 
 static MENU_SELECT_FUNC(smoothaf_diag_clear_select)
 {
+    if (!smoothaf_lock())
+    {
+        return;
+    }
+
     if (!smoothaf_task_running)
     {
         smoothaf_log_clear(&smoothaf_log);
         smoothaf_diag_count = 0;
         smoothaf_diag_page = 0;
     }
+    smoothaf_unlock();
 }
 
 static struct menu_entry smoothaf_menu[] =

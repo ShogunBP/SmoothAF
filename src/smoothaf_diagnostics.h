@@ -26,17 +26,25 @@ typedef enum
     SMOOTHAF_LOG_ERROR,
     SMOOTHAF_LOG_BENCH_START,
     SMOOTHAF_LOG_BENCH_END,
+    SMOOTHAF_LOG_TASK_END,
 } smoothaf_log_type_t;
 
-/* Single log entry - fixed size, no pointers */
+/* Single log entry - fixed size, no pointers.  value1..value5 are the
+ * stable event payload; the first three remain compatible with old readers. */
 struct smoothaf_log_entry
 {
     smoothaf_log_type_t type;
-    uint32_t timestamp_ms;   /* Simulated timestamp (tick counter) */
-    int32_t value1;          /* Generic: score, position, direction, etc. */
-    int32_t value2;          /* Generic: best, mean, commands, etc. */
-    int32_t value3;          /* Generic: reversals, confirmations, etc. */
+    uint32_t timestamp_ms;   /* Monotonic module tick counter */
+    int32_t value1;          /* Event-specific primary value */
+    int32_t value2;          /* Event-specific secondary value */
+    int32_t value3;          /* Event-specific tertiary value */
+    int32_t value4;          /* Optional position/direction/return value */
+    int32_t value5;          /* Optional phase/reason/error value */
 };
+
+/* Controller payload: action, best score, best position, current position,
+ * direction.  Task-end payload: result, best score, current position, command
+ * count, reversal count. */
 
 /* Circular log buffer - fixed capacity, wrap-around */
 struct smoothaf_log_buffer
@@ -94,6 +102,8 @@ static inline void smoothaf_log_write(struct smoothaf_log_buffer *log,
     e->value1 = v1;
     e->value2 = v2;
     e->value3 = v3;
+    e->value4 = 0;
+    e->value5 = 0;
 
     log->head = (log->head + 1) % SMOOTHAF_DIAG_CAPACITY;
     if (log->count < SMOOTHAF_DIAG_CAPACITY)
@@ -106,15 +116,45 @@ static inline void smoothaf_log_write(struct smoothaf_log_buffer *log,
     }
 }
 
+/* Write an event with the complete fixed payload. */
+static inline void smoothaf_log_write_extended(struct smoothaf_log_buffer *log,
+                                               smoothaf_log_type_t type,
+                                               int32_t v1, int32_t v2,
+                                               int32_t v3, int32_t v4,
+                                               int32_t v5)
+{
+    if (!log->enabled) return;
+
+    struct smoothaf_log_entry *e = &log->entries[log->head];
+    e->type = type;
+    e->timestamp_ms = log->tick;
+    e->value1 = v1;
+    e->value2 = v2;
+    e->value3 = v3;
+    e->value4 = v4;
+    e->value5 = v5;
+
+    log->head = (log->head + 1) % SMOOTHAF_DIAG_CAPACITY;
+    if (log->count < SMOOTHAF_DIAG_CAPACITY)
+        log->count++;
+    else
+        log->dropped++;
+}
+
 /* Convenience logging macros for host tests (compile to nothing if disabled) */
 #define SMOOTHAF_LOG_WRITE_MOVE(log, dir, pos) \
-    smoothaf_log_write(log, SMOOTHAF_LOG_MOVE, (dir), (pos), 0)
+    smoothaf_log_write_extended(log, SMOOTHAF_LOG_MOVE, (dir), (pos), 0, 0, 0)
 
 #define SMOOTHAF_LOG_WRITE_MEASURE(log, score, mean, pos) \
-    smoothaf_log_write(log, SMOOTHAF_LOG_MEASURE, (score), (mean), (pos))
+    smoothaf_log_write_extended(log, SMOOTHAF_LOG_MEASURE, (score), (mean), (pos), 0, 0)
 
 #define SMOOTHAF_LOG_WRITE_CONTROLLER(log, action, best, best_pos, pos, dir) \
-    smoothaf_log_write(log, SMOOTHAF_LOG_CONTROLLER, (action), (best), (best_pos))
+    smoothaf_log_write_extended(log, SMOOTHAF_LOG_CONTROLLER, (action), (best), \
+                                (best_pos), (pos), (dir))
+
+#define SMOOTHAF_LOG_WRITE_TASK_END(log, result, best, pos, commands, reversals) \
+    smoothaf_log_write_extended(log, SMOOTHAF_LOG_TASK_END, (result), (best), \
+                                (pos), (commands), (reversals))
 
 #define SMOOTHAF_LOG_WRITE_ABORT(log, reason) \
     smoothaf_log_write(log, SMOOTHAF_LOG_ABORT, (reason), 0, 0)
@@ -166,6 +206,7 @@ static inline const char *smoothaf_log_type_name(smoothaf_log_type_t type)
         case SMOOTHAF_LOG_ERROR:       return "ERROR";
         case SMOOTHAF_LOG_BENCH_START: return "BENCH+";
         case SMOOTHAF_LOG_BENCH_END:   return "BENCH-";
+        case SMOOTHAF_LOG_TASK_END:    return "TASK-END";
         default:                       return "NONE";
     }
 }
