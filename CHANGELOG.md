@@ -5,7 +5,7 @@
 - Added an asynchronous, read-only Vlog Monitor using the shared SmoothAF task.
 - Added configurable 1000 ms, 500 ms default, 250 ms and experimental 100 ms intervals.
 - Added no-backlog scheduling, duration/overrun/blocked/invalid counters and cooperative Stop.
-- Added `Vlog Monitor > Monitor Performance` with task lifecycle, configured/actual start-to-start interval, duration last/average/max, attempts, valid/invalid, blocked/skipped, overrun and last-error diagnostics.
+- Added the read-only `Vlog Monitor > Monitor Performance` submenu with individual task, interval, duration, counter and last-error indicators; unavailable values display `N/A` and metrics remain visible after Stop.
 - Added conservative reference adaptation, hysteresis, persistent blur transitions and lighting/low-confidence uncertainty handling.
 - Automatic samples do not create one log record each; only monitor session and important transitions use the fixed 32-entry history.
 - Preserved manual Measure, Legacy HC, Adaptive HC, Normal AF, Movie/recording gates and all lens movement boundaries.

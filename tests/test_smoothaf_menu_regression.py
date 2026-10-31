@@ -21,11 +21,18 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 33
+    assert menu.count(".name =") == 47
     assert '"Vlog Monitor"' in menu
     assert '"Start/Stop Monitoring"' in menu
     assert '"Monitor Status"' in menu
     assert '"Monitor Performance"' in menu
+    for name in (
+        '"Task State"', '"Configured Interval"', '"Actual Interval"',
+        '"Last Duration"', '"Average Duration"', '"Maximum Duration"',
+        '"Attempts"', '"Valid Samples"', '"Invalid Samples"',
+        '"Low Confidence"', '"Blocked"', '"Skipped"', '"Overruns"',
+        '"Last Error"'):
+        assert name in menu
     assert 'Periodic read-only sharpness monitoring' in menu
     assert '"SAD Score"' in menu
     assert '"Laplacian Score"' in menu

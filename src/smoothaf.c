@@ -1128,29 +1128,79 @@ static const char *smoothaf_monitor_task_state_name(void)
     return smoothaf_task_exited ? "EXITED" : "STOPPED";
 }
 
-static MENU_UPDATE_FUNC(smoothaf_monitor_performance_update)
+static void smoothaf_monitor_take_snapshot(
+    struct smoothaf_monitor_snapshot *snapshot)
+{
+    smoothaf_monitor_snapshot(&smoothaf_monitor, snapshot);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_task_state_update)
+{
+    MENU_SET_VALUE("%s", smoothaf_monitor_task_state_name());
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_configured_interval_update)
 {
     struct smoothaf_monitor_snapshot snapshot;
-    smoothaf_monitor_snapshot(&smoothaf_monitor, &snapshot);
-    MENU_SET_VALUE("%s", smoothaf_monitor_task_state_name());
-    MENU_SET_HELP("cfg=%ums actual=%ums%s last=%ums avg=%ums max=%ums "
-                  "attempts=%u valid=%u invalid=%u lowconf=%u blocked=%u "
-                  "skipped=%u overruns=%u error=%u",
-                  (unsigned)snapshot.interval_ms,
-                  (unsigned)snapshot.actual_interval_ms,
-                  snapshot.actual_interval_ms ? "" : " (N/A)",
-                  (unsigned)snapshot.duration_last,
-                  (unsigned)snapshot.duration_average,
-                  (unsigned)snapshot.duration_max,
-                  (unsigned)snapshot.attempts,
-                  (unsigned)snapshot.valid,
-                  (unsigned)snapshot.invalid,
-                  (unsigned)snapshot.low_confidence,
-                  (unsigned)snapshot.blocked,
-                  (unsigned)snapshot.skipped,
-                  (unsigned)snapshot.overruns,
-                  (unsigned)snapshot.last_error);
+    smoothaf_monitor_take_snapshot(&snapshot);
+    MENU_SET_VALUE("%d ms", (int)snapshot.interval_ms);
 }
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_actual_interval_update)
+{
+    struct smoothaf_monitor_snapshot snapshot;
+    smoothaf_monitor_take_snapshot(&snapshot);
+    if (!snapshot.actual_interval_ms)
+        MENU_SET_VALUE("N/A");
+    else
+        MENU_SET_VALUE("%d ms", (int)snapshot.actual_interval_ms);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_last_duration_update)
+{
+    struct smoothaf_monitor_snapshot snapshot;
+    smoothaf_monitor_take_snapshot(&snapshot);
+    MENU_SET_VALUE("%d ms", (int)snapshot.duration_last);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_average_duration_update)
+{
+    struct smoothaf_monitor_snapshot snapshot;
+    smoothaf_monitor_take_snapshot(&snapshot);
+    if (!snapshot.duration_average)
+        MENU_SET_VALUE("N/A");
+    else
+        MENU_SET_VALUE("%d ms", (int)snapshot.duration_average);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_max_duration_update)
+{
+    struct smoothaf_monitor_snapshot snapshot;
+    smoothaf_monitor_take_snapshot(&snapshot);
+    if (!snapshot.duration_max)
+        MENU_SET_VALUE("N/A");
+    else
+        MENU_SET_VALUE("%d ms", (int)snapshot.duration_max);
+}
+
+#define SMOOTHAF_MONITOR_COUNTER_UPDATE(name, field) \
+static MENU_UPDATE_FUNC(name) \
+{ \
+    struct smoothaf_monitor_snapshot snapshot; \
+    smoothaf_monitor_take_snapshot(&snapshot); \
+    MENU_SET_VALUE("%d", (int)snapshot.field); \
+}
+
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_attempts_update, attempts)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_valid_update, valid)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_invalid_update, invalid)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_low_confidence_update, low_confidence)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_blocked_update, blocked)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_skipped_update, skipped)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_overruns_update, overruns)
+SMOOTHAF_MONITOR_COUNTER_UPDATE(smoothaf_monitor_error_update, last_error)
+
+#undef SMOOTHAF_MONITOR_COUNTER_UPDATE
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_status_update)
 {
@@ -1382,8 +1432,25 @@ static struct menu_entry smoothaf_menu[] =
             },
             {
                 .name = "Monitor Performance",
-                .update = smoothaf_monitor_performance_update,
-                .help = "Task state and read-only sampling performance snapshot.",
+                .select = menu_open_submenu,
+                .children = (struct menu_entry[])
+                {
+                    { .name = "Task State", .update = smoothaf_monitor_task_state_update },
+                    { .name = "Configured Interval", .update = smoothaf_monitor_configured_interval_update },
+                    { .name = "Actual Interval", .update = smoothaf_monitor_actual_interval_update },
+                    { .name = "Last Duration", .update = smoothaf_monitor_last_duration_update },
+                    { .name = "Average Duration", .update = smoothaf_monitor_average_duration_update },
+                    { .name = "Maximum Duration", .update = smoothaf_monitor_max_duration_update },
+                    { .name = "Attempts", .update = smoothaf_monitor_attempts_update },
+                    { .name = "Valid Samples", .update = smoothaf_monitor_valid_update },
+                    { .name = "Invalid Samples", .update = smoothaf_monitor_invalid_update },
+                    { .name = "Low Confidence", .update = smoothaf_monitor_low_confidence_update },
+                    { .name = "Blocked", .update = smoothaf_monitor_blocked_update },
+                    { .name = "Skipped", .update = smoothaf_monitor_skipped_update },
+                    { .name = "Overruns", .update = smoothaf_monitor_overruns_update },
+                    { .name = "Last Error", .update = smoothaf_monitor_error_update },
+                    MENU_EOL,
+                },
             },
             {
                 .name = "SAD Score",
