@@ -533,6 +533,43 @@ static void test_hill_climb(void)
     CHECK(hc.dir == -1 || hc.dir == 1, "direction is never zero");
 }
 
+static void test_normal_af(void)
+{
+    struct smoothaf_normal_af af;
+    enum smoothaf_normal_action action;
+    int direction = 0;
+    int step = 0;
+
+    smoothaf_normal_af_init(&af, 1000, 1, 3);
+    action = smoothaf_normal_af_begin(&af);
+    CHECK(action == SMOOTHAF_NORMAL_STEP,
+          "normal AF starts bounded acquisition");
+    CHECK(smoothaf_normal_af_next_step(&af, &direction, &step),
+          "normal AF emits acquisition movement");
+    CHECK(direction == 1 && step == 3,
+          "normal AF uses configured physical step");
+    action = smoothaf_normal_af_on_score(&af, 1400);
+    CHECK(action == SMOOTHAF_NORMAL_STEP,
+          "normal AF continues acquisition after improvement");
+    CHECK(af.best == 1400, "normal AF records acquisition best score");
+
+    action = smoothaf_normal_af_on_score(&af, 1000);
+    CHECK(action == SMOOTHAF_NORMAL_STEP,
+          "normal AF enters bounded refinement after failed acquisition");
+    CHECK(af.phase == SMOOTHAF_NORMAL_PHASE_REFINEMENT,
+          "normal AF reports refinement phase");
+
+    action = smoothaf_normal_af_on_score(&af, 1400);
+    CHECK(action == SMOOTHAF_NORMAL_STEP || action == SMOOTHAF_NORMAL_CONFIRM,
+          "normal AF refines around the best point");
+
+    smoothaf_normal_af_init(&af, SMOOTHAF_MIN_SCORE - 1, 1, 3);
+    action = smoothaf_normal_af_begin(&af);
+    CHECK(action == SMOOTHAF_NORMAL_NO_CONFIDENCE,
+          "normal AF rejects low-confidence acquisition");
+    CHECK(af.commands == 0, "normal AF low-confidence start does not move");
+}
+
 static void test_adaptive_hill_climb(void)
 {
     struct smoothaf_adaptive_policy policy;
@@ -615,6 +652,7 @@ int main(void)
     test_safe_mode_panic();
     test_hill_climb();
     test_adaptive_hill_climb();
+    test_normal_af();
 
     if (failures)
     {

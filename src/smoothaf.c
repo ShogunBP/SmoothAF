@@ -31,6 +31,7 @@
 
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
+#define SMOOTHAF_AF_NORMAL       2
 
 /* Experimental timing values for the EF 50mm f/1.8 STM.  They have not been
  * calibrated on hardware; lens_focus(wait=1) itself can block for up to about
@@ -79,6 +80,7 @@ static CONFIG_INT("smoothaf.metric", smoothaf_metric, SMOOTHAF_METRIC_SAD);
 static CONFIG_INT("smoothaf.step", smoothaf_step, 1);
 static CONFIG_INT("smoothaf.dir", smoothaf_direction_choice, 0); /* 0=A, 1=B */
 static CONFIG_INT("smoothaf.hc_mode", smoothaf_hc_mode, SMOOTHAF_HC_LEGACY);
+static CONFIG_INT("smoothaf.af_mode", smoothaf_af_mode, -1);
 static CONFIG_INT("smoothaf.debug", smoothaf_debug_logging, 0);
 
 static int smoothaf_enabled = 0;
@@ -483,6 +485,53 @@ done:
     smoothaf_last_time = (int)((uint32_t)get_ms_clock() - start);
 }
 
+static enum smoothaf_result smoothaf_normal_run(
+        struct smoothaf_normal_af *normal, int initial_score,
+        uint32_t *start)
+{
+    enum smoothaf_normal_action action;
+    int direction;
+    int step;
+    int score;
+    int stop;
+
+    smoothaf_normal_af_init(normal, initial_score,
+                            smoothaf_direction_value(), smoothaf_step);
+    action = smoothaf_normal_af_begin(normal);
+    for (;;)
+    {
+        if (action == SMOOTHAF_NORMAL_LOCKED)
+            return SMOOTHAF_RESULT_LOCKED;
+        if (action == SMOOTHAF_NORMAL_LIMIT)
+            return SMOOTHAF_RESULT_LIMIT;
+        if (action == SMOOTHAF_NORMAL_NO_CONFIDENCE)
+            return SMOOTHAF_RESULT_NO_CONFIDENCE;
+
+        stop = smoothaf_search_abort(start);
+        if (stop)
+            return (enum smoothaf_result)stop;
+
+        if (action == SMOOTHAF_NORMAL_STEP)
+        {
+            if (!smoothaf_normal_af_next_step(normal, &direction, &step))
+                return SMOOTHAF_RESULT_LIMIT;
+            (void)step;
+            if (!smoothaf_move(direction))
+                return SMOOTHAF_RESULT_LENS_ERROR;
+            stop = smoothaf_search_abort(start);
+            if (stop)
+                return (enum smoothaf_result)stop;
+        }
+
+        if (!smoothaf_search_measure(0, &score))
+            return SMOOTHAF_RESULT_MEASURE_ERROR;
+        stop = smoothaf_search_abort(start);
+        if (stop)
+            return (enum smoothaf_result)stop;
+        action = smoothaf_normal_af_on_score(normal, score);
+    }
+}
+
 static enum smoothaf_result smoothaf_adaptive_run(
         struct smoothaf_adaptive_hc *adaptive, int initial_score,
         uint32_t *start)
@@ -582,14 +631,17 @@ static void smoothaf_search_task(void)
 {
     uint32_t start = (uint32_t)get_ms_clock();
     struct smoothaf_adaptive_hc adaptive;
+    struct smoothaf_normal_af normal;
     int use_adaptive;
+    int use_normal;
     struct smoothaf_hc hc;
     int score = -1;
     int mean = 0;
     int reason;
     enum smoothaf_result result;
 
-    use_adaptive = smoothaf_hc_mode == SMOOTHAF_HC_ADAPTIVE;
+    use_adaptive = smoothaf_af_mode == SMOOTHAF_HC_ADAPTIVE;
+    use_normal = smoothaf_af_mode == SMOOTHAF_AF_NORMAL;
     smoothaf_hc_init(&hc, 0, 1);
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
     smoothaf_last_commands = 0;
@@ -625,7 +677,15 @@ static void smoothaf_search_task(void)
         goto done;
     }
 
-    if (use_adaptive)
+    if (use_normal)
+    {
+        result = smoothaf_normal_run(&normal, score, &start);
+        smoothaf_last_commands = normal.commands;
+        smoothaf_last_reversals = normal.reversals;
+        smoothaf_last_best = normal.best;
+        smoothaf_last_score = normal.current;
+    }
+    else if (use_adaptive)
     {
         result = smoothaf_adaptive_run(&adaptive, score, &start);
         smoothaf_last_commands = adaptive.commands;
@@ -885,12 +945,12 @@ static struct menu_entry smoothaf_menu[] =
         .help = "Start one bounded hill-climbing search; LiveView only.",
     },
     {
-        .name = "HC Mode",
-        .priv = &smoothaf_hc_mode,
+        .name = "AF Mode",
+        .priv = &smoothaf_af_mode,
         .min = SMOOTHAF_HC_LEGACY,
-        .max = SMOOTHAF_HC_ADAPTIVE,
-        .choices = CHOICES("Legacy HC", "Adaptive HC"),
-        .help = "Select bounded search policy; Legacy HC remains the default.",
+        .max = SMOOTHAF_AF_NORMAL,
+        .choices = CHOICES("Legacy HC", "Adaptive HC", "Normal AF"),
+        .help = "Select single-shot focus policy; Legacy HC remains the default.",
     },
     {
         .name = "Debug Logging",
@@ -982,6 +1042,12 @@ static unsigned int smoothaf_init(void)
         smoothaf_hc_mode > SMOOTHAF_HC_ADAPTIVE)
     {
         smoothaf_hc_mode = SMOOTHAF_HC_LEGACY;
+    }
+    if (smoothaf_af_mode < SMOOTHAF_HC_LEGACY ||
+        smoothaf_af_mode > SMOOTHAF_AF_NORMAL)
+    {
+        smoothaf_af_mode = (smoothaf_hc_mode == SMOOTHAF_HC_ADAPTIVE)
+                         ? SMOOTHAF_HC_ADAPTIVE : SMOOTHAF_HC_LEGACY;
     }
     if (smoothaf_debug_logging < 0 || smoothaf_debug_logging > 1)
     {

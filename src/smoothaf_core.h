@@ -606,6 +606,151 @@ static inline enum smoothaf_adaptive_action smoothaf_adaptive_hc_on_score(
     return SMOOTHAF_ADAPTIVE_NO_PROGRESS;
 }
 
+#define SMOOTHAF_NORMAL_ACQUISITION_COMMANDS  8
+#define SMOOTHAF_NORMAL_REFINEMENT_COMMANDS   8
+#define SMOOTHAF_NORMAL_MAX_COMMANDS          16
+#define SMOOTHAF_NORMAL_MAX_REVERSALS         4
+
+enum smoothaf_normal_phase
+{
+    SMOOTHAF_NORMAL_PHASE_ACQUISITION = 0,
+    SMOOTHAF_NORMAL_PHASE_REFINEMENT,
+    SMOOTHAF_NORMAL_PHASE_DONE,
+};
+
+enum smoothaf_normal_action
+{
+    SMOOTHAF_NORMAL_STEP = 0,
+    SMOOTHAF_NORMAL_CONFIRM,
+    SMOOTHAF_NORMAL_LOCKED,
+    SMOOTHAF_NORMAL_LIMIT,
+    SMOOTHAF_NORMAL_NO_CONFIDENCE,
+};
+
+struct smoothaf_normal_af
+{
+    int initial;
+    int current;
+    int best;
+    int best_pos;
+    int pos;
+    int direction;
+    int step;
+    int commands;
+    int reversals;
+    int confirmations;
+    int phase;
+    int pending;
+};
+
+static inline void smoothaf_normal_af_init(struct smoothaf_normal_af *af,
+                                           int initial, int direction, int step)
+{
+    af->initial = initial;
+    af->current = initial;
+    af->best = initial;
+    af->best_pos = 0;
+    af->pos = 0;
+    af->direction = direction < 0 ? -1 : 1;
+    af->step = step < 1 ? 1 : step;
+    af->commands = 0;
+    af->reversals = 0;
+    af->confirmations = 0;
+    af->phase = SMOOTHAF_NORMAL_PHASE_ACQUISITION;
+    af->pending = 0;
+}
+
+static inline enum smoothaf_normal_action smoothaf_normal_af_begin(
+        struct smoothaf_normal_af *af)
+{
+    if (af->initial < SMOOTHAF_MIN_SCORE)
+        return SMOOTHAF_NORMAL_NO_CONFIDENCE;
+    if (af->commands >= SMOOTHAF_NORMAL_MAX_COMMANDS)
+        return SMOOTHAF_NORMAL_LIMIT;
+    af->pending = 1;
+    return SMOOTHAF_NORMAL_STEP;
+}
+
+static inline int smoothaf_normal_af_next_step(struct smoothaf_normal_af *af,
+                                                int *direction, int *step)
+{
+    int phase_limit = af->phase == SMOOTHAF_NORMAL_PHASE_ACQUISITION
+                    ? SMOOTHAF_NORMAL_ACQUISITION_COMMANDS
+                    : SMOOTHAF_NORMAL_REFINEMENT_COMMANDS;
+    if (!af->pending || af->commands >= SMOOTHAF_NORMAL_MAX_COMMANDS ||
+        af->commands >= phase_limit +
+        (af->phase == SMOOTHAF_NORMAL_PHASE_REFINEMENT
+         ? SMOOTHAF_NORMAL_ACQUISITION_COMMANDS : 0))
+    {
+        af->pending = 0;
+        return 0;
+    }
+    af->commands++;
+    af->pos += af->direction * af->step;
+    af->pending = 0;
+    if (direction) *direction = af->direction;
+    if (step) *step = af->step;
+    return 1;
+}
+
+static inline enum smoothaf_normal_action smoothaf_normal_af_schedule(
+        struct smoothaf_normal_af *af, int direction)
+{
+    if (af->commands >= SMOOTHAF_NORMAL_MAX_COMMANDS ||
+        af->reversals > SMOOTHAF_NORMAL_MAX_REVERSALS)
+        return SMOOTHAF_NORMAL_LIMIT;
+    af->direction = direction < 0 ? -1 : 1;
+    af->pending = 1;
+    return SMOOTHAF_NORMAL_STEP;
+}
+
+static inline enum smoothaf_normal_action smoothaf_normal_af_on_score(
+        struct smoothaf_normal_af *af, int score)
+{
+    int db = smoothaf_deadband(af->best);
+    af->current = score;
+    if (score < SMOOTHAF_MIN_SCORE)
+        return SMOOTHAF_NORMAL_NO_CONFIDENCE;
+
+    if (score > af->best + db)
+    {
+        af->best = score;
+        af->best_pos = af->pos;
+        af->confirmations = 0;
+        return smoothaf_normal_af_schedule(af, af->direction);
+    }
+
+    if (af->phase == SMOOTHAF_NORMAL_PHASE_ACQUISITION)
+    {
+        if (af->reversals == 0)
+        {
+            af->reversals++;
+            af->phase = SMOOTHAF_NORMAL_PHASE_REFINEMENT;
+            return smoothaf_normal_af_schedule(af, -af->direction);
+        }
+        af->phase = SMOOTHAF_NORMAL_PHASE_REFINEMENT;
+        af->confirmations = 0;
+    }
+
+    if (af->pos != af->best_pos)
+    {
+        if (af->reversals >= SMOOTHAF_NORMAL_MAX_REVERSALS)
+            return SMOOTHAF_NORMAL_LIMIT;
+        af->reversals++;
+        return smoothaf_normal_af_schedule(af,
+                af->best_pos > af->pos ? 1 : -1);
+    }
+
+    af->confirmations++;
+    if (af->confirmations >= 2)
+    {
+        af->phase = SMOOTHAF_NORMAL_PHASE_DONE;
+        af->pending = 0;
+        return SMOOTHAF_NORMAL_LOCKED;
+    }
+    return smoothaf_normal_af_schedule(af, -af->direction);
+}
+
 typedef int (*smoothaf_hc_move_fn)(void *ctx, int dir);
 typedef int (*smoothaf_hc_measure_fn)(void *ctx, int *score);
 typedef int (*smoothaf_hc_abort_fn)(void *ctx); /* 0 = continue, else result */

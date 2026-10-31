@@ -22,10 +22,11 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
     assert menu.count(".name =") == 14
-    assert '"HC Mode"' in menu
+    assert '"AF Mode"' in menu
     assert '"Debug Logging"' in menu
-    assert 'CHOICES("Legacy HC", "Adaptive HC")' in menu
-    assert "smoothaf_hc_mode, SMOOTHAF_HC_LEGACY" in source
+    assert 'CHOICES("Legacy HC", "Adaptive HC", "Normal AF")' in menu
+    assert "smoothaf_af_mode, SMOOTHAF_HC_LEGACY" in source
+    assert "smoothaf_normal_run" in source
     assert "smoothaf_adaptive_run" in source
     assert "lens_focus(direction, smoothaf_step, 1, 0)" in source
     assert "MENU_EOL" in menu
