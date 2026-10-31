@@ -31,6 +31,9 @@ def test_all_smoothaf_menu_entries_have_names():
     assert '"Reference Score"' in menu
     assert '"Possible Blur"' in menu
     assert '"Sampling Interval"' in menu
+    assert '"Sample Count"' in menu
+    assert '"Log Count"' in menu
+    assert '"Log Failures"' in menu
     assert '"Canon AF Assist"' in menu
     assert '"Trigger Canon AF"' in menu
     assert 'SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED' in source
