@@ -1,5 +1,7 @@
 # SmoothAF
 
+**SmoothAF v0.2.0 — Experimental**
+
 **Fast focus. Minimal movement.**
 
 SmoothAF is an experimental autofocus module for Magic Lantern, designed to achieve fast, accurate and smooth focusing with minimal lens movement. Built for Canon EOS cameras, it aims to reduce focus hunting through efficient contrast detection, optimized focus control and lightweight algorithms.
@@ -88,6 +90,22 @@ Do not unload or reload the module while a task is active.
 - Other cameras, firmware versions, and lenses are not validated.
 - The module is experimental; static build validation does not prove runtime ABI compatibility or physical lens movement.
 - `lens_focus()` returning success does not by itself prove physical movement.
+- SmoothAF v0.2.0 is experimental and has no continuous AF.
+- The recorded physical tests reported successful module loading, working menus and micro-adjustments, but did not recover large focus-distance changes reliably.
+- Debug Logging stores a fixed internal history but v0.2.0 has no complete on-camera history viewer.
+- The recorded EF 50mm f/1.8 STM tests used Step Size 3; Step Sizes 1 and 2 did not work in those tests.
+- Legacy HC and Adaptive HC results below are not a controlled same-scene comparison and do not establish that Adaptive HC is superior.
+
+### Recorded physical observations
+
+These observations were supplied for an EOS 600D / Rebel T3i with firmware 1.0.2, Magic Lantern Legacy Lua Fix, EF 50mm f/1.8 STM, Step Size 3 and the Laplacian metric. They are not a controlled comparison:
+
+| Mode | Result | Score | Best | Mean | Time | Commands | Reversals |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Legacy HC | Search Limit | 2677 | 2877 | 74 | 1381 ms | 3 | 1 |
+| Adaptive HC | Search Limit | 3059 | 3087 | 55 | 2374 ms | 4 | 3 |
+
+The module loaded on the camera, the menus worked and micro-adjustments were observed. Large changes in focus distance were not recovered reliably. These observations do not validate compatibility with other cameras, firmware, lenses or Legacy revisions.
 
 ## Roadmap
 

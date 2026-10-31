@@ -12,4 +12,11 @@ The generated artifact is `artifacts/consolidated/smoothaf.mo`:
 - Host core tests, comparative benchmark, and menu regression passed.
 - Release: `artifacts/releases/smoothaf-722291457d3cb507b245353aab47b336dc0b0d9f9f7d6d819ec725f38c16c85a`.
 
-The renamed module has not been physically validated on a camera. Do not report it as camera-validated until a controlled hardware test passes.
+The v0.2.0 physical observations supplied for this release used an EOS 600D / Rebel T3i, firmware 1.0.2, Magic Lantern Legacy Lua Fix, EF 50mm f/1.8 STM, Step Size 3 and Laplacian. They were not a controlled same-scene comparison:
+
+- Legacy HC: `Search Limit`, score 2677, best 2877, mean 74, 1381 ms, 3 commands, 1 reversal.
+- Adaptive HC: `Search Limit`, score 3059, best 3087, mean 55, 2374 ms, 4 commands, 3 reversals.
+
+The reported observations confirm module loading, working menus and micro-adjustments. Large focus-distance changes were not recovered reliably, Debug Logging had no complete on-camera history viewer, and Step Sizes 1 and 2 did not work in the recorded tests. These observations do not establish Adaptive HC superiority or compatibility beyond the stated setup.
+
+The build and host tests do not replace controlled hardware validation. Do not claim broad camera compatibility or continuous AF; continuous AF is not implemented.
