@@ -86,4 +86,6 @@ The required state machine would include `CANON_AF_IDLE`, `REQUESTED`, `FOCUSING
 
 ## Current recommendation
 
-Do not implement Continuous AF, Canon AF Assist or Hybrid AF in the current release. Keep Legacy HC as default/fallback, Adaptive HC experimental and Normal AF bounded single-shot. The next research priority is a proven C-level interface and state/result correlation for `600D.102`, followed by cleanup and exclusion tests outside recording. No benchmark can prove physical compatibility, exposure stability, STM behavior or recording safety.
+The v0.4 branch reserves a host-testable, unavailable Canon AF Assist adapter only. It does not implement hardware movement because no safe C-level interface is proven. Do not call the static Lua callback, assemble its primitives in a new task, use `PTP_AF_START` as an API, or treat `lens_focus()` as Native AF Assist.
+
+Do not implement Continuous AF or Hybrid AF. Keep Legacy HC as default/fallback, Adaptive HC experimental and Normal AF bounded single-shot. A future native implementation requires a proven C-level interface and state/result correlation for `600D.102`, followed by cleanup, exclusion and physical tests outside recording. No benchmark can prove physical compatibility, exposure stability, STM behavior or recording safety.

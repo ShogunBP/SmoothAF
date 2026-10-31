@@ -56,6 +56,10 @@ int lens_focus(int num_steps, int stepsize, int wait, int extra_delay);
 
 With `wait=1`, SmoothAF sends one synchronous command, waits for the Legacy completion path and records the return value. A return of success means the Legacy error flag was not set; it does not independently prove physical movement or acquired focus. See [Research](RESEARCH.md) for the separate Canon AF investigation.
 
+## Canon AF Assist boundary
+
+The v0.4 PoC reserves a read-only `Canon AF Assist` menu but uses an unavailable adapter. It does not call `lens_autofocus()`, Lua internals, `PTP_AF_START`, `lens_setup_af()`, `module_send_keypress()` or any unverified Canon symbol. The adapter starts `UNAVAILABLE`, returns `No safe Canon C API`, creates no task and cannot move the lens. A future native implementation requires a verified C declaration, implementation/export, ABI, `600D_102.SYM` resolution, request/result correlation, cleanup, cancellation semantics and controlled hardware validation.
+
 ## Diagnostics
 
 Debug Logging is off by default and uses a fixed 32-entry in-memory circular history. Records include mode, phase, score/best score, direction, movement, position, command/reversal counts, elapsed time, `lens_focus()` return value and task-end reason. The on-camera viewer supports read-only Previous/Next navigation and Clear History only when no task is active. It performs no continuous card writes and no lens movement.

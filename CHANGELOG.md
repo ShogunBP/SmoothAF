@@ -1,5 +1,13 @@
 # Changelog
 
+## SmoothAF v0.4.0 — Canon AF Assist PoC (blocked, experimental)
+
+- Added a host-testable unavailable adapter and explicit state boundary for future Canon Native AF Assist.
+- Added a read-only `Canon AF Assist` menu with `Trigger Canon AF` visibly blocked by `No safe Canon C API`.
+- No Canon symbol, Lua callback, `PTP_AF_START`, half-shutter event or lens movement is invoked.
+- Host validation covers deterministic rejection; this branch does not claim Canon AF support or physical validation.
+- ARM build validation produced `9a600fc9f3acd92c027095819e8bfdeea8a440c2cf16fd8f28989006d94a566c` with 23 dependencies and `Will load on: 600D`; this proves only the blocked adapter build.
+
 ## SmoothAF v0.3.0 — Experimental
 
 - Added bounded single-shot `Normal AF` with separate Acquisition and Refinement phases.

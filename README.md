@@ -1,6 +1,6 @@
 # SmoothAF
 
-**SmoothAF v0.3.0 — Experimental**
+**SmoothAF v0.4.0 — Experimental**
 
 **Fast focus. Minimal movement.**
 
@@ -17,6 +17,7 @@ This repository is an independently organized source distribution designed to in
 - Contrast autofocus using SAD and Laplacian metrics.
 - Bounded hill-climbing search with `Legacy HC` as the default.
 - Experimental `Adaptive HC` and bounded single-shot `Normal AF` modes.
+- Reserved `Canon AF Assist` menu with an explicit unavailable adapter; it never moves the lens.
 - Normal AF uses separate Acquisition and Refinement budgets: 8 commands each, 16 total and 4 reversals maximum.
 - Configurable Step Size.
 - Safe Mode with `Enable` off at module load.
@@ -90,7 +91,7 @@ Do not unload or reload the module while a task is active.
 - Debug Logging is off by default and stores only a fixed 32-record in-memory history. The v0.3 viewer is read-only; navigation never starts a task or moves the lens, and Clear History is accepted only when no task is active.
 - The recorded EF 50mm f/1.8 STM tests used Step Size 3; Step Sizes 1 and 2 did not work in those tests.
 - Legacy HC and Adaptive HC results below are not a controlled same-scene comparison and do not establish that Adaptive HC is superior.
-- Normal AF, the viewer changes and all host benchmarks in v0.3 remain experimental; Normal AF has not been physically validated. Benchmark output is simulation only.
+- Normal AF and the diagnostic viewer remain experimental; Normal AF has not been physically validated. Canon AF Assist is reserved behind an unavailable adapter because no safe C API is proven. Benchmark output is simulation only.
 - Adaptive HC's simulated maximum travel depends on Step Size (12, 24 or 36 units for Steps 1, 2 or 3); this is not a physical performance claim. Normal AF does not increase the lens API or command limits.
 
 ### Recorded physical observations

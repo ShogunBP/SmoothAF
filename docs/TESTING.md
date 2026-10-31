@@ -23,6 +23,16 @@ The test set covers core metrics, UYVY ROI indexing, bounds, cancellation, timeo
 
 The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output `DEP=23` and `Will load on: 600D` confirm build-time resolution only.
 
+## SmoothAF v0.4 blocked-adapter build record
+
+The v0.4 build includes only the unavailable Canon AF Assist state boundary. It does not import Canon AF symbols, call Lua internals, send half-shutter events or move the lens.
+
+- Size: 17864 bytes
+- SHA-256: `9a600fc9f3acd92c027095819e8bfdeea8a440c2cf16fd8f28989006d94a566c`
+- Dependency check: 23 dependencies; `Will load on: 600D`
+
+This ARM result proves compilation and dependency resolution for the blocked adapter only. It does not prove Canon AF Assist support or physical autofocus.
+
 ## SmoothAF v0.3 build record
 
 - Artifact: `artifacts/consolidated/smoothaf.mo`
@@ -32,6 +42,8 @@ The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM`
 - Release: `artifacts/releases/smoothaf-b7639ab3afca22ddc55b39e6b0f949363c16fd29aa62f2c1bd4d41a89ba1f8cb`
 
 The v0.3 artifact includes the fixed 32-record viewer and diagnostic payloads. Normal AF has not been physically validated. No continuous AF or recording-time movement is enabled.
+
+The v0.4 Canon AF Assist adapter is intentionally unavailable. Host tests can prove deterministic rejection and menu visibility only; they do not prove a Canon AF API, lens movement or physical autofocus.
 
 ## SmoothAF v0.2 physical record
 
