@@ -13,8 +13,8 @@ def test_menu_shape_and_lifecycle():
     top_names = [
         "Enable", "Vlog Monitor", "Diagnostic", "AF Performance",
         "Monitor Performance", "Algorithm Performance", "Focus Test",
-        "AF Mode", "Sharpness Metric", "Step Size", "Status", "STOP",
-        "PANIC / Emergency Stop", "Rearm Safe Mode", "Build Info",
+        "Status", "STOP", "PANIC / Emergency Stop", "Rearm Safe Mode",
+        "Build Info",
     ]
     top_positions = [menu.index('{ .name = "' + name + '"') for name in top_names]
     assert top_positions == sorted(top_positions)
@@ -23,6 +23,8 @@ def test_menu_shape_and_lifecycle():
 
     vlog = menu.split('{ .name = "Vlog Monitor"', 1)[1].split("MENU_EOL", 1)[0]
     assert '"Sample Int"' in vlog
+    assert '"Vlog Metric"' in vlog
+    assert '"Vlog Step"' in vlog
     assert vlog.index('"Start/Stop Monitoring"') < vlog.index('"Start New AF Episode"')
     assert vlog.index('"Start New AF Episode"') < vlog.index('"Vlog AF Mode"')
     assert vlog.index('"Sample Int"') < vlog.index('"Session State"')
@@ -32,12 +34,25 @@ def test_menu_shape_and_lifecycle():
     assert '"Rearm Safe Mode"' not in vlog
     assert '"Sampling Interval"' not in menu
 
+    focus_test = menu.split('{ .name = "Focus Test"', 1)[1].split("MENU_EOL", 1)[0]
+    for name in (
+        '"Start Focus Test"', '"AF Algorithm"', '"Test Metric"', '"Test Step"',
+        '"Test Direction"', '"AUTO"', '"A"', '"B"', '"Test Status"',
+        '"Test Result"', '"AUTO Result"', '"AUTO CMDs"', '"AUTO Scores"',
+        '"AUTO Deltas"', '"Test Duration"',
+    ):
+        assert name in focus_test
+    assert '"AF Mode"' not in focus_test
+    assert '"Sharpness Metric"' not in focus_test
+    assert '"Step Size"' not in focus_test
+
     for name in (
         '"AF CMDs This EP"', '"Next EP Block"', '"AF CD Remain"',
         '"AF Session"', '"EP Result"', '"AF EPs Done"', '"AF Armed"',
-        '"Blur Recheck"', '"AF Last Dir"', '"SAD Score"', '"Lap Score"', '"Actual Int"', '"REC State"',
-        '"Algorithm"', '"Search Dir"', '"Converge Why"', '"EP Summary"',
-        '"Log Page"', '"Log Entry"', '"Focus Step"', '"STOP"', '"PANIC / Emergency Stop"',
+        '"Blur Recheck"', '"AF Last Dir"', '"SAD Score"', '"Lap Score"',
+        '"Actual Int"', '"REC State"', '"Algorithm"', '"Search Dir"',
+        '"Converge Why"', '"EP Summary"', '"Log Page"', '"Log Entry"',
+        '"Focus Step"', '"STOP"', '"PANIC / Emergency Stop"',
     ):
         assert name in menu
 
@@ -60,7 +75,7 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_monitor_task' in source
     assert 'smoothaf_task_stop_requested' in source
     assert 'smoothaf_task_exited = 1;' in source
-    assert 'lens_focus(direction, smoothaf_step, 1, 0)' in source
+    assert 'lens_focus(direction, step, 1, 0)' in source
     assert 'smoothaf_panic_latch' in source
     assert 'smoothaf_panic_rearm' in source
     assert 'smoothaf_can_start(smoothaf_enabled' in source
@@ -97,6 +112,15 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_af_direction_value()' in source
     assert 'smoothaf_direction_value()' in source
     assert source.count('smoothaf_af_direction_value()') >= 4
+    assert 'smoothaf_measure_with_metric(smoothaf_test_metric' in source
+    assert 'smoothaf_measure_with_metric(smoothaf_vlog_metric' in source
+    assert 'smoothaf_move_with_step(dir, smoothaf_test_step)' in source
+    assert 'smoothaf_move_with_step(direction, smoothaf_vlog_step)' in source
+    assert 'MODULE_CONFIG(smoothaf_test_metric)' in source
+    assert 'MODULE_CONFIG(smoothaf_vlog_metric)' in source
+    assert 'MODULE_CONFIG(smoothaf_test_step)' in source
+    assert 'MODULE_CONFIG(smoothaf_vlog_step)' in source
+    assert 'MODULE_CONFIG(smoothaf_test_direction)' in source
     assert re.search(r"struct smoothaf_telemetry\s*\{", (ROOT / "src" / "smoothaf_diagnostics.h").read_text())
 
 

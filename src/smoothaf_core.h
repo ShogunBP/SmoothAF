@@ -30,6 +30,207 @@
 #define SMOOTHAF_MAX_COMMANDS   16
 #define SMOOTHAF_MAX_REVERSALS  4
 
+/* Focus Test AUTO direction probe.  The probe is deliberately bounded and
+ * returns to the estimated origin before the selected controller starts. */
+#define SMOOTHAF_AUTO_MAX_COMMANDS   4
+#define SMOOTHAF_AUTO_MAX_REVERSALS  1
+
+enum smoothaf_auto_measure_status
+{
+    SMOOTHAF_AUTO_MEASURE_INVALID = 0,
+    SMOOTHAF_AUTO_MEASURE_VALID = 1,
+    SMOOTHAF_AUTO_MEASURE_LOW = 2,
+};
+
+enum smoothaf_auto_result
+{
+    SMOOTHAF_AUTO_FIRST_IMPROVED = 0,
+    SMOOTHAF_AUTO_OPPOSITE_IMPROVED,
+    SMOOTHAF_AUTO_UNCERTAIN,
+    SMOOTHAF_AUTO_LOW_CONFIDENCE,
+    SMOOTHAF_AUTO_INVALID,
+    SMOOTHAF_AUTO_ABORTED,
+    SMOOTHAF_AUTO_LIMIT,
+};
+
+struct smoothaf_auto_probe_config
+{
+    int first_direction;
+    int initial_score;
+    int max_commands;
+    int max_reversals;
+};
+
+struct smoothaf_auto_probe
+{
+    int selected_direction;
+    int first_direction;
+    int initial_score;
+    int first_score;
+    int opposite_score;
+    int first_delta;
+    int opposite_delta;
+    int commands;
+    int reversals;
+    int position;
+    int result;
+};
+
+typedef int (*smoothaf_auto_move_fn)(void *ctx, int direction);
+typedef int (*smoothaf_auto_measure_fn)(void *ctx, int *score);
+typedef int (*smoothaf_auto_abort_fn)(void *ctx);
+
+static inline int smoothaf_auto_deadband(int score)
+{
+    int relative = score / 64;
+    return relative > 24 ? relative : 24;
+}
+
+/* Probe one bounded step on the preferred side and, only when needed, one
+ * bounded step on the opposite side.  The estimated origin is restored before
+ * returning, so the existing controller starts with a consistent position. */
+static inline enum smoothaf_auto_result smoothaf_auto_probe_run(
+        struct smoothaf_auto_probe *probe,
+        const struct smoothaf_auto_probe_config *config,
+        smoothaf_auto_move_fn move,
+        smoothaf_auto_measure_fn measure,
+        smoothaf_auto_abort_fn abort,
+        void *ctx)
+{
+    int first;
+    int score = 0;
+    int first_delta;
+    int opposite_delta;
+    int max_commands;
+    int max_reversals;
+    int status;
+    int stop;
+
+    if (!probe || !config || !move || !measure) return SMOOTHAF_AUTO_INVALID;
+    first = config->first_direction < 0 ? -1 : 1;
+    max_commands = config->max_commands < 1 ? 1 : config->max_commands;
+    if (max_commands > SMOOTHAF_AUTO_MAX_COMMANDS)
+        max_commands = SMOOTHAF_AUTO_MAX_COMMANDS;
+    max_reversals = config->max_reversals < 0 ? 0 : config->max_reversals;
+    if (max_reversals > SMOOTHAF_AUTO_MAX_REVERSALS)
+        max_reversals = SMOOTHAF_AUTO_MAX_REVERSALS;
+    probe->selected_direction = 0;
+    probe->first_direction = first;
+    probe->initial_score = config->initial_score;
+    probe->first_score = 0;
+    probe->opposite_score = 0;
+    probe->first_delta = 0;
+    probe->opposite_delta = 0;
+    probe->commands = 0;
+    probe->reversals = 0;
+    probe->position = 0;
+    probe->result = SMOOTHAF_AUTO_INVALID;
+
+    if (max_commands < 2) return SMOOTHAF_AUTO_LIMIT;
+    stop = abort ? abort(ctx) : 0;
+    if (stop) return SMOOTHAF_AUTO_ABORTED;
+    if (!move(ctx, first)) return SMOOTHAF_AUTO_ABORTED;
+    probe->commands++;
+    probe->position = first;
+    stop = abort ? abort(ctx) : 0;
+    if (stop) return SMOOTHAF_AUTO_ABORTED;
+    status = measure(ctx, &score);
+    if (status != SMOOTHAF_AUTO_MEASURE_VALID)
+    {
+        if (move(ctx, -first))
+        {
+            probe->commands++;
+            probe->position = 0;
+        }
+        probe->result = status == SMOOTHAF_AUTO_MEASURE_INVALID
+                      ? SMOOTHAF_AUTO_INVALID : SMOOTHAF_AUTO_LOW_CONFIDENCE;
+        return probe->result;
+    }
+    probe->first_score = score;
+    first_delta = score - probe->initial_score;
+    probe->first_delta = first_delta;
+    if (first_delta > smoothaf_auto_deadband(probe->initial_score))
+    {
+        if (!move(ctx, -first))
+        {
+            probe->result = SMOOTHAF_AUTO_ABORTED;
+            return probe->result;
+        }
+        probe->commands++;
+        probe->position = 0;
+        probe->selected_direction = first;
+        probe->result = SMOOTHAF_AUTO_FIRST_IMPROVED;
+        return probe->result;
+    }
+    if (max_commands < 4 || max_reversals < 1)
+    {
+        if (move(ctx, -first))
+        {
+            probe->commands++;
+            probe->position = 0;
+        }
+        probe->result = SMOOTHAF_AUTO_LIMIT;
+        return probe->result;
+    }
+    if (!move(ctx, -first)) return SMOOTHAF_AUTO_ABORTED;
+    probe->commands++;
+    probe->position = 0;
+    stop = abort ? abort(ctx) : 0;
+    if (stop) return SMOOTHAF_AUTO_ABORTED;
+    if (!move(ctx, -first)) return SMOOTHAF_AUTO_ABORTED;
+    probe->commands++;
+    probe->position = -first;
+    probe->reversals = 1;
+    stop = abort ? abort(ctx) : 0;
+    if (stop) return SMOOTHAF_AUTO_ABORTED;
+    status = measure(ctx, &score);
+    if (status != SMOOTHAF_AUTO_MEASURE_VALID)
+    {
+        if (!move(ctx, first))
+        {
+            probe->result = SMOOTHAF_AUTO_ABORTED;
+            return probe->result;
+        }
+        probe->commands++;
+        probe->position = 0;
+        probe->result = status == SMOOTHAF_AUTO_MEASURE_INVALID
+                      ? SMOOTHAF_AUTO_INVALID : SMOOTHAF_AUTO_LOW_CONFIDENCE;
+        return probe->result;
+    }
+    probe->opposite_score = score;
+    opposite_delta = score - probe->initial_score;
+    probe->opposite_delta = opposite_delta;
+    if (opposite_delta > smoothaf_auto_deadband(probe->initial_score) &&
+        opposite_delta > first_delta)
+    {
+        if (!move(ctx, first))
+        {
+            probe->result = SMOOTHAF_AUTO_ABORTED;
+            return probe->result;
+        }
+        probe->commands++;
+        probe->position = 0;
+        probe->selected_direction = -first;
+        probe->result = SMOOTHAF_AUTO_OPPOSITE_IMPROVED;
+        return probe->result;
+    }
+    if (!move(ctx, first))
+    {
+        probe->result = SMOOTHAF_AUTO_ABORTED;
+        return probe->result;
+    }
+    probe->commands++;
+    probe->position = 0;
+    if (first_delta > smoothaf_auto_deadband(probe->initial_score))
+    {
+        probe->selected_direction = first;
+        probe->result = SMOOTHAF_AUTO_FIRST_IMPROVED;
+        return probe->result;
+    }
+    probe->result = SMOOTHAF_AUTO_UNCERTAIN;
+    return probe->result;
+}
+
 /* Experimental noise gates, not calibrated on hardware.
  * An improvement must exceed both an absolute floor and a relative fraction
  * of the current best score.  At a best score of 20000 the relative term is

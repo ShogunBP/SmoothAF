@@ -24,6 +24,9 @@
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
 #define SMOOTHAF_AF_NORMAL       2
+#define SMOOTHAF_TEST_DIRECTION_AUTO 0
+#define SMOOTHAF_TEST_DIRECTION_A    1
+#define SMOOTHAF_TEST_DIRECTION_B    2
 
 #define SMOOTHAF_SETTLE_MS       120
 #define SMOOTHAF_COOLDOWN_MS     80
@@ -70,13 +73,20 @@
 #define SMOOTHAF_BLOCK_FRAME         14
 #define SMOOTHAF_BLOCK_BUSY          15
 
+/* Legacy keys are retained for saved-configuration compatibility. */
 static CONFIG_INT("smoothaf.metric", smoothaf_metric, SMOOTHAF_METRIC_SAD);
+static CONFIG_INT("smoothaf.test_metric", smoothaf_test_metric, SMOOTHAF_METRIC_SAD);
+static CONFIG_INT("smoothaf.vlog_metric", smoothaf_vlog_metric, SMOOTHAF_METRIC_SAD);
 static CONFIG_INT("smoothaf.step", smoothaf_step, 1);
+static CONFIG_INT("smoothaf.test_step", smoothaf_test_step, 1);
+static CONFIG_INT("smoothaf.vlog_step", smoothaf_vlog_step, 1);
 /* Diagnostic Direction is reserved for explicit diagnostic movement.  Vlog AF
  * has its own persisted initial direction so changing the diagnostic control
  * cannot bias an already armed or newly automatic episode. */
 static CONFIG_INT("smoothaf.dir", smoothaf_direction_choice, 0);
 static CONFIG_INT("smoothaf.af_dir", smoothaf_af_direction_choice, 0);
+static CONFIG_INT("smoothaf.test_direction", smoothaf_test_direction,
+                  SMOOTHAF_TEST_DIRECTION_AUTO);
 static CONFIG_INT("smoothaf.hc_mode", smoothaf_hc_mode, SMOOTHAF_HC_LEGACY);
 static CONFIG_INT("smoothaf.af_mode", smoothaf_af_mode, -1);
 static CONFIG_INT("smoothaf.monitor_interval", smoothaf_monitor_interval,
@@ -115,6 +125,14 @@ static volatile int smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
 static volatile int smoothaf_last_phase;
 static volatile int smoothaf_last_algorithm_valid;
 static volatile int smoothaf_last_algorithm_status;
+static volatile int smoothaf_test_session;
+static volatile int smoothaf_test_auto_result;
+static volatile int smoothaf_test_auto_commands;
+static volatile int smoothaf_test_auto_reversals;
+static volatile int smoothaf_test_auto_first_score;
+static volatile int smoothaf_test_auto_opposite_score;
+static volatile int smoothaf_test_auto_first_delta;
+static volatile int smoothaf_test_auto_opposite_delta;
 static volatile int smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_IDLE;
 static volatile int smoothaf_af_move_attempts;
 static volatile int smoothaf_af_lens_calls;
@@ -164,6 +182,7 @@ static struct smoothaf_movie_recording_state smoothaf_movie_recording;
 static volatile int smoothaf_movie_automatic_session;
 static volatile int smoothaf_movie_start_pending;
 static struct semaphore *smoothaf_sem;
+static int smoothaf_search_direction = -1;
 
 #define SMOOTHAF_MEASURE_OK       0
 #define SMOOTHAF_MEASURE_LOW      1
@@ -362,7 +381,7 @@ static void smoothaf_episode_summary_publish(int result, uint32_t ended_ms)
                                SMOOTHAF_EPISODE_EVENT_COMPLETE, result,
                                summary.final_score, summary.best_score,
                                summary.confidence, smoothaf_vlog_af.last_direction,
-                               smoothaf_step, summary.final_position,
+                               smoothaf_vlog_step, summary.final_position,
                                summary.best_position, summary.lens_return,
                                smoothaf_diag_elapsed(summary.started_ms, ended_ms));
     smoothaf_episode_log.events[(smoothaf_episode_log.event_head +
@@ -387,7 +406,7 @@ static void smoothaf_episode_begin(smoothaf_episode_event_type_t type)
     smoothaf_episode_event(type, SMOOTHAF_EPISODE_RESULT_NONE,
                            smoothaf_vlog_af.initial_score,
                            smoothaf_vlog_af.best, smoothaf_af_confidence,
-                           smoothaf_vlog_af.direction, smoothaf_step,
+                           smoothaf_vlog_af.direction, smoothaf_vlog_step,
                            smoothaf_vlog_af.current_position, now, now);
 }
 
@@ -456,6 +475,16 @@ static int smoothaf_af_direction_value(void)
     return smoothaf_af_direction_choice ? 1 : -1;
 }
 
+static int smoothaf_test_direction_value(void)
+{
+    return smoothaf_test_direction == SMOOTHAF_TEST_DIRECTION_B ? 1 : -1;
+}
+
+static int smoothaf_active_metric(void)
+{
+    return smoothaf_test_session ? smoothaf_test_metric : smoothaf_vlog_metric;
+}
+
 static void smoothaf_monitor_update_from_measurement(int score, int mean, int sad,
                                                        int laplacian, int valid,
                                                        uint32_t duration)
@@ -470,14 +499,14 @@ static void smoothaf_monitor_update_from_measurement(int score, int mean, int sa
     sample.laplacian = laplacian;
     sample.valid = valid;
     sample.confident = valid && smoothaf_has_confidence(score, mean);
-    sample.metric = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
+    sample.metric = smoothaf_active_metric() == SMOOTHAF_METRIC_LAPLACIAN
                   ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN
                   : SMOOTHAF_MONITOR_METRIC_SAD;
     sample.duration_ms = duration;
     smoothaf_monitor_accept(&smoothaf_monitor, &sample, (uint32_t)get_ms_clock());
     if (smoothaf_monitor_take_transition(&smoothaf_monitor, &from, &to))
     {
-        smoothaf_telemetry_update(score, (int)duration, 0, smoothaf_step,
+        smoothaf_telemetry_update(score, (int)duration, 0, smoothaf_vlog_step,
                                   to, valid ? 0 : 1, valid ? 0 : SMOOTHAF_BLOCK_FRAME);
         smoothaf_log_event_extended(SMOOTHAF_LOG_MONITOR, from, to,
                                     smoothaf_monitor.reference,
@@ -502,7 +531,7 @@ static void smoothaf_publish_measurement(int score, int mean, int sad, int lapla
             smoothaf_last_block = SMOOTHAF_BLOCK_FRAME;
         smoothaf_monitor_update_from_measurement(-1, mean, sad, laplacian,
                                                  0, 0);
-        smoothaf_telemetry_update(-1, 0, 0, smoothaf_step, smoothaf_status,
+        smoothaf_telemetry_update(-1, 0, 0, smoothaf_test_session ? smoothaf_test_step : smoothaf_vlog_step, smoothaf_status,
                                   1, smoothaf_last_block);
         smoothaf_log_event_extended(SMOOTHAF_LOG_ERROR, code, mean, sad,
                                     laplacian, 0);
@@ -512,7 +541,7 @@ static void smoothaf_publish_measurement(int score, int mean, int sad, int lapla
     smoothaf_last_best = score;
     smoothaf_monitor_update_from_measurement(score, mean, sad, laplacian,
                                              1, 0);
-    smoothaf_telemetry_update(score, 0, 0, smoothaf_step, smoothaf_status,
+    smoothaf_telemetry_update(score, 0, 0, smoothaf_test_session ? smoothaf_test_step : smoothaf_vlog_step, smoothaf_status,
                               0, SMOOTHAF_BLOCK_NONE);
     smoothaf_log_event_extended(SMOOTHAF_LOG_MEASURE, score, mean, sad,
                                 laplacian, code);
@@ -588,7 +617,7 @@ static void smoothaf_movie_start_automatic(void)
             is_follow_focus_active(), is_rack_focus_enabled(),
             is_focus_stack_enabled()))
         return;
-    smoothaf_monitor_start(&smoothaf_monitor, smoothaf_metric,
+    smoothaf_monitor_start(&smoothaf_monitor, smoothaf_vlog_metric,
                            (uint32_t)get_ms_clock());
     smoothaf_monitor_task_requested = 1;
     smoothaf_monitor_deinit = 0;
@@ -672,12 +701,12 @@ static int smoothaf_block_reason(void)
     if (is_follow_focus_active()) return SMOOTHAF_BLOCK_FOLLOW_FOCUS;
     if (is_rack_focus_enabled()) return SMOOTHAF_BLOCK_RACK_FOCUS;
     if (is_focus_stack_enabled()) return SMOOTHAF_BLOCK_FOCUS_STACK;
-    if (smoothaf_step < 1 || smoothaf_step > 3) return SMOOTHAF_BLOCK_PARAMS;
     return SMOOTHAF_BLOCK_NONE;
 }
 
-static int smoothaf_measure(int *score_out, int *mean_out, int *sad_out,
-                            int *laplacian_out)
+static int smoothaf_measure_with_metric(int metric, int *score_out,
+                                        int *mean_out, int *sad_out,
+                                        int *laplacian_out)
 {
     struct vram_info *vram;
     const uint8_t *base;
@@ -706,7 +735,7 @@ static int smoothaf_measure(int *score_out, int *mean_out, int *sad_out,
     top = smoothaf_roi_top(vram->height);
     base = vram->vram + top * vram->pitch + left * 2;
     smoothaf_measure_all(base, vram->pitch, &sad, &laplacian, &mean);
-    if (score_out) *score_out = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
+    if (score_out) *score_out = metric == SMOOTHAF_METRIC_LAPLACIAN
                                ? laplacian : sad;
     if (mean_out) *mean_out = mean;
     if (sad_out) *sad_out = sad;
@@ -714,7 +743,21 @@ static int smoothaf_measure(int *score_out, int *mean_out, int *sad_out,
     return 1;
 }
 
-static int smoothaf_move(int direction)
+static int smoothaf_measure(int *score_out, int *mean_out, int *sad_out,
+                            int *laplacian_out)
+{
+    return smoothaf_measure_with_metric(smoothaf_vlog_metric, score_out,
+                                        mean_out, sad_out, laplacian_out);
+}
+
+static int smoothaf_measure_test(int *score_out, int *mean_out, int *sad_out,
+                                 int *laplacian_out)
+{
+    return smoothaf_measure_with_metric(smoothaf_test_metric, score_out,
+                                        mean_out, sad_out, laplacian_out);
+}
+
+static int smoothaf_move_with_step(int direction, int step)
 {
     int start;
     int result;
@@ -724,35 +767,38 @@ static int smoothaf_move(int direction)
     movie_active = smoothaf_movie_active_recording_allowed(
         smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
         is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW);
-    if ((smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
+    if (!smoothaf_test_session &&
+        (smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
         (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE &&
          smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS))
         reason = SMOOTHAF_BLOCK_DISABLED;
-    else if ((smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
+    else if (!smoothaf_test_session &&
+             (smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
              (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
               smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) &&
              !smoothaf_enabled)
         reason = SMOOTHAF_BLOCK_DISABLED;
     else if (direction != -1 && direction != 1) reason = SMOOTHAF_BLOCK_PARAMS;
-    else if (is_movie_mode() && movie_active &&
+    else if (!smoothaf_test_session && is_movie_mode() && movie_active &&
              !(smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed))
         reason = SMOOTHAF_BLOCK_DISABLED;
-    else if (smoothaf_step < 1 || smoothaf_step > 3) reason = SMOOTHAF_BLOCK_PARAMS;
+    else if (step < 1 || step > 3) reason = SMOOTHAF_BLOCK_PARAMS;
     else reason = smoothaf_block_reason();
     if (reason)
     {
         smoothaf_last_block = reason;
         smoothaf_last_error = 1;
-        smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_GATE,
-                               SMOOTHAF_EPISODE_RESULT_BLOCKED,
-                               smoothaf_last_score, smoothaf_vlog_af.best,
-                               smoothaf_af_confidence, direction, smoothaf_step,
-                               smoothaf_vlog_af.current_position,
-                               (uint32_t)get_ms_clock(), (uint32_t)get_ms_clock());
+        if (!smoothaf_test_session)
+            smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_GATE,
+                                   SMOOTHAF_EPISODE_RESULT_BLOCKED,
+                                   smoothaf_last_score, smoothaf_vlog_af.best,
+                                   smoothaf_af_confidence, direction, step,
+                                   smoothaf_vlog_af.current_position,
+                                   (uint32_t)get_ms_clock(), (uint32_t)get_ms_clock());
         smoothaf_log_event_extended(SMOOTHAF_LOG_ABORT, reason, direction,
-                                    smoothaf_step, 0, 0);
+                                    step, 0, 0);
         smoothaf_telemetry_update(smoothaf_last_score, 0, direction,
-                                  smoothaf_step, smoothaf_status, 1, reason);
+                                  step, smoothaf_status, 1, reason);
         return 0;
     }
     if (smoothaf_af_move_attempts != INT32_MAX) smoothaf_af_move_attempts++;
@@ -760,16 +806,18 @@ static int smoothaf_move(int direction)
     smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_MOVING;
     start = get_ms_clock();
     smoothaf_last_lens_called = 0;
-    smoothaf_log_event_extended(SMOOTHAF_LOG_MOVE, direction, smoothaf_step,
+    smoothaf_log_event_extended(SMOOTHAF_LOG_MOVE, direction, step,
                                 smoothaf_last_score, 0, 0);
-    smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_DECISION, 0,
-                           smoothaf_last_score, smoothaf_vlog_af.best,
-                           smoothaf_af_confidence, direction, smoothaf_step,
-                           smoothaf_vlog_af.current_position,
-                           (uint32_t)start, (uint32_t)get_ms_clock());
-    smoothaf_telemetry_update(smoothaf_last_score, 0, direction, smoothaf_step,
+    if (!smoothaf_test_session)
+        smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_DECISION, 0,
+                               smoothaf_last_score, smoothaf_vlog_af.best,
+                               smoothaf_af_confidence, direction, step,
+                               smoothaf_vlog_af.current_position,
+                               (uint32_t)start, (uint32_t)get_ms_clock());
+    smoothaf_telemetry_update(smoothaf_last_score, 0, direction, step,
                               smoothaf_status, 0, SMOOTHAF_BLOCK_NONE);
-    if ((smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
+    if (!smoothaf_test_session &&
+        (smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
         ((smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE &&
           smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) ||
          !smoothaf_enabled || smoothaf_panic || smoothaf_cancel ||
@@ -779,41 +827,44 @@ static int smoothaf_move(int direction)
         smoothaf_last_error = 1;
         smoothaf_log_event_extended(SMOOTHAF_LOG_ABORT,
                                     smoothaf_last_block, direction,
-                                    smoothaf_step, 0, 0);
+                                    step, 0, 0);
         return 0;
     }
     smoothaf_last_lens_called = 1;
     if (smoothaf_af_lens_calls != INT32_MAX) smoothaf_af_lens_calls++;
-    if (smoothaf_vlog_af.lens_calls != UINT32_MAX) smoothaf_vlog_af.lens_calls++;
-    smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_LENS_CALL,
-                           SMOOTHAF_EPISODE_RESULT_NONE,
-                           smoothaf_last_score, smoothaf_vlog_af.best,
-                           smoothaf_af_confidence, direction, smoothaf_step,
-                           smoothaf_vlog_af.current_position,
-                           (uint32_t)start, (uint32_t)start);
-    result = lens_focus(direction, smoothaf_step, 1, 0);
+    if (!smoothaf_test_session && smoothaf_vlog_af.lens_calls != UINT32_MAX)
+        smoothaf_vlog_af.lens_calls++;
+    if (!smoothaf_test_session)
+        smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_LENS_CALL,
+                               SMOOTHAF_EPISODE_RESULT_NONE,
+                               smoothaf_last_score, smoothaf_vlog_af.best,
+                               smoothaf_af_confidence, direction, step,
+                               smoothaf_vlog_af.current_position,
+                               (uint32_t)start, (uint32_t)start);
+    result = lens_focus(direction, step, 1, 0);
     smoothaf_last_lens_return = result;
-    smoothaf_af_episode_lens_return = result;
-    smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_LENS_RETURN,
-                           result ? 0 : SMOOTHAF_EPISODE_RESULT_LENS_FAILED,
-                           smoothaf_last_score, smoothaf_vlog_af.best,
-                           smoothaf_af_confidence, direction, smoothaf_step,
-                           smoothaf_vlog_af.current_position,
-                           (uint32_t)start, (uint32_t)get_ms_clock());
+    if (!smoothaf_test_session) smoothaf_af_episode_lens_return = result;
+    if (!smoothaf_test_session)
+        smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_LENS_RETURN,
+                               result ? 0 : SMOOTHAF_EPISODE_RESULT_LENS_FAILED,
+                               smoothaf_last_score, smoothaf_vlog_af.best,
+                               smoothaf_af_confidence, direction, step,
+                               smoothaf_vlog_af.current_position,
+                               (uint32_t)start, (uint32_t)get_ms_clock());
     smoothaf_physical_movement_state = result ? SMOOTHAF_MOVEMENT_COMPLETE
                                                : SMOOTHAF_MOVEMENT_FAILED;
     /* lens_focus() returning nonzero means the Canon call was accepted.  It
      * does not confirm that the image score improved; that is measured later. */
     smoothaf_af_last_result_valid = result ? 1 : 0;
     smoothaf_log_event_extended(SMOOTHAF_LOG_CONTROLLER, direction,
-                                smoothaf_step, smoothaf_last_focus_pos,
+                                step, smoothaf_last_focus_pos,
                                 result, smoothaf_last_block);
     if (result && smoothaf_af_move_successes != INT32_MAX)
         smoothaf_af_move_successes++;
     smoothaf_last_time = (int)((uint32_t)get_ms_clock() - (uint32_t)start);
     smoothaf_last_focus_pos = lens_info.focus_pos;
     smoothaf_telemetry_update(smoothaf_last_score, smoothaf_last_time, direction,
-                              smoothaf_step, smoothaf_status, result ? 0 : 1,
+                              step, smoothaf_status, result ? 0 : 1,
                               result ? 0 : SMOOTHAF_BLOCK_NONE);
     if (!result)
     {
@@ -829,18 +880,24 @@ static int smoothaf_move(int direction)
         return 0;
     }
     msleep(SMOOTHAF_COOLDOWN_MS);
-    smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_SETTLE, 0,
-                           smoothaf_last_score, smoothaf_vlog_af.best,
-                           smoothaf_af_confidence, direction, smoothaf_step,
-                           smoothaf_vlog_af.current_position,
-                           (uint32_t)start, (uint32_t)get_ms_clock());
+    if (!smoothaf_test_session)
+        smoothaf_episode_event(SMOOTHAF_EPISODE_EVENT_SETTLE, 0,
+                               smoothaf_last_score, smoothaf_vlog_af.best,
+                               smoothaf_af_confidence, direction, step,
+                               smoothaf_vlog_af.current_position,
+                               (uint32_t)start, (uint32_t)get_ms_clock());
     return 1;
+}
+
+static int smoothaf_move(int direction)
+{
+    return smoothaf_move_with_step(direction, smoothaf_vlog_step);
 }
 
 static int smoothaf_search_move(void *ctx, int dir)
 {
     (void)ctx;
-    return smoothaf_move(dir);
+    return smoothaf_move_with_step(dir, smoothaf_test_step);
 }
 
 static int smoothaf_search_measure(void *ctx, int *score)
@@ -851,7 +908,7 @@ static int smoothaf_search_measure(void *ctx, int *score)
     (void)ctx;
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
     msleep(SMOOTHAF_SETTLE_MS);
-    if (!smoothaf_measure(score, &mean, &sad, &laplacian))
+    if (!smoothaf_measure_test(score, &mean, &sad, &laplacian))
     {
         smoothaf_publish_measurement(-1, mean, sad, laplacian, 0,
                                      SMOOTHAF_MEASURE_ERROR);
@@ -879,6 +936,29 @@ static int smoothaf_search_abort(void *ctx)
              ? SMOOTHAF_RESULT_CANCELLED : SMOOTHAF_RESULT_ERROR;
     }
     return 0;
+}
+
+static int smoothaf_auto_move(void *ctx, int direction)
+{
+    (void)ctx;
+    return smoothaf_move_with_step(direction, smoothaf_test_step);
+}
+
+static int smoothaf_auto_measure(void *ctx, int *score)
+{
+    (void)ctx;
+    if (!smoothaf_search_measure(ctx, score))
+        return SMOOTHAF_AUTO_MEASURE_INVALID;
+    if (!smoothaf_last_measure_valid)
+        return SMOOTHAF_AUTO_MEASURE_INVALID;
+    if (!smoothaf_has_confidence(*score, smoothaf_last_mean))
+        return SMOOTHAF_AUTO_MEASURE_LOW;
+    return SMOOTHAF_AUTO_MEASURE_VALID;
+}
+
+static int smoothaf_auto_abort(void *ctx)
+{
+    return smoothaf_search_abort(ctx);
 }
 
 static int smoothaf_status_from_result(enum smoothaf_result result)
@@ -1005,7 +1085,7 @@ static void smoothaf_monitor_task(void)
         sample.laplacian = laplacian;
         sample.valid = valid;
         sample.confident = valid && smoothaf_has_confidence(score, mean);
-        sample.metric = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
+        sample.metric = smoothaf_vlog_metric == SMOOTHAF_METRIC_LAPLACIAN
                       ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN : SMOOTHAF_MONITOR_METRIC_SAD;
         sample.duration_ms = completed - start;
         if (smoothaf_movie_recording.active &&
@@ -1038,7 +1118,7 @@ static void smoothaf_monitor_task(void)
                 smoothaf_vlog_af.image_ms += sample.duration_ms;
         }
         smoothaf_telemetry_update(valid ? score : -1, (int)sample.duration_ms, 0,
-                                  smoothaf_step, smoothaf_monitor.state, valid ? 0 : 1,
+                                  smoothaf_vlog_step, smoothaf_monitor.state, valid ? 0 : 1,
                                   valid ? 0 : SMOOTHAF_BLOCK_FRAME);
         result_processed = 0;
         if (smoothaf_vlog_af.armed && smoothaf_vlog_af_result_due(&smoothaf_vlog_af, completed))
@@ -1067,7 +1147,7 @@ static void smoothaf_monitor_task(void)
                                            SMOOTHAF_EPISODE_RESULT_WORSE,
                                            sample.score, smoothaf_vlog_af.best,
                                            sample.confident, smoothaf_vlog_af.direction,
-                                           smoothaf_step, smoothaf_vlog_af.current_position,
+                                           smoothaf_vlog_step, smoothaf_vlog_af.current_position,
                                            smoothaf_vlog_af.last_command_ms, completed);
                 smoothaf_vlog_af.movement_ms = smoothaf_vlog_af.last_result_ms >=
                                                smoothaf_vlog_af.last_command_ms
@@ -1080,7 +1160,7 @@ static void smoothaf_monitor_task(void)
                                        sample.score, smoothaf_vlog_af.best,
                                        sample.confident,
                                        smoothaf_vlog_af.last_direction,
-                                       smoothaf_step,
+                                       smoothaf_vlog_step,
                                        smoothaf_vlog_af.current_position,
                                        smoothaf_vlog_af.last_command_ms,
                                        completed);
@@ -1306,8 +1386,8 @@ static enum smoothaf_result smoothaf_normal_run(struct smoothaf_normal_af *norma
     int step;
     int score;
     int stop;
-    smoothaf_normal_af_init(normal, initial_score, smoothaf_direction_value(),
-                            smoothaf_step);
+    smoothaf_normal_af_init(normal, initial_score, smoothaf_search_direction,
+                            smoothaf_test_step);
     action = smoothaf_normal_af_begin(normal);
     for (;;)
     {
@@ -1320,8 +1400,8 @@ static enum smoothaf_result smoothaf_normal_run(struct smoothaf_normal_af *norma
         if (action == SMOOTHAF_NORMAL_STEP)
         {
             if (!smoothaf_normal_af_next_step(normal, &direction, &step) ||
-                step != smoothaf_step) return SMOOTHAF_RESULT_LIMIT;
-            if (!smoothaf_move(direction)) return SMOOTHAF_RESULT_LENS_ERROR;
+                step != smoothaf_test_step) return SMOOTHAF_RESULT_LIMIT;
+            if (!smoothaf_search_move(0, direction)) return SMOOTHAF_RESULT_LENS_ERROR;
             stop = smoothaf_search_abort(start);
             if (stop) return (enum smoothaf_result)stop;
         }
@@ -1342,11 +1422,11 @@ static enum smoothaf_result smoothaf_adaptive_run(
     int score;
     int stop;
     smoothaf_adaptive_policy_default(&policy);
-    policy.min_step = smoothaf_step;
-    policy.initial_step = smoothaf_step;
-    policy.max_step = smoothaf_step;
+    policy.min_step = smoothaf_test_step;
+    policy.initial_step = smoothaf_test_step;
+    policy.max_step = smoothaf_test_step;
     smoothaf_adaptive_hc_init(adaptive, &policy, initial_score,
-                              smoothaf_direction_value());
+                              smoothaf_search_direction);
     action = smoothaf_adaptive_hc_begin(adaptive);
     for (;;)
     {
@@ -1363,7 +1443,7 @@ static enum smoothaf_result smoothaf_adaptive_run(
                                                 &abstract_step))
                 return SMOOTHAF_RESULT_LIMIT;
             (void)abstract_step;
-            if (!smoothaf_move(direction)) return SMOOTHAF_RESULT_LENS_ERROR;
+            if (!smoothaf_search_move(0, direction)) return SMOOTHAF_RESULT_LENS_ERROR;
             stop = smoothaf_search_abort(start);
             if (stop) return (enum smoothaf_result)stop;
         }
@@ -1388,10 +1468,21 @@ static void smoothaf_search_task(void)
     int use_adaptive = smoothaf_af_mode == SMOOTHAF_HC_ADAPTIVE;
     int use_normal = smoothaf_af_mode == SMOOTHAF_AF_NORMAL;
     enum smoothaf_result result = SMOOTHAF_RESULT_ERROR;
-    smoothaf_hc_init(&hc, 0, 1);
+    smoothaf_test_session = 1;
+    smoothaf_last_algorithm_valid = 0;
+    smoothaf_last_algorithm_status = SMOOTHAF_STATUS_MEASURING;
+    smoothaf_search_direction = smoothaf_test_direction_value();
+    smoothaf_hc_init(&hc, 0, smoothaf_search_direction);
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
     smoothaf_last_commands = 0;
     smoothaf_last_reversals = 0;
+    smoothaf_test_auto_result = SMOOTHAF_AUTO_INVALID;
+    smoothaf_test_auto_commands = 0;
+    smoothaf_test_auto_reversals = 0;
+    smoothaf_test_auto_first_score = score;
+    smoothaf_test_auto_opposite_score = 0;
+    smoothaf_test_auto_first_delta = 0;
+    smoothaf_test_auto_opposite_delta = 0;
     reason = smoothaf_block_reason();
     if (reason)
     {
@@ -1400,7 +1491,7 @@ static void smoothaf_search_task(void)
         smoothaf_status = SMOOTHAF_STATUS_ERROR;
         goto done;
     }
-    if (!smoothaf_measure(&score, &mean, &sad, &laplacian))
+    if (!smoothaf_measure_test(&score, &mean, &sad, &laplacian))
     {
         smoothaf_publish_measurement(-1, mean, sad, laplacian, 0,
                                      SMOOTHAF_MEASURE_ERROR);
@@ -1414,6 +1505,39 @@ static void smoothaf_search_task(void)
     {
         smoothaf_status = SMOOTHAF_STATUS_NO_CONFIDENCE;
         goto done;
+    }
+    if (smoothaf_test_direction == SMOOTHAF_TEST_DIRECTION_AUTO)
+    {
+        struct smoothaf_auto_probe_config probe_config;
+        struct smoothaf_auto_probe probe;
+        /* The probe is complete before the selected controller starts. */
+        probe_config.first_direction = -1;
+        probe_config.initial_score = score;
+        probe_config.max_commands = SMOOTHAF_AUTO_MAX_COMMANDS;
+        probe_config.max_reversals = SMOOTHAF_AUTO_MAX_REVERSALS;
+        smoothaf_test_auto_result = smoothaf_auto_probe_run(
+            &probe, &probe_config, smoothaf_auto_move, smoothaf_auto_measure,
+            smoothaf_auto_abort, &start);
+        smoothaf_test_auto_commands = probe.commands;
+        smoothaf_test_auto_reversals = probe.reversals;
+        smoothaf_test_auto_first_score = probe.first_score;
+        smoothaf_test_auto_opposite_score = probe.opposite_score;
+        smoothaf_test_auto_first_delta = probe.first_delta;
+        smoothaf_test_auto_opposite_delta = probe.opposite_delta;
+        smoothaf_last_commands = probe.commands;
+        smoothaf_last_reversals = probe.reversals;
+        if (smoothaf_test_auto_result == SMOOTHAF_AUTO_ABORTED)
+        {
+            result = smoothaf_cancel ? SMOOTHAF_RESULT_CANCELLED : SMOOTHAF_RESULT_ERROR;
+            goto done;
+        }
+        if (probe.selected_direction == 0)
+        {
+            result = smoothaf_test_auto_result == SMOOTHAF_AUTO_LOW_CONFIDENCE
+                   ? SMOOTHAF_RESULT_NO_CONFIDENCE : SMOOTHAF_RESULT_LIMIT;
+            goto done;
+        }
+        smoothaf_search_direction = probe.selected_direction;
     }
     if (use_normal)
     {
@@ -1441,7 +1565,7 @@ static void smoothaf_search_task(void)
     }
     else
     {
-        result = smoothaf_hc_run(&hc, score, smoothaf_direction_value(),
+        result = smoothaf_hc_run(&hc, score, smoothaf_search_direction,
                                  smoothaf_search_move, smoothaf_search_measure,
                                  smoothaf_search_abort, &start);
         smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
@@ -1472,9 +1596,10 @@ done:
                                 smoothaf_last_best, smoothaf_last_focus_pos,
                                 smoothaf_last_commands, smoothaf_last_reversals);
     smoothaf_telemetry_update(smoothaf_last_score, smoothaf_last_time,
-                              smoothaf_direction_value(), smoothaf_step,
+                              smoothaf_search_direction, smoothaf_test_step,
                               smoothaf_status, smoothaf_last_error,
                               smoothaf_last_block);
+    smoothaf_test_session = 0;
 }
 
 static void smoothaf_task_entry(void *arg)
@@ -1604,6 +1729,12 @@ static MENU_SELECT_FUNC(smoothaf_step_select)
 
 static MENU_SELECT_FUNC(smoothaf_search_select)
 {
+    if (smoothaf_monitor.enabled || smoothaf_monitor_task_requested)
+    {
+        smoothaf_last_block = SMOOTHAF_BLOCK_BUSY;
+        smoothaf_status = SMOOTHAF_STATUS_ERROR;
+        return;
+    }
     smoothaf_start_task(SMOOTHAF_TASK_SEARCH, 1);
 }
 
@@ -1630,7 +1761,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
         smoothaf_monitor_log_transitions();
         return;
     }
-    smoothaf_monitor_start(&smoothaf_monitor, smoothaf_metric,
+    smoothaf_monitor_start(&smoothaf_monitor, smoothaf_vlog_metric,
                            (uint32_t)get_ms_clock());
     smoothaf_vlog_af_reset_session(&smoothaf_vlog_af, smoothaf_vlog_af_mode);
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
@@ -1872,7 +2003,7 @@ static int smoothaf_vlog_af_arm_block_reason(void)
     if (is_follow_focus_active()) return SMOOTHAF_BLOCK_FOLLOW_FOCUS;
     if (is_rack_focus_enabled()) return SMOOTHAF_BLOCK_RACK_FOCUS;
     if (is_focus_stack_enabled()) return SMOOTHAF_BLOCK_FOCUS_STACK;
-    if (smoothaf_step < 1 || smoothaf_step > 3) return SMOOTHAF_BLOCK_PARAMS;
+    if (smoothaf_vlog_step < 1 || smoothaf_vlog_step > 3) return SMOOTHAF_BLOCK_PARAMS;
     return SMOOTHAF_BLOCK_NONE;
 }
 
@@ -2169,6 +2300,11 @@ static const char *smoothaf_algorithm_phase_name(void)
 
 static const char *smoothaf_movement_state_name(void)
 {
+    if (smoothaf_test_session)
+    {
+        if (smoothaf_status == SMOOTHAF_STATUS_MEASURING) return "TEST MEASURING";
+        if (smoothaf_status == SMOOTHAF_STATUS_MOVING) return "TEST MOVING";
+    }
     if (smoothaf_vlog_af.awaiting_result)
         return "POST-MOVE PENDING";
     switch (smoothaf_physical_movement_state)
@@ -2190,11 +2326,14 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_phase_update)
 { MENU_SET_VALUE("%s", smoothaf_algorithm_phase_name()); }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_direction_step_update)
-{ MENU_SET_VALUE("%d / %d", (int)smoothaf_direction_value(), smoothaf_step); }
+{ MENU_SET_VALUE("%d / %d", (int)smoothaf_search_direction, smoothaf_test_step); }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_search_evolution_update)
 {
-    if (!smoothaf_last_algorithm_valid)
+    if (smoothaf_test_session)
+        MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
+                       (int)smoothaf_last_best, (int)smoothaf_last_algorithm_focus_pos);
+    else if (!smoothaf_last_algorithm_valid)
         MENU_SET_VALUE("N/A");
     else
         MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
@@ -2224,6 +2363,42 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_last_result_update)
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_time_update)
 { MENU_SET_VALUE("%d ms", (int)smoothaf_last_time); }
+
+static MENU_UPDATE_FUNC(smoothaf_test_auto_reversals_update)
+{ MENU_SET_VALUE("%d / %d", (int)smoothaf_test_auto_reversals, SMOOTHAF_AUTO_MAX_REVERSALS); }
+
+static const char *smoothaf_test_auto_result_name(int result)
+{
+    switch (result)
+    {
+        case SMOOTHAF_AUTO_FIRST_IMPROVED: return "FIRST IMPROVED";
+        case SMOOTHAF_AUTO_OPPOSITE_IMPROVED: return "OPPOSITE IMPROVED";
+        case SMOOTHAF_AUTO_UNCERTAIN: return "UNCERTAIN";
+        case SMOOTHAF_AUTO_LOW_CONFIDENCE: return "LOW CONFIDENCE";
+        case SMOOTHAF_AUTO_INVALID: return "INVALID";
+        case SMOOTHAF_AUTO_ABORTED: return "ABORTED";
+        case SMOOTHAF_AUTO_LIMIT: return "LIMIT";
+        default: return "N/A";
+    }
+}
+
+static MENU_UPDATE_FUNC(smoothaf_test_auto_result_update)
+{ MENU_SET_VALUE("%s", smoothaf_test_auto_result_name(smoothaf_test_auto_result)); }
+
+static MENU_UPDATE_FUNC(smoothaf_test_auto_commands_update)
+{ MENU_SET_VALUE("%d / %d", (int)smoothaf_test_auto_commands, SMOOTHAF_AUTO_MAX_COMMANDS); }
+
+static MENU_UPDATE_FUNC(smoothaf_test_auto_scores_update)
+{
+    MENU_SET_VALUE("%d -> %d", (int)smoothaf_test_auto_first_score,
+                   (int)smoothaf_test_auto_opposite_score);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_test_auto_deltas_update)
+{
+    MENU_SET_VALUE("%d / %d", (int)smoothaf_test_auto_first_delta,
+                   (int)smoothaf_test_auto_opposite_delta);
+}
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_confidence_update)
 { MENU_SET_VALUE("valid=%d low=%d", (int)smoothaf_monitor.metrics.valid,
@@ -2321,6 +2496,12 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Movie Active Experimental", .priv = &smoothaf_movie_active_experimental,
           .max = 1,
           .help = "Authorize physical lens_focus only for normal H.264 Movie; default OFF." },
+        { .name = "Vlog Metric", .priv = &smoothaf_vlog_metric,
+          .min = SMOOTHAF_METRIC_SAD, .max = SMOOTHAF_METRIC_LAPLACIAN,
+          .choices = CHOICES("SAD", "Laplacian"),
+          .help = "Sharpness metric used by Vlog monitoring and AF." },
+        { .name = "Vlog Step", .priv = &smoothaf_vlog_step, .min = 1, .max = 3,
+          .unit = UNIT_DEC, .help = "Physical step used by Vlog AF." },
         { .name = "Sample Int", .priv = &smoothaf_monitor_interval,
           .min = SMOOTHAF_MONITOR_INTERVAL_1000, .max = SMOOTHAF_MONITOR_INTERVAL_100,
           .choices = CHOICES("1000 ms", "500 ms", "250 ms", "100 ms"),
@@ -2445,18 +2626,36 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Lens Pos", .update = smoothaf_af_current_position_update },
         MENU_EOL,
     } },
-    { .name = "Focus Test", .select = smoothaf_search_select,
-      .help = "Start one bounded hill-climbing search; LiveView only." },
-    { .name = "AF Mode", .priv = &smoothaf_af_mode, .min = SMOOTHAF_HC_LEGACY,
-      .max = SMOOTHAF_AF_NORMAL,
-      .choices = CHOICES("Legacy HC", "Adaptive HC", "Normal AF"),
-      .help = "Controller family; does not change the Vlog AF safety gates." },
-    { .name = "Sharpness Metric", .priv = &smoothaf_metric,
-      .min = SMOOTHAF_METRIC_SAD, .max = SMOOTHAF_METRIC_LAPLACIAN,
-      .choices = CHOICES("SAD", "Laplacian"),
-      .help = "Metric shared by manual measurement and monitoring." },
-    { .name = "Step Size", .priv = &smoothaf_step, .min = 1, .max = 3,
-      .unit = UNIT_DEC, .help = "Physical lens step for explicit movement." },
+    { .name = "Focus Test", .select = menu_open_submenu,
+      .children = (struct menu_entry[]){
+        { .name = "Start Focus Test", .select = smoothaf_search_select,
+          .help = "Run the selected bounded controller; LiveView only." },
+        { .name = "AF Algorithm", .priv = &smoothaf_af_mode,
+          .min = SMOOTHAF_HC_LEGACY, .max = SMOOTHAF_AF_NORMAL,
+          .choices = CHOICES("Legacy HC", "Adaptive HC", "Normal AF"),
+          .help = "Manual Focus Test controller; Vlog AF is independent." },
+        { .name = "Test Metric", .priv = &smoothaf_test_metric,
+          .min = SMOOTHAF_METRIC_SAD, .max = SMOOTHAF_METRIC_LAPLACIAN,
+          .choices = CHOICES("SAD", "Laplacian"),
+          .help = "Sharpness metric used only by Focus Test." },
+        { .name = "Test Step", .priv = &smoothaf_test_step, .min = 1, .max = 3,
+          .unit = UNIT_DEC, .help = "Physical step used only by Focus Test." },
+        { .name = "Test Direction", .priv = &smoothaf_test_direction,
+          .min = SMOOTHAF_TEST_DIRECTION_AUTO, .max = SMOOTHAF_TEST_DIRECTION_B,
+          .choices = CHOICES("AUTO", "A", "B"),
+          .help = "AUTO probes both sides; A/B set the initial direction." },
+        { .name = "Test Status", .update = smoothaf_status_update },
+        { .name = "Test Result", .update = smoothaf_algorithm_last_result_update },
+        { .name = "AUTO Result", .update = smoothaf_test_auto_result_update },
+        { .name = "AUTO CMDs", .update = smoothaf_test_auto_commands_update },
+        { .name = "AUTO Reversals", .update = smoothaf_test_auto_reversals_update },
+        { .name = "AUTO Scores", .update = smoothaf_test_auto_scores_update },
+        { .name = "AUTO Deltas", .update = smoothaf_test_auto_deltas_update },
+        { .name = "Test Duration", .update = smoothaf_algorithm_time_update },
+        { .name = "Test CMDs", .update = smoothaf_algorithm_search_evolution_update },
+        { .name = "Best Score", .update = smoothaf_algorithm_search_evolution_update },
+        MENU_EOL,
+    } },
     { .name = "Status", .update = smoothaf_status_update },
     { .name = "STOP", .select = smoothaf_stop_select,
       .help = "Cancel future movement; a synchronous lens command may finish first." },
@@ -2482,6 +2681,14 @@ static unsigned int smoothaf_init(void)
     smoothaf_status = SMOOTHAF_STATUS_IDLE;
     smoothaf_last_algorithm_valid = 0;
     smoothaf_last_algorithm_status = SMOOTHAF_STATUS_IDLE;
+    smoothaf_test_session = 0;
+    smoothaf_test_auto_result = SMOOTHAF_AUTO_INVALID;
+    smoothaf_test_auto_commands = 0;
+    smoothaf_test_auto_reversals = 0;
+    smoothaf_test_auto_first_score = 0;
+    smoothaf_test_auto_opposite_score = 0;
+    smoothaf_test_auto_first_delta = 0;
+    smoothaf_test_auto_opposite_delta = 0;
     smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_IDLE;
     smoothaf_last_error = 0;
     smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
@@ -2515,7 +2722,7 @@ static unsigned int smoothaf_init(void)
     smoothaf_af_episode_block_reason = 0;
     smoothaf_af_episode_cancel_reason = 0;
     smoothaf_af_episode_lens_return = 0;
-    smoothaf_monitor_init(&smoothaf_monitor, smoothaf_metric,
+    smoothaf_monitor_init(&smoothaf_monitor, smoothaf_vlog_metric,
                           SMOOTHAF_MONITOR_INTERVAL_DEFAULT);
     smoothaf_movie_recording_init(&smoothaf_movie_recording);
     smoothaf_monitor_task_requested = 0;
@@ -2532,7 +2739,17 @@ static unsigned int smoothaf_init(void)
     smoothaf_telemetry_init(&smoothaf_telemetry);
     if (smoothaf_metric < SMOOTHAF_METRIC_SAD ||
         smoothaf_metric > SMOOTHAF_METRIC_LAPLACIAN) smoothaf_metric = SMOOTHAF_METRIC_SAD;
+    if (smoothaf_test_metric < SMOOTHAF_METRIC_SAD ||
+        smoothaf_test_metric > SMOOTHAF_METRIC_LAPLACIAN) smoothaf_test_metric = smoothaf_metric;
+    if (smoothaf_vlog_metric < SMOOTHAF_METRIC_SAD ||
+        smoothaf_vlog_metric > SMOOTHAF_METRIC_LAPLACIAN) smoothaf_vlog_metric = smoothaf_metric;
+    smoothaf_metric = smoothaf_vlog_metric;
     if (smoothaf_step < 1 || smoothaf_step > 3) smoothaf_step = 1;
+    if (smoothaf_test_step < 1 || smoothaf_test_step > 3) smoothaf_test_step = smoothaf_step;
+    if (smoothaf_vlog_step < 1 || smoothaf_vlog_step > 3) smoothaf_vlog_step = smoothaf_step;
+    if (smoothaf_test_direction < SMOOTHAF_TEST_DIRECTION_AUTO ||
+        smoothaf_test_direction > SMOOTHAF_TEST_DIRECTION_B)
+        smoothaf_test_direction = SMOOTHAF_TEST_DIRECTION_AUTO;
     if (smoothaf_direction_choice < 0 || smoothaf_direction_choice > 1)
         smoothaf_direction_choice = 0;
     if (smoothaf_af_direction_choice < 0 || smoothaf_af_direction_choice > 1)
@@ -2592,9 +2809,17 @@ MODULE_CBRS_END()
 
 MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_metric)
+    MODULE_CONFIG(smoothaf_test_metric)
+    MODULE_CONFIG(smoothaf_vlog_metric)
     MODULE_CONFIG(smoothaf_step)
+    MODULE_CONFIG(smoothaf_test_step)
+    MODULE_CONFIG(smoothaf_vlog_step)
     MODULE_CONFIG(smoothaf_direction_choice)
     MODULE_CONFIG(smoothaf_af_direction_choice)
+    MODULE_CONFIG(smoothaf_test_direction)
     MODULE_CONFIG(smoothaf_hc_mode)
+    MODULE_CONFIG(smoothaf_af_mode)
     MODULE_CONFIG(smoothaf_monitor_interval)
+    MODULE_CONFIG(smoothaf_vlog_episode_limit)
+    MODULE_CONFIG(smoothaf_movie_active_experimental)
 MODULE_CONFIGS_END()

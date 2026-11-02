@@ -32,6 +32,94 @@ static int failures = 0;
         } \
     } while (0)
 
+struct auto_mock
+{
+    int position;
+    int commands;
+    int directions[SMOOTHAF_AUTO_MAX_COMMANDS];
+    int scores[SMOOTHAF_AUTO_MAX_COMMANDS];
+    int statuses[SMOOTHAF_AUTO_MAX_COMMANDS];
+    int samples;
+    int stop;
+};
+
+static int auto_move(void *ctx, int direction)
+{
+    struct auto_mock *m = (struct auto_mock *)ctx;
+    if (m->commands >= SMOOTHAF_AUTO_MAX_COMMANDS) return 0;
+    m->directions[m->commands++] = direction;
+    m->position += direction;
+    return 1;
+}
+
+static int auto_measure(void *ctx, int *score)
+{
+    struct auto_mock *m = (struct auto_mock *)ctx;
+    int index = m->samples++;
+    if (index >= SMOOTHAF_AUTO_MAX_COMMANDS) return SMOOTHAF_AUTO_MEASURE_INVALID;
+    *score = m->scores[index];
+    return m->statuses[index];
+}
+
+static int auto_abort(void *ctx)
+{
+    return ((struct auto_mock *)ctx)->stop;
+}
+
+static void test_auto_probe(void)
+{
+    struct smoothaf_auto_probe_config config;
+    struct smoothaf_auto_probe probe;
+    struct auto_mock mock;
+    memset(&config, 0, sizeof(config));
+    config.first_direction = -1;
+    config.initial_score = 100;
+    config.max_commands = SMOOTHAF_AUTO_MAX_COMMANDS;
+    config.max_reversals = SMOOTHAF_AUTO_MAX_REVERSALS;
+
+    memset(&mock, 0, sizeof(mock));
+    mock.scores[0] = 140;
+    mock.statuses[0] = SMOOTHAF_AUTO_MEASURE_VALID;
+    CHECK(smoothaf_auto_probe_run(&probe, &config, auto_move, auto_measure,
+                                  auto_abort, &mock) == SMOOTHAF_AUTO_FIRST_IMPROVED,
+          "AUTO accepts first-side improvement");
+    CHECK(probe.selected_direction == -1 && probe.commands == 2 &&
+          mock.position == 0 && mock.directions[0] == -1 &&
+          mock.directions[1] == 1, "AUTO restores origin after first probe");
+
+    memset(&mock, 0, sizeof(mock));
+    mock.scores[0] = 60;
+    mock.scores[1] = 150;
+    mock.statuses[0] = SMOOTHAF_AUTO_MEASURE_VALID;
+    mock.statuses[1] = SMOOTHAF_AUTO_MEASURE_VALID;
+    CHECK(smoothaf_auto_probe_run(&probe, &config, auto_move, auto_measure,
+                                  auto_abort, &mock) == SMOOTHAF_AUTO_OPPOSITE_IMPROVED,
+          "AUTO selects opposite-side improvement");
+    CHECK(probe.selected_direction == 1 && probe.commands == 4 &&
+          mock.position == 0 && mock.directions[0] == -1 &&
+          mock.directions[1] == 1 && mock.directions[2] == 1 &&
+          mock.directions[3] == -1, "AUTO compensates both probes");
+
+    memset(&mock, 0, sizeof(mock));
+    mock.scores[0] = 100;
+    mock.scores[1] = 101;
+    mock.statuses[0] = SMOOTHAF_AUTO_MEASURE_VALID;
+    mock.statuses[1] = SMOOTHAF_AUTO_MEASURE_VALID;
+    CHECK(smoothaf_auto_probe_run(&probe, &config, auto_move, auto_measure,
+                                  auto_abort, &mock) == SMOOTHAF_AUTO_UNCERTAIN,
+          "AUTO reports uncertainty for flat valid responses");
+    CHECK(probe.selected_direction == 0 && mock.position == 0,
+          "uncertain AUTO leaves origin");
+
+    memset(&mock, 0, sizeof(mock));
+    mock.statuses[0] = SMOOTHAF_AUTO_MEASURE_LOW;
+    CHECK(smoothaf_auto_probe_run(&probe, &config, auto_move, auto_measure,
+                                  auto_abort, &mock) == SMOOTHAF_AUTO_LOW_CONFIDENCE,
+          "AUTO distinguishes low confidence");
+    CHECK(mock.commands == 2 && mock.position == 0,
+          "low confidence does not probe opposite side");
+}
+
 static int abs_i(int v)
 {
     return v < 0 ? -v : v;
@@ -719,6 +807,7 @@ static void test_adaptive_hill_climb(void)
 
 int main(void)
 {
+    test_auto_probe();
     test_uyvy_offsets();
     test_roi_and_geometry();
     test_metrics();
