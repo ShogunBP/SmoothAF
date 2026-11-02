@@ -397,6 +397,9 @@ static void test_measure_route(void)
     CHECK(smoothaf_measure_route_for(0, 0, 0) ==
           SMOOTHAF_MEASURE_ROUTE_DIRECT,
           "idle Measure starts its own task");
+    CHECK(smoothaf_measure_route_for(0, 0, 1) ==
+          SMOOTHAF_MEASURE_ROUTE_DIRECT,
+          "idle Measure does not queue even if the monitor advertises readiness");
     CHECK(smoothaf_measure_route_for(0, 1, 1) ==
           SMOOTHAF_MEASURE_ROUTE_QUEUED,
           "Measure queues on the running monitor task");

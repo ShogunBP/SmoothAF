@@ -49,6 +49,11 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_can_start(smoothaf_enabled' in source
     assert 'smoothaf_vlog_af_can_arm(' in source
     assert 'smoothaf_vlog_af_should_probe(' in source
+    assert 'smoothaf_vlog_af_advance_cooldown(' in source
+    assert 'smoothaf_vlog_af_timeout_due(' in source
+    assert 'smoothaf_vlog_af_should_cancel(' in source
+    assert 'smoothaf_vlog_af_uses_dry_run(' in source
+    assert 'smoothaf_cancel_pending_measure(' in source
     assert 'smoothaf_measure_route_for(' in source
     assert 'smoothaf_diag_page_after_refresh(' in source
     assert 'smoothaf_log_total(' in source

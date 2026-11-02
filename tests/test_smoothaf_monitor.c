@@ -19,6 +19,140 @@ static struct smoothaf_monitor_sample sample(int score, int mean, int valid, int
     return s;
 }
 
+static void test_vlog_af_lifecycle(void)
+{
+    struct smoothaf_vlog_af af;
+    uint32_t commands;
+    int position;
+    int best;
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1000);
+    CHECK(af.armed && af.state == SMOOTHAF_VLOG_AF_WAITING,
+          "episode starts armed and waiting");
+    CHECK(!smoothaf_vlog_af_advance_cooldown(&af, 5000),
+          "cooldown update does not disturb WAITING");
+    CHECK(af.state == SMOOTHAF_VLOG_AF_WAITING,
+          "WAITING stays WAITING without blur evidence");
+
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(smoothaf_vlog_af_can_command(&af, 0, 1000),
+          "DRY RUN does not require Enable");
+    commands = af.commands;
+    position = af.current_position;
+    best = af.best;
+    CHECK(smoothaf_vlog_af_dry_run_request(&af, 0, 1000),
+          "DRY RUN records a decision");
+    CHECK(af.state == SMOOTHAF_VLOG_AF_SETTLING && af.awaiting_result &&
+          af.settle_until_ms == 1120 && af.commands == commands + 1,
+          "allowed decision enters SETTLING with a settle deadline");
+    CHECK(af.current_position == position && af.best == best,
+          "DRY RUN does not move or change the best position");
+    CHECK(!smoothaf_vlog_af_result_due(&af, 1119) &&
+          smoothaf_vlog_af_result_due(&af, 1120),
+          "SETTLING waits for the configured settle time");
+
+    smoothaf_vlog_af_record_result(&af, 1100, 1120);
+    CHECK(af.state == SMOOTHAF_VLOG_AF_COOLDOWN && af.armed,
+          "IMPROVED enters COOLDOWN");
+    CHECK(af.cooldown_until_ms == 2120,
+          "COOLDOWN uses the configured duration");
+    best = af.best;
+    CHECK(!smoothaf_vlog_af_advance_cooldown(&af, 2119),
+          "COOLDOWN does not finish early");
+    CHECK(!smoothaf_vlog_af_can_command(&af, 0, 2119),
+          "COOLDOWN blocks commands before its deadline");
+    CHECK(smoothaf_vlog_af_advance_cooldown(&af, 2120),
+          "COOLDOWN finishes at its deadline");
+    CHECK(af.state == SMOOTHAF_VLOG_AF_PROBING,
+          "finished COOLDOWN returns to PROBING");
+    CHECK(af.commands == commands + 1 && af.current_position == position &&
+          af.best == best,
+          "finishing COOLDOWN does not command or move the lens");
+    CHECK(smoothaf_vlog_af_can_command(&af, 0, 2120),
+          "PROBING permits the next decision after COOLDOWN");
+    CHECK(smoothaf_vlog_af_dry_run_request(&af, 0, 2120) &&
+          af.commands == commands + 2 &&
+          af.state == SMOOTHAF_VLOG_AF_SETTLING,
+          "next decision is recorded only after COOLDOWN");
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 0, 0),
+          "ACTIVE requires Enable");
+    CHECK(smoothaf_vlog_af_can_command(&af, 1, 0),
+          "ACTIVE permits a command when enabled");
+    af.armed = 0;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
+          "disarmed ACTIVE episode cannot command");
+    af.armed = 1;
+    af.awaiting_result = 1;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
+          "awaiting result blocks another command");
+    af.awaiting_result = 0;
+    af.commands = SMOOTHAF_VLOG_AF_MAX_COMMANDS;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
+          "episode command limit is enforced");
+    af.commands = 0;
+    af.session_commands = SMOOTHAF_VLOG_AF_MAX_COMMANDS;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
+          "session command limit is enforced");
+    af.session_commands = 0;
+    af.cooldown_until_ms = 500;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 499) &&
+          smoothaf_vlog_af_can_command(&af, 1, 500),
+          "cooldown deadline blocks commands without changing state");
+
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    smoothaf_vlog_af_record_command(&af, 1000);
+    CHECK(!smoothaf_vlog_af_timeout_due(&af, 6000),
+          "timeout does not fire at the exact limit");
+    CHECK(smoothaf_vlog_af_timeout_due(&af, 6001),
+          "timeout fires during SETTLING");
+    smoothaf_vlog_af_stop(&af);
+    CHECK(!smoothaf_vlog_af_timeout_due(&af, 9000),
+          "stopped episode is not timed out");
+
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    CHECK(!smoothaf_vlog_af_should_cancel(&af, SMOOTHAF_VLOG_AF_ACTIVE),
+          "active episode is not cancelled while the mode stays ACTIVE");
+    CHECK(smoothaf_vlog_af_should_cancel(&af, SMOOTHAF_VLOG_AF_OFF),
+          "switching the mode to OFF cancels an armed episode");
+    CHECK(!smoothaf_vlog_af_uses_dry_run(&af, SMOOTHAF_VLOG_AF_ACTIVE),
+          "ACTIVE episode may use physical commands while the mode is ACTIVE");
+    CHECK(smoothaf_vlog_af_uses_dry_run(&af, SMOOTHAF_VLOG_AF_DRY_RUN),
+          "switching an ACTIVE episode to DRY RUN stops physical commands");
+    smoothaf_vlog_af_stop(&af);
+    CHECK(!smoothaf_vlog_af_should_cancel(&af, SMOOTHAF_VLOG_AF_OFF),
+          "stopped episode ignores a later OFF switch");
+
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1000);
+    CHECK(smoothaf_vlog_af_uses_dry_run(&af, SMOOTHAF_VLOG_AF_DRY_RUN),
+          "DRY RUN episode is dry");
+    CHECK(smoothaf_vlog_af_uses_dry_run(&af, SMOOTHAF_VLOG_AF_ACTIVE),
+          "DRY RUN episode cannot become physical after a mode change");
+
+    {
+        const int states[] = {
+            SMOOTHAF_VLOG_AF_PROBING,
+            SMOOTHAF_VLOG_AF_SETTLING,
+            SMOOTHAF_VLOG_AF_COOLDOWN,
+        };
+        size_t i;
+        for (i = 0; i < sizeof(states) / sizeof(states[0]); i++)
+        {
+            smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+            af.state = states[i];
+            if (states[i] == SMOOTHAF_VLOG_AF_SETTLING) af.awaiting_result = 1;
+            smoothaf_vlog_af_stop(&af);
+            CHECK(!af.armed && af.state == SMOOTHAF_VLOG_AF_COMPLETE &&
+                  !smoothaf_vlog_af_can_command(&af, 1, 9999),
+                  "STOP ends PROBING, SETTLING and COOLDOWN episodes");
+        }
+    }
+}
+
 int main(void)
 {
     struct smoothaf_monitor m;
@@ -27,17 +161,21 @@ int main(void)
     int to;
     struct smoothaf_vlog_af af;
 
+    test_vlog_af_lifecycle();
+
     smoothaf_vlog_af_init(&af);
     CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
           "Vlog AF initializes OFF and disarmed");
-    CHECK(smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1),
+    CHECK(smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0),
           "monitor task itself does not block manual arming");
-    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_DRY_RUN, 0, 0, 0),
+    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_DRY_RUN, 0, 0, 0, 0),
           "arming needs an enabled monitor");
-    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 0),
+    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 0, 0),
           "another focus task blocks arming");
-    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_OFF, 1, 0, 0),
+    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_OFF, 1, 0, 0, 0),
           "OFF mode cannot be armed");
+    CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 1),
+          "an already armed episode blocks a second arming");
 
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1000);
     CHECK(af.armed && af.state == SMOOTHAF_VLOG_AF_WAITING,

@@ -101,10 +101,12 @@ static inline const char *smoothaf_vlog_af_result_name(int result)
  * that task is the consumer of the episode, not a conflicting focus task. */
 static inline int smoothaf_vlog_af_can_arm(int mode, int monitor_enabled,
                                            int task_running,
-                                           int monitor_task_requested)
+                                           int monitor_task_requested,
+                                           int episode_armed)
 {
     if (mode == SMOOTHAF_VLOG_AF_OFF) return 0;
     if (!monitor_enabled) return 0;
+    if (episode_armed) return 0;
     if (task_running && !monitor_task_requested) return 0;
     return 1;
 }
@@ -314,21 +316,55 @@ static inline void smoothaf_vlog_af_record_command(
     af->last_direction = af->direction;
 }
 
+/* COOLDOWN is advanced by the normal monitor cycle, not by the command gate.
+ * This is a pure state update: it never records a command or moves the lens. */
+static inline int smoothaf_vlog_af_advance_cooldown(
+    struct smoothaf_vlog_af *af, uint32_t now)
+{
+    if (!af->armed || af->state != SMOOTHAF_VLOG_AF_COOLDOWN) return 0;
+    if ((int32_t)(now - af->cooldown_until_ms) < 0) return 0;
+    af->state = SMOOTHAF_VLOG_AF_PROBING;
+    return 1;
+}
+
 static inline int smoothaf_vlog_af_can_command(
     struct smoothaf_vlog_af *af, int enabled, uint32_t now)
 {
     if (!af->armed || af->mode == SMOOTHAF_VLOG_AF_OFF) return 0;
     if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && !enabled) return 0;
     if (af->awaiting_result) return 0;
-    if (af->state == SMOOTHAF_VLOG_AF_COOLDOWN &&
-        (int32_t)(now - af->cooldown_until_ms) >= 0)
-        af->state = SMOOTHAF_VLOG_AF_PROBING;
     if (af->state != SMOOTHAF_VLOG_AF_PROBING) return 0;
     if (af->commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS) return 0;
     if (af->session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS) return 0;
     if (af->cooldown_until_ms && (int32_t)(now - af->cooldown_until_ms) < 0)
         return 0;
     return 1;
+}
+
+/* Overall episode timeout, checked between monitor samples.  An armed episode
+ * that has not issued a command yet (started_ms == 0) is not timed out. */
+static inline int smoothaf_vlog_af_timeout_due(
+    const struct smoothaf_vlog_af *af, uint32_t now)
+{
+    return af->armed && af->started_ms &&
+           (uint32_t)(now - af->started_ms) > SMOOTHAF_VLOG_AF_TIMEOUT_MS;
+}
+
+/* Switching the menu mode to OFF must not leave an armed episode able to
+ * command the lens under the mode captured when it was armed. */
+static inline int smoothaf_vlog_af_should_cancel(
+    const struct smoothaf_vlog_af *af, int mode)
+{
+    return af->armed && mode == SMOOTHAF_VLOG_AF_OFF;
+}
+
+/* An episode armed as DRY RUN must stay dry even if the menu mode changes,
+ * and switching a live episode to DRY RUN must stop physical commands. */
+static inline int smoothaf_vlog_af_uses_dry_run(
+    const struct smoothaf_vlog_af *af, int mode)
+{
+    return af->mode == SMOOTHAF_VLOG_AF_DRY_RUN ||
+           mode == SMOOTHAF_VLOG_AF_DRY_RUN;
 }
 
 static inline int smoothaf_vlog_af_result_due(

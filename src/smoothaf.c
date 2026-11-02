@@ -131,6 +131,7 @@ static struct semaphore *smoothaf_sem;
 
 static int smoothaf_is_task_running(void);
 static void smoothaf_measure_task(void);
+static void smoothaf_cancel_pending_measure(void);
 
 static const char *smoothaf_status_name(void)
 {
@@ -490,6 +491,21 @@ static void smoothaf_monitor_task(void)
             smoothaf_measure_requested = 0;
             smoothaf_measure_task();
         }
+        /* A stale episode must not issue another move after its time budget. */
+        if (smoothaf_vlog_af_timeout_due(&smoothaf_vlog_af,
+                                         (uint32_t)get_ms_clock()))
+        {
+            smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_TIMEOUT;
+            smoothaf_vlog_af_stop(&smoothaf_vlog_af);
+            smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
+        }
+        if (smoothaf_vlog_af_should_cancel(&smoothaf_vlog_af,
+                                           smoothaf_vlog_af_mode))
+        {
+            smoothaf_vlog_af_stop(&smoothaf_vlog_af);
+            smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
+            smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
+        }
         if (!smoothaf_monitor_due((uint32_t)get_ms_clock(),
                                   smoothaf_monitor.metrics.next_due_ms))
         {
@@ -539,7 +555,7 @@ static void smoothaf_monitor_task(void)
         result_processed = 0;
         if (smoothaf_vlog_af.armed && smoothaf_vlog_af_result_due(&smoothaf_vlog_af, completed))
         {
-            if (smoothaf_vlog_af.started_ms && completed - smoothaf_vlog_af.started_ms > SMOOTHAF_VLOG_AF_TIMEOUT_MS)
+            if (smoothaf_vlog_af_timeout_due(&smoothaf_vlog_af, completed))
             {
                 smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_TIMEOUT;
                 smoothaf_vlog_af_stop(&smoothaf_vlog_af);
@@ -580,7 +596,8 @@ static void smoothaf_monitor_task(void)
                 smoothaf_vlog_af_stop(&smoothaf_vlog_af);
                 smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
             }
-            else if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN)
+            else if (smoothaf_vlog_af_uses_dry_run(&smoothaf_vlog_af,
+                                                    smoothaf_vlog_af_mode))
             {
                 smoothaf_vlog_af_dry_run_request(&smoothaf_vlog_af, smoothaf_enabled, completed);
                 smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
@@ -609,8 +626,12 @@ static void smoothaf_monitor_task(void)
             }
         }
         smoothaf_monitor_log_transitions();
+        /* Advance COOLDOWN only after this pass.  The state change itself never
+         * commands the lens; a later monitor pass may act on PROBING. */
+        smoothaf_vlog_af_advance_cooldown(&smoothaf_vlog_af,
+                                          (uint32_t)get_ms_clock());
     }
-    smoothaf_measure_requested = 0;
+    smoothaf_cancel_pending_measure();
     smoothaf_monitor_task_requested = 0;
 }
 
@@ -623,6 +644,7 @@ static void smoothaf_measure_task(void)
     int laplacian = 0;
     int reason = smoothaf_measure_block_reason();
     smoothaf_status = SMOOTHAF_STATUS_MEASURING;
+    smoothaf_last_measure_code = SMOOTHAF_MEASURE_WAITING;
     smoothaf_last_measure_valid = 0;
     if (reason)
     {
@@ -936,6 +958,18 @@ static int smoothaf_start_task(int task_id, int requires_enable)
     return 1;
 }
 
+/* A queued Measure must not stay WAITING after its consumer disappears. */
+static void smoothaf_cancel_pending_measure(void)
+{
+    if (!smoothaf_measure_requested) return;
+    smoothaf_measure_requested = 0;
+    smoothaf_last_measure_code = SMOOTHAF_MEASURE_ERROR;
+    smoothaf_last_measure_valid = 0;
+    smoothaf_last_error = 1;
+    smoothaf_last_block = SMOOTHAF_BLOCK_CANCELLED;
+    smoothaf_status = SMOOTHAF_STATUS_CANCELLED;
+}
+
 static MENU_SELECT_FUNC(smoothaf_measure_select)
 {
     int route = smoothaf_measure_route_for(
@@ -982,7 +1016,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
         if (smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_NONE ||
             smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_ARMED)
             smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
-        smoothaf_measure_requested = 0;
+        smoothaf_cancel_pending_measure();
         smoothaf_task_stop_requested = 1;
         smoothaf_monitor_stop(&smoothaf_monitor);
         smoothaf_monitor_task_requested = 0;
@@ -1156,7 +1190,8 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
     if (!smoothaf_vlog_af_can_arm(smoothaf_vlog_af_mode,
                                   smoothaf_monitor.enabled,
                                   smoothaf_is_task_running(),
-                                  smoothaf_monitor_task_requested))
+                                  smoothaf_monitor_task_requested,
+                                  smoothaf_vlog_af.armed))
         return;
     reason = smoothaf_block_reason();
     if (reason)
@@ -1318,7 +1353,7 @@ static MENU_SELECT_FUNC(smoothaf_stop_select)
     if (smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_NONE ||
         smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_ARMED)
         smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
-    smoothaf_measure_requested = 0;
+    smoothaf_cancel_pending_measure();
     if (monitor_was_enabled)
     {
         smoothaf_monitor_stop(&smoothaf_monitor);
@@ -1338,7 +1373,7 @@ static MENU_SELECT_FUNC(smoothaf_panic_select)
     if (smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_NONE ||
         smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_ARMED)
         smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
-    smoothaf_measure_requested = 0;
+    smoothaf_cancel_pending_measure();
     smoothaf_monitor_stop(&smoothaf_monitor);
 }
 
@@ -1567,7 +1602,7 @@ static unsigned int smoothaf_deinit(void)
     int i;
     smoothaf_monitor_deinit = 1;
     smoothaf_task_stop_requested = 1;
-    smoothaf_measure_requested = 0;
+    smoothaf_cancel_pending_measure();
     smoothaf_vlog_af_stop(&smoothaf_vlog_af);
     smoothaf_monitor_stop(&smoothaf_monitor);
     if (smoothaf_lock())
