@@ -14,22 +14,24 @@ def test_menu_shape_and_lifecycle():
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     for name in (
         '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"',
+        '"Vlog AF Mode"', '"OFF"', '"DRY RUN"', '"ACTIVE"',
+        '"Vlog AF State"', '"Start New AF Episode"', '"AF Episode Result"',
+        '"Log Page"', '"Log Entry"', '"Previous"', '"Next"', '"Clear History"',
         '"SAD Score"', '"Laplacian Score"', '"Sampling Interval"',
         '"Measure"', '"Focus Step"', '"Focus Test"', '"AF Mode"',
         '"Sharpness Metric"', '"Step Size"', '"Status"', '"Stop"',
         '"PANIC / Emergency Stop"', '"Rearm Safe Mode"'):
         assert name in menu
     for forbidden in (
-        '"Canon AF Assist"', '"Trigger Canon AF"', '"Debug Logging"',
-        '"Log Count"', '"Log Failures"', '"Log Page"', '"Log Entry"',
-        '"Previous"', '"Next"', '"Clear History"', '"Export AF Log"',
+        '"Canon AF Assist"', '"Trigger Canon AF"',
+        '"Export AF Log"',
         '"Test SD Write"', '"Test Root Create"', '"Test Root Edit"',
         '"Test File Paths"', '"Path Entry"', '"Path Result"', 'FIO_'):
         assert forbidden not in source
     assert 'smoothaf_af_assist' not in source
     assert 'SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS' not in source
-    assert 'smoothaf_log_' not in source
-    assert 'smoothaf_diag_' not in source
+    assert 'smoothaf_log_' in source
+    assert 'smoothaf_diag_' in source
     assert '#include "smoothaf_diagnostics.h"' in source
     assert 'smoothaf_telemetry' in source
     assert 'smoothaf_monitor_task' in source
