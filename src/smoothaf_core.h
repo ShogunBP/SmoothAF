@@ -153,6 +153,25 @@ static inline int smoothaf_can_start(int enabled, int panic, int running)
     return enabled && !panic && !running;
 }
 
+/* A manual measurement is read-only.  It can run directly when idle, or be
+ * queued for the already-running monitor task instead of creating a second
+ * task.  Any other running focus task wins, because it owns the lens state. */
+enum smoothaf_measure_route
+{
+    SMOOTHAF_MEASURE_ROUTE_DIRECT = 0,
+    SMOOTHAF_MEASURE_ROUTE_QUEUED,
+    SMOOTHAF_MEASURE_ROUTE_BLOCKED,
+};
+
+static inline enum smoothaf_measure_route smoothaf_measure_route_for(
+    int panic, int task_running, int monitor_accepting)
+{
+    if (panic) return SMOOTHAF_MEASURE_ROUTE_BLOCKED;
+    if (!task_running) return SMOOTHAF_MEASURE_ROUTE_DIRECT;
+    if (monitor_accepting) return SMOOTHAF_MEASURE_ROUTE_QUEUED;
+    return SMOOTHAF_MEASURE_ROUTE_BLOCKED;
+}
+
 /*
  * Compute the sharpness score of a 64x64 ROI and the mean luminance.
  * base must point to an even-aligned UYVY pixel (byte 0 of a UYVY group);

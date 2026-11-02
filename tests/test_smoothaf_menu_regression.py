@@ -16,10 +16,16 @@ def test_menu_shape_and_lifecycle():
         '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"',
         '"Vlog AF Mode"', '"OFF"', '"DRY RUN"', '"ACTIVE"',
         '"Vlog AF State"', '"Start New AF Episode"', '"AF Episode Result"',
+        '"AF Move Attempts"', '"AF Lens Calls"', '"AF Move Successes"',
+        '"AF Last Block"', '"AF Last Move Result"',
+        '"AF Commands This Episode"', '"AF Initial Score"',
+        '"AF Post-Move Score"', '"AF Best Score"', '"AF Score Delta"',
+        '"AF Best Relative Position"', '"AF Current Relative Position"',
+        '"AF Last Direction"',
         '"Log Page"', '"Log Entry"', '"Previous"', '"Next"', '"Clear History"',
         '"SAD Score"', '"Laplacian Score"', '"Sampling Interval"',
-        '"Measure"', '"Focus Step"', '"Focus Test"', '"AF Mode"',
-        '"Sharpness Metric"', '"Step Size"', '"Status"', '"Stop"',
+        '"Measure"', '"Measure Result"', '"Focus Step"', '"Focus Test"',
+        '"AF Mode"', '"Sharpness Metric"', '"Step Size"', '"Status"', '"Stop"',
         '"PANIC / Emergency Stop"', '"Rearm Safe Mode"'):
         assert name in menu
     for forbidden in (
@@ -41,6 +47,16 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_panic_latch' in source
     assert 'smoothaf_panic_rearm' in source
     assert 'smoothaf_can_start(smoothaf_enabled' in source
+    assert 'smoothaf_vlog_af_can_arm(' in source
+    assert 'smoothaf_vlog_af_should_probe(' in source
+    assert 'smoothaf_measure_route_for(' in source
+    assert 'smoothaf_diag_page_after_refresh(' in source
+    assert 'smoothaf_log_total(' in source
+    assert 'SMOOTHAF_LOG_MEASURE' in source
+    assert 'SMOOTHAF_LOG_CONTROLLER' in source
+    assert 'SMOOTHAF_LOG_ERROR' in source
+    assert 'SMOOTHAF_LOG_ABORT' in source
+    assert source.count('MENU_SET_HELP(') >= 8
     assert re.search(r"struct smoothaf_telemetry\s*\{", (ROOT / "src" / "smoothaf_diagnostics.h").read_text())
 
 

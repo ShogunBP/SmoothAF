@@ -392,6 +392,25 @@ static void test_enable_and_task_gate(void)
     CHECK(SMOOTHAF_MAX_REVERSALS == 4, "reversal limit is preserved");
 }
 
+static void test_measure_route(void)
+{
+    CHECK(smoothaf_measure_route_for(0, 0, 0) ==
+          SMOOTHAF_MEASURE_ROUTE_DIRECT,
+          "idle Measure starts its own task");
+    CHECK(smoothaf_measure_route_for(0, 1, 1) ==
+          SMOOTHAF_MEASURE_ROUTE_QUEUED,
+          "Measure queues on the running monitor task");
+    CHECK(smoothaf_measure_route_for(0, 1, 0) ==
+          SMOOTHAF_MEASURE_ROUTE_BLOCKED,
+          "Measure does not race another focus task");
+    CHECK(smoothaf_measure_route_for(1, 0, 0) ==
+          SMOOTHAF_MEASURE_ROUTE_BLOCKED,
+          "panic blocks Measure start");
+    CHECK(smoothaf_measure_route_for(1, 1, 1) ==
+          SMOOTHAF_MEASURE_ROUTE_BLOCKED,
+          "panic blocks the queued monitor route");
+}
+
 static void test_measure_all_metrics(void)
 {
     uint8_t buf[64 * 128];
@@ -701,6 +720,7 @@ int main(void)
     test_roi_and_geometry();
     test_metrics();
     test_enable_and_task_gate();
+    test_measure_route();
     test_safe_mode_panic();
     test_measure_all_metrics();
     test_monitor_states_are_passive();

@@ -60,6 +60,55 @@
 #define SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED 15
 #define SMOOTHAF_VLOG_AF_SETTLE_MS      120
 
+static inline const char *smoothaf_monitor_state_name(int state)
+{
+    switch (state)
+    {
+        case SMOOTHAF_MONITOR_MONITORING:    return "MONITORING";
+        case SMOOTHAF_MONITOR_STABLE:        return "STABLE";
+        case SMOOTHAF_MONITOR_POSSIBLE_BLUR: return "POSSIBLE_BLUR";
+        case SMOOTHAF_MONITOR_UNCERTAIN:     return "UNCERTAIN";
+        case SMOOTHAF_MONITOR_PAUSED:        return "PAUSED";
+        case SMOOTHAF_MONITOR_ERROR:         return "ERROR";
+        default:                             return "IDLE";
+    }
+}
+
+static inline const char *smoothaf_vlog_af_result_name(int result)
+{
+    switch (result)
+    {
+        case SMOOTHAF_VLOG_AF_RESULT_API_SUCCESS:     return "API_SUCCESS";
+        case SMOOTHAF_VLOG_AF_RESULT_NO_MOVEMENT:     return "NO_MOVEMENT";
+        case SMOOTHAF_VLOG_AF_RESULT_BLOCKED:         return "BLOCKED";
+        case SMOOTHAF_VLOG_AF_RESULT_FAILED:          return "API_FAILED";
+        case SMOOTHAF_VLOG_AF_RESULT_CANCELLED:       return "CANCELLED";
+        case SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT:  return "NO_IMPROVEMENT";
+        case SMOOTHAF_VLOG_AF_RESULT_DRY_RUN:         return "DRY_RUN";
+        case SMOOTHAF_VLOG_AF_RESULT_ARMED:           return "ARMED";
+        case SMOOTHAF_VLOG_AF_RESULT_IMPROVED:        return "IMPROVED";
+        case SMOOTHAF_VLOG_AF_RESULT_WORSE:           return "WORSE";
+        case SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN:       return "UNCERTAIN";
+        case SMOOTHAF_VLOG_AF_RESULT_TIMEOUT:         return "TIMEOUT";
+        case SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT:    return "SEARCH_LIMIT";
+        case SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED:  return "BEST_RECOVERED";
+        case SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED: return "BEST_NOT_RECOVERED";
+        default:                                      return "NONE";
+    }
+}
+
+/* Arming is manual, but the monitor task itself is allowed to be running:
+ * that task is the consumer of the episode, not a conflicting focus task. */
+static inline int smoothaf_vlog_af_can_arm(int mode, int monitor_enabled,
+                                           int task_running,
+                                           int monitor_task_requested)
+{
+    if (mode == SMOOTHAF_VLOG_AF_OFF) return 0;
+    if (!monitor_enabled) return 0;
+    if (task_running && !monitor_task_requested) return 0;
+    return 1;
+}
+
 static inline int smoothaf_vlog_af_deadband(int best)
 {
     int relative = best / 64;
@@ -93,6 +142,16 @@ struct smoothaf_vlog_af
     uint32_t started_ms;
     int uncertain;
 };
+
+/* The passive monitor only promotes an armed episode after it has confirmed
+ * blur.  A newly armed episode must stay WAITING until that evidence exists. */
+static inline int smoothaf_vlog_af_should_probe(
+    const struct smoothaf_vlog_af *af, int monitor_state, int mode)
+{
+    return mode != SMOOTHAF_VLOG_AF_OFF && af->armed &&
+           af->state == SMOOTHAF_VLOG_AF_WAITING &&
+           monitor_state == SMOOTHAF_MONITOR_POSSIBLE_BLUR;
+}
 
 struct smoothaf_monitor_sample
 {

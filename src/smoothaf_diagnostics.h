@@ -140,6 +140,25 @@ static inline size_t smoothaf_log_read_all(const struct smoothaf_log_buffer *log
     return smoothaf_log_snapshot(log, out, max_entries);
 }
 
+/* count + dropped is monotonic even after the ring buffer is full. */
+static inline size_t smoothaf_log_total(const struct smoothaf_log_buffer *log)
+{
+    return log->count + log->dropped;
+}
+
+/* Follow the newest record while leaving a manually selected page alone. */
+static inline size_t smoothaf_diag_page_after_refresh(size_t count, size_t total,
+                                                      size_t page, size_t *seen_total)
+{
+    if (total > *seen_total)
+    {
+        *seen_total = total;
+        return count ? count - 1 : 0;
+    }
+    if (!count) return 0;
+    return page < count ? page : count - 1;
+}
+
 static inline const char *smoothaf_log_type_name(smoothaf_log_type_t type)
 {
     switch (type)
