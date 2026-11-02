@@ -99,6 +99,7 @@ static volatile int smoothaf_last_best;
 static volatile int smoothaf_last_mean;
 static volatile int smoothaf_last_time;
 static volatile int smoothaf_last_focus_pos;
+static volatile int smoothaf_last_algorithm_focus_pos;
 static volatile int smoothaf_last_error;
 static volatile int smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
 static volatile int smoothaf_last_commands;
@@ -1154,6 +1155,7 @@ static void smoothaf_search_task(void)
         smoothaf_last_reversals = normal.reversals;
         smoothaf_last_best = normal.best;
         smoothaf_last_focus_pos = normal.best_pos;
+        smoothaf_last_algorithm_focus_pos = normal.best_pos;
         smoothaf_last_score = normal.current;
     }
     else if (use_adaptive)
@@ -1165,6 +1167,7 @@ static void smoothaf_search_task(void)
         smoothaf_last_reversals = adaptive.reversals;
         smoothaf_last_best = adaptive.best;
         smoothaf_last_focus_pos = adaptive.best_pos;
+        smoothaf_last_algorithm_focus_pos = adaptive.best_pos;
         smoothaf_last_score = adaptive.current;
     }
     else
@@ -1178,6 +1181,7 @@ static void smoothaf_search_task(void)
         smoothaf_last_reversals = hc.reversals;
         smoothaf_last_best = hc.best;
         smoothaf_last_focus_pos = hc.best_pos;
+        smoothaf_last_algorithm_focus_pos = hc.best_pos;
         smoothaf_last_score = hc.current;
     }
     smoothaf_status = smoothaf_status_from_result(result);
@@ -1867,7 +1871,7 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_search_evolution_update)
         MENU_SET_VALUE("N/A");
     else
         MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
-                       (int)smoothaf_last_best, (int)smoothaf_last_focus_pos);
+                       (int)smoothaf_last_best, (int)smoothaf_last_algorithm_focus_pos);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_movement_update)
