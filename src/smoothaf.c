@@ -156,6 +156,7 @@ static int smoothaf_is_task_running(void);
 static void smoothaf_measure_task(void);
 static void smoothaf_cancel_pending_measure(void);
 static int smoothaf_start_task(int task_id, int requires_enable);
+static const char *smoothaf_movement_state_name(void);
 
 static const char *smoothaf_status_name_for(int status)
 {
@@ -2162,7 +2163,6 @@ static unsigned int smoothaf_init(void)
     smoothaf_last_algorithm_valid = 0;
     smoothaf_last_algorithm_status = SMOOTHAF_STATUS_IDLE;
     smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_IDLE;
-    smoothaf_last_lens_position = 0;
     smoothaf_last_error = 0;
     smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
     smoothaf_last_measure_code = SMOOTHAF_MEASURE_WAITING;
