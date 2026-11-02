@@ -153,6 +153,135 @@ static void test_vlog_af_lifecycle(void)
     }
 }
 
+static void test_continuous_active(void)
+{
+    struct smoothaf_vlog_af af;
+    int episode;
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    CHECK(af.continuous_armed && !af.armed,
+          "continuous ACTIVE requires one persistent manual arm");
+    CHECK(!smoothaf_vlog_af_should_resume_continuous(
+              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_VLOG_AF_ACTIVE, 1, 0),
+          "continuous ACTIVE does not move without confirmed blur");
+
+    for (episode = 0; episode < 3; episode++)
+    {
+        smoothaf_vlog_af_update_continuous_latch(
+            &af, SMOOTHAF_MONITOR_STABLE, (uint32_t)(100 + episode * 3000));
+        CHECK(smoothaf_vlog_af_should_resume_continuous(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE, 1,
+                  (uint32_t)(100 + episode * 3000)),
+              "confirmed blur starts another continuous episode");
+        smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+        af.state = SMOOTHAF_VLOG_AF_PROBING;
+        CHECK(smoothaf_vlog_af_can_command(&af, 1,
+                                           (uint32_t)(100 + episode * 3000)),
+              "continuous episode allows a gated command");
+        smoothaf_vlog_af_record_command(&af,
+                                        (uint32_t)(100 + episode * 3000));
+        af.current_position++;
+        CHECK(smoothaf_vlog_af_result_due(&af,
+                                          (uint32_t)(220 + episode * 3000)),
+              "continuous episode waits for post-move measurement");
+        smoothaf_vlog_af_record_result(&af, 1100,
+                                       (uint32_t)(220 + episode * 3000));
+        CHECK(af.episodes_completed == (uint32_t)(episode + 1) &&
+              !af.armed && af.continuous_armed,
+              "continuous episode completes without cancelling authorization");
+        CHECK(!smoothaf_vlog_af_should_resume_continuous(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE, 1,
+                  (uint32_t)(220 + episode * 3000)),
+              "cooldown blocks an immediate retrigger");
+        CHECK(smoothaf_vlog_af_cooldown_remaining(
+                  &af, (uint32_t)(1219 + episode * 3000)) == 1 &&
+              smoothaf_vlog_af_cooldown_remaining(
+                  &af, (uint32_t)(1220 + episode * 3000)) == 0,
+              "continuous cooldown reports its exact expiry boundary");
+        smoothaf_vlog_af_update_continuous_latch(
+            &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+            (uint32_t)(1220 + episode * 3000));
+        CHECK(!smoothaf_vlog_af_should_resume_continuous(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE, 1,
+                  (uint32_t)(1220 + episode * 3000)),
+              "blur-clear latch blocks retrigger after cooldown");
+        smoothaf_vlog_af_update_continuous_latch(
+            &af, SMOOTHAF_MONITOR_STABLE,
+            (uint32_t)(1221 + episode * 3000));
+    }
+    CHECK(af.session_commands == 3,
+          "continuous session telemetry accumulates across episodes");
+    smoothaf_vlog_af_update_continuous_latch(&af, SMOOTHAF_MONITOR_STABLE, 10000);
+    smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+    smoothaf_vlog_af_set_episode_limit(&af, 1);
+    CHECK(af.episode_limit == 1 &&
+          smoothaf_vlog_af_commands_available(&af) == 1,
+          "configured episode limit applies to the next episode");
+    smoothaf_vlog_af_set_episode_limit(&af, 0);
+    CHECK(af.episode_limit == SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT,
+          "invalid episode limit falls back to the default");
+    smoothaf_vlog_af_set_episode_limit(&af, 1);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_record_command(&af, 10000);
+    af.awaiting_result = 0;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 10100),
+          "per-episode command budget remains enforced");
+
+    smoothaf_vlog_af_pause_continuous(&af, SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN,
+                                      10100);
+    CHECK(af.continuous_armed && !af.armed && af.wait_for_blur_clear,
+          "invalid post-move score pauses without cancelling consent");
+    smoothaf_vlog_af_stop(&af);
+    CHECK(!af.continuous_armed && af.safety_paused && !af.armed,
+          "STOP permanently disarms continuous authorization");
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    af.safety_paused = 1;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
+          "safety pause blocks a continuous command");
+    CHECK(!smoothaf_vlog_af_should_resume_continuous(
+              &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 0),
+          "safety pause blocks automatic episode creation");
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    CHECK(!smoothaf_vlog_af_should_resume_continuous(
+              &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+              SMOOTHAF_VLOG_AF_ACTIVE, 0, 0) &&
+          !smoothaf_vlog_af_should_resume_continuous(
+              &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 0) &&
+          !smoothaf_vlog_af_should_resume_continuous(
+              &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+              SMOOTHAF_VLOG_AF_OFF, 1, 0),
+          "continuous auto-start requires ACTIVE, Enable, and blur gates");
+    smoothaf_vlog_af_pause_continuous(&af, SMOOTHAF_VLOG_AF_RESULT_FAILED, 0);
+    smoothaf_vlog_af_update_continuous_latch(&af, SMOOTHAF_MONITOR_STABLE, 2000);
+    smoothaf_vlog_af_pause_continuous(&af, SMOOTHAF_VLOG_AF_RESULT_FAILED, 2000);
+    CHECK(af.consecutive_failures == SMOOTHAF_VLOG_AF_MAX_CONSECUTIVE_FAILURES &&
+          af.safety_paused,
+          "two consecutive failures latch the continuous safety pause");
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_record_command(&af, 0);
+    CHECK(smoothaf_vlog_af_timeout_due(&af, SMOOTHAF_VLOG_AF_TIMEOUT_MS + 1),
+          "timeout works when the first command occurs at clock zero");
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1000);
+    CHECK(!smoothaf_vlog_af_should_cancel(&af, SMOOTHAF_VLOG_AF_DRY_RUN),
+          "DRY RUN episode remains dry instead of self-cancelling");
+}
+
 int main(void)
 {
     struct smoothaf_monitor m;
@@ -162,6 +291,7 @@ int main(void)
     struct smoothaf_vlog_af af;
 
     test_vlog_af_lifecycle();
+    test_continuous_active();
 
     smoothaf_vlog_af_init(&af);
     CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
@@ -328,12 +458,12 @@ int main(void)
     CHECK(m.state == SMOOTHAF_MONITOR_STABLE, "persistent recovery is stable");
 
     s = sample(1000, 200, 1, 1);
-    smoothaf_monitor_accept(&m, &s, 2600);
+    smoothaf_monitor_accept(&m, &s, 8100);
     CHECK(m.state == SMOOTHAF_MONITOR_UNCERTAIN,
           "lighting change suspends decisions");
 
     s = sample(-1, 0, 0, 0);
-    smoothaf_monitor_accept(&m, &s, 3100);
+    smoothaf_monitor_accept(&m, &s, 8600);
     CHECK(m.metrics.invalid == 1, "invalid sample counted separately");
     CHECK(m.reference == 1000, "invalid sample does not alter reference");
 

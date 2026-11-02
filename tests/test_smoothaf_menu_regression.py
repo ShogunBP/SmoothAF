@@ -14,14 +14,21 @@ def test_menu_shape_and_lifecycle():
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     for name in (
         '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"',
+        '"Task State"', '"Configured Interval"', '"Actual Interval"',
+        '"Last Duration"', '"Average Duration"', '"Maximum Duration"',
+        '"Attempts"', '"Valid Samples"', '"Invalid Samples"',
+        '"Low Confidence"', '"Blocked"', '"Skipped"', '"Overruns"',
+        '"Last Error"',
         '"Vlog AF Mode"', '"OFF"', '"DRY RUN"', '"ACTIVE"',
         '"Vlog AF State"', '"Start New AF Episode"', '"AF Episode Result"',
         '"AF Move Attempts"', '"AF Lens Calls"', '"AF Move Successes"',
         '"AF Last Block"', '"AF Command Block"', '"AF Episode Reason"',
         '"AF State Before Error"', '"AF Last Move Result"',
         '"AF Post-Move Valid"', '"AF Last Result Valid"', '"AF Commands"',
-        '"AF Commands Available"', '"AF Time Since Move"',
-        '"AF Timeout Remaining"', '"AF Commands This Episode"', '"AF Initial Score"',
+        '"AF Commands Available"', '"AF Episode Command Limit"',
+        '"AF Episodes Completed"', '"AF Consecutive Failures"',
+        '"AF Cooldown Remaining"',
+        '"AF Time Since Move"', '"AF Timeout Remaining"', '"AF Commands This Episode"', '"AF Initial Score"',
         '"AF Post-Move Score"', '"AF Best Score"', '"AF Score Delta"',
         '"AF Best Relative Position"', '"AF Current Relative Position"',
         '"AF Last Direction"',
@@ -33,7 +40,8 @@ def test_menu_shape_and_lifecycle():
         assert name in menu
     for forbidden in (
         '"Canon AF Assist"', '"Trigger Canon AF"',
-        '"Export AF Log"',
+        '"lens_autofocus"', '"PTP_AF_START"', '"lens_setup_af"',
+        '"module_send_keypress"', '"Export AF Log"',
         '"Test SD Write"', '"Test Root Create"', '"Test Root Edit"',
         '"Test File Paths"', '"Path Entry"', '"Path Result"', 'FIO_'):
         assert forbidden not in source
