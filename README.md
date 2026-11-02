@@ -1,54 +1,39 @@
 # SmoothAF
 
-**SmoothAF v0.8.0 — Experimental Local Search POC**
+**SmoothAF v0.2.0 — Experimental**
 
 **Fast focus. Minimal movement.**
 
-SmoothAF is an experimental autofocus module for Magic Lantern, designed for bounded single-shot focus experiments, read-only sharpness monitoring and a separately armed v0.8 Vlog AF local-search proof of concept. It is built for Canon EOS cameras and does not implement Canon Native Continuous AF.
+SmoothAF is an experimental autofocus module for Magic Lantern, designed to achieve fast, accurate and smooth focusing with minimal lens movement. Built for Canon EOS cameras, it aims to reduce focus hunting through efficient contrast detection, optimized focus control and lightweight algorithms.
 
 ## Overview
 
-SmoothAF performs single-shot contrast-based focus experiments in LiveView. It reads a bounded YUV422 region, scores image contrast, and uses a bounded hill-climbing search only when explicitly requested. The asynchronous Vlog Monitor is read-only: it samples the central ROI periodically, never moves the lens, and never changes exposure.
+SmoothAF performs single-shot contrast-based focus experiments in LiveView. It reads a bounded YUV422 region, scores image contrast, and uses a bounded hill-climbing search to probe focus direction. The module is conservative: no focus movement occurs while loading, activation is manual, and every search is limited.
 
 This repository is an independently organized source distribution designed to integrate with a Magic Lantern Legacy Lua Fix tree. It does not replace Magic Lantern or its loader.
 
 ## Features
 
-- Contrast metrics using SAD and Laplacian from the same frame.
-- Bounded `Legacy HC`, experimental `Adaptive HC` and bounded single-shot `Normal AF` modes.
-- Reserved `Canon AF Assist` menu with an unavailable adapter; it never moves the lens.
-- `Enable` off at module load as explicit movement armament.
-- Cooperative `Stop`; an in-flight synchronous lens command may finish.
-- Read-only `Diagnostic > Measure`, including with `Enable` off.
-- Asynchronous passive `Vlog Monitor` using one shared SmoothAF task.
-- Experimental `Vlog AF Mode`: `OFF`, `DRY RUN` and explicitly armed `ACTIVE`; DRY RUN never moves the lens.
-- Vlog AF local search uses only the existing `smoothaf_move()` boundary, up to four commands and one reversal per first-test episode, post-command settle and cooldown.
-- Sampling intervals of 1000 ms, 500 ms (default), 250 ms and 100 ms experimental.
-- No backlog: each sample schedules the next one from completion time.
-- `Vlog Monitor > Monitor Performance` is a read-only submenu exposing task state, configured/actual start-to-start interval, duration last/average/max, attempts, valid/invalid, low confidence, blocked/skipped, overruns and last error. Unavailable intervals/durations display `N/A`; values remain visible after cooperative Stop.
-- Actual interval is start-to-start; the first sample has no interval. Duration covers an executed measurement, including invalid results. Blocked and skipped cycles are not counted once per polling sleep.
-- Hysteresis, persistent blur detection, low-confidence handling and lighting-change uncertainty.
-- Fixed 32-record Debug Logging viewer with read-only navigation and task-safe Clear History.
-- AF telemetry and history remain fixed-size, volatile and RAM-only; no allocation or card I/O is used by logging, autofocus, monitor or normal diagnostics.
-- Filesystem diagnostics and `Export AF Log` are temporarily disabled in the normal menu. Experimental FIO code remains isolated behind `SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS=1` and is not copied or built by the default path.
-- Docker host and ARM build validation.
-
-## Monitor safety boundary
-
-The monitor never calls `lens_focus()`, half-shutter, Canon AF, exposure controls or VRAM writes. It does not create a task per sample. Manual Measure, Focus Step and Focus Test are not run concurrently with the monitor task. Start/Stop are explicit and Stop is cooperative.
-
-Legacy has no general task join/kill guarantee. Do not unload, reload or replace the module while any SmoothAF task is active, even after a timeout. The monitor reduces this risk because it does not call the lens, but it does not eliminate the loader limitation.
+- Contrast autofocus using SAD and Laplacian metrics.
+- Bounded hill-climbing search.
+- Configurable Step Size.
+- `Enable` remains off at module load; lens movement is always manual and bounded.
+- Read-only periodic Vlog Monitor with SAD/Laplacian, ROI, blur, and performance counters.
+- Diagnostic measurement and one-step focus command.
+- Runtime status plus one fixed-RAM telemetry record for score, timing, direction, step, state, error, and reason.
+- Canon AF Assist, filesystem diagnostics, FIO export, and history/log viewers are not included.
+- Reproducible host and ARM builds with Docker.
 
 ## Compatibility
 
-Build target:
+Validated target:
 
 - Canon EOS 600D / Rebel T3i.
 - Canon firmware 1.0.2.
 - Magic Lantern Legacy Lua Fix.
-- Canon EF 50mm f/1.8 STM used in earlier physical testing.
+- Canon EF 50mm f/1.8 STM used in physical testing.
 
-The v0.8 POC is experimental local-search contrast correction, not Canon Native Continuous AF. Host tests and ARM build results are validation evidence only; no physical v0.8 validation has been performed. No compatibility claim is made for other cameras, firmware versions, Legacy branches or lenses.
+No compatibility claim is made for other cameras, firmware versions, Magic Lantern branches, or lenses.
 
 ## Installation
 
@@ -58,29 +43,21 @@ Make an SD-card backup first. Copy the built module manually to:
 ML/MODULES/smoothaf.mo
 ```
 
-The repository never copies files to the card automatically. Do not replace `AUTOEXEC.BIN`, firmware or the loader. The v0.8 experimental artifact is `artifacts/v0.8/smoothaf.mo`; copy it manually only after controlled validation.
+The Legacy loader accepts `.mo` files from `ML/MODULES` and derives the module name from the filename, so the renamed artifact must be named `smoothaf.mo`. Confirm that the module appears in the Magic Lantern module list before enabling it. This repository never copies files to the card automatically.
 
-`Log Page`, `Log Entry`, `Previous`, `Next` and `Clear History` expose the RAM snapshot after a task finishes; `Clear History` remains task-safe. Filesystem export is not available in the normal v0.8 menu, and no file is created automatically. A future experimental FIO build must be explicitly enabled and separately validated. The RAM viewer remains capped at 32 records; AF-specific events use a separate 128-entry volatile ring (about 3.5 KiB).
-
-
-```text
-SmoothAF Version: 0.8.0
-Log Format: 1
-Mode: ACTIVE
-Configured Interval: 500 ms
-Observed Interval: 498 ms
-Session Start: 12000 ms
-Session End: 15750 ms
-Events Dropped: 2
-Timestamp(ms) Type Value1 Value2 Value3 Value4 Value5
-12000 MEASURE 842 96 840 2 0
-12500 MOVE 1 1 0 0 0
-15750 TASK-END 6 851 1 0 0
-```
+On failure, power the camera off, remove the module using a computer or card reader, and boot without it. Do not replace `AUTOEXEC.BIN`, firmware, or the loader.
 
 ## Building
 
-Requirements and private Legacy integration inputs are documented in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The short command set is:
+Requirements:
+
+- Windows PowerShell 5.1 or PowerShell 7.
+- Docker Desktop with a running daemon.
+- Docker Desktop with permission to build the `smoothaf-legacy-build:bookworm` image from `docker/Dockerfile`.
+- A compatible Magic Lantern Legacy Lua Fix source tree for integration.
+- The private `600D_102.SYM` file supplied separately by the camera owner. It is intentionally not tracked here.
+
+From the repository root:
 
 ```powershell
 .\build-smoothaf.ps1
@@ -89,56 +66,71 @@ Requirements and private Legacy integration inputs are documented in [docs/DEVEL
 .\build-smoothaf.ps1 -Release
 ```
 
-ARM validation uses a temporary staging copy of the Legacy tree and the supplied `600D_102.SYM`; the original `docs/references` tree is not modified. The v0.8 experimental artifact is `artifacts/v0.8/smoothaf.mo`; earlier artifacts are not replaced.
+The build creates the Docker image, runs the host tests with `-TestOnly`, copies the project into a temporary Legacy tree, generates module strings, builds the ARM module with `make clean all` (never `nodep`), checks dependencies, and computes SHA-256. The build never accesses an SD card or modifies a Magic Lantern tree permanently. `-Release` additionally writes a hash-named copy under `artifacts/releases/`.
 
-## First physical v0.8 POC tests
+## Usage
 
-### DRY RUN
+1. Load the module and confirm that no lens movement occurs during loading.
+2. Confirm `Enable` is off.
+3. Use `Diagnostic > Measure` for a read-only measurement.
+4. Enable the module manually.
+5. Use `Diagnostic > Focus Step` for one controlled step.
+6. Set `Step Size` only after considering the tested-lens limitations.
+7. Use `Focus Test` only after the single-step path is stable.
+8. Read `Status` for score, timing, blocking reason, task result, and `lens_focus()` diagnostics.
+9. Use `Stop` when needed. A synchronous lens command already in flight may finish.
 
-1. Use photographic LiveView with recording stopped; do not test in Movie Mode.
-2. Load `artifacts/v0.8/smoothaf.mo`; confirm `Enable=OFF` and no movement during loading.
-3. Start `Vlog Monitor`, select `Vlog AF Mode > DRY RUN`, then select `Start New AF Episode`.
-4. Use a static target and a small manual defocus. Confirm requests/state changes without lens movement, half-shutter, Canon AF or exposure changes.
-5. Stop the monitor before unloading. Never unload or reload while the task is active.
-
-### ACTIVE
-
-1. Run only after DRY RUN passes, in photographic LiveView with recording stopped and a static target.
-2. Set `Enable=ON`, select `Vlog AF Mode > ACTIVE`, start the monitor, and explicitly select `Start New AF Episode`.
-3. Observe the first episode. It is limited to four commands and one reversal, with post-command settling and cooldown.
-4. Confirm that Movie Mode, recording, MF and competing focus controllers prevent movement. Press Stop cooperatively.
-5. Require a new manual episode for another attempt. Do not unload or reload while the task is active.
-
-The ACTIVE POC is a controlled experiment, not a promise of continuous autofocus or a `LOCKED` result.
-
-## First physical monitor test
-
-1. Back up the card and copy only `artifacts/v0.6/smoothaf.mo` manually to `ML/MODULES/smoothaf.mo`.
-2. Use photographic LiveView, not Movie Mode, with recording stopped.
-3. Load the module and confirm `Enable=OFF` and no lens movement during loading.
-4. Set `Vlog Monitor > Sampling Interval` to `1000 ms`.
-5. Start `Vlog Monitor`; confirm that no lens movement, half-shutter action or Canon AF occurs.
-6. Observe `Monitor Status`, SAD, Laplacian, reference, smoothed score and sample count for a static scene.
-7. Change the scene or deliberately defocus manually; confirm uncertainty/possible-blur behavior without automatic correction.
-8. Press Stop and confirm that values freeze and no new samples appear.
-9. Never unload or reload while `Status` or monitor task activity indicates a task is active.
-10. Record camera, firmware, Legacy revision, lens, interval, metric, scene and observed counters.
+Do not unload or reload the module while a task is active.
 
 ## Known Limitations
 
-- Thresholds are heuristics and require physical validation.
-- The 100 ms interval is experimental and may be disabled if unstable.
-- Stop cannot interrupt a synchronous `lens_focus(wait=1)` command already in flight.
-- Deinit cannot prove safe unload if a task remains active after its bounded wait.
-- Static ARM validation does not prove runtime ABI compatibility or physical movement.
-- The benchmark is simulation only.
-- Canon AF Assist remains blocked because no safe Canon C API is proven.
+- Physical tests with the Canon EF 50mm f/1.8 STM found Step Size 3 working and stopping automatically.
+- Step Sizes 1 and 2 did not work in the recorded tests with that lens.
+- The search can fail when the lens starts very far out of focus.
+- Continuous AF is not implemented.
+- Other cameras, firmware versions, and lenses are not validated.
+- The module is experimental; static build validation does not prove runtime ABI compatibility or physical lens movement.
+- `lens_focus()` returning success does not by itself prove physical movement.
+- SmoothAF v0.2.0 is experimental and has no continuous AF.
+- The recorded physical tests reported successful module loading, working menus and micro-adjustments, but did not recover large focus-distance changes reliably.
+- Runtime telemetry is a single fixed-RAM record; no persistent log, history viewer, FIO export, or filesystem diagnostic is provided.
+- The recorded EF 50mm f/1.8 STM tests used Step Size 3; Step Sizes 1 and 2 did not work in those tests.
+- Legacy HC and Adaptive HC results below are not a controlled same-scene comparison and do not establish that Adaptive HC is superior.
 
-## Documentation
+### Recorded physical observations
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Development](docs/DEVELOPMENT.md)
-- [Research](docs/RESEARCH.md)
-- [Testing](docs/TESTING.md)
-- [Roadmap](docs/ROADMAP.md)
-- [Changelog](CHANGELOG.md)
+These observations were supplied for an EOS 600D / Rebel T3i with firmware 1.0.2, Magic Lantern Legacy Lua Fix, EF 50mm f/1.8 STM, Step Size 3 and the Laplacian metric. They are not a controlled comparison:
+
+| Mode | Result | Score | Best | Mean | Time | Commands | Reversals |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Legacy HC | Search Limit | 2677 | 2877 | 74 | 1381 ms | 3 | 1 |
+| Adaptive HC | Search Limit | 3059 | 3087 | 55 | 2374 ms | 4 | 3 |
+
+The module loaded on the camera, the menus worked and micro-adjustments were observed. Large changes in focus distance were not recovered reliably. These observations do not validate compatibility with other cameras, firmware, lenses or Legacy revisions.
+
+## Roadmap
+
+Possible future work, not implemented in this release:
+
+- More systematic calibration across supported lenses.
+- Better recovery and diagnostics for out-of-focus starting positions.
+- Additional hardware validation across supported Legacy ports.
+- Improved packaging and release automation.
+
+## Contributing
+
+Keep changes narrow and preserve the manual-activation and bounded-movement safety model. Run host tests and the full Docker build before submitting a change. Do not include SD-card backups, firmware dumps, private symbol tables, credentials, or personal build logs. Report the camera model, firmware, Magic Lantern revision, lens, Step Size, starting-focus condition, and exact diagnostic status when reporting a problem.
+
+## License
+
+SmoothAF is derived from code intended to integrate with Magic Lantern Legacy. License and attribution obligations for surrounding Magic Lantern APIs and copied or adapted components must be reviewed before redistribution. This repository does not add a new project license until those obligations are confirmed. See `docs/LICENSE-NOTES.md`.
+
+## Acknowledgments
+
+SmoothAF acknowledges the Magic Lantern project and its Legacy Lua Fix ecosystem. The module relies on Magic Lantern interfaces including menu registration, LiveView VRAM access, task creation, semaphores, and `lens_focus()`.
+
+Useful references:
+
+- [Magic Lantern](https://www.magiclantern.fm/)
+- [Magic Lantern source repository](https://github.com/reticulatedpines/magiclantern_simplified)
+- [SmoothAF issue tracker](https://github.com/ShogunBP/SmoothAF/issues)

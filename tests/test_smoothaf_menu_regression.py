@@ -1,142 +1,53 @@
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "smoothaf.c"
 
 
-def test_top_level_menu_does_not_count_menu_eol():
+def test_menu_shape_and_lifecycle():
     source = SOURCE.read_text(encoding="utf-8")
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
-
-    assert "MENU_EOL,\n};" not in menu
-    assert "MENU_EOL,\n        }," in menu
-    assert "menu_add(\"SmoothAF\", smoothaf_menu, COUNT(smoothaf_menu));" in source
-    assert "menu_remove(\"SmoothAF\", smoothaf_menu, COUNT(smoothaf_menu));" in source
-
-
-def test_all_smoothaf_menu_entries_have_names():
-    source = SOURCE.read_text(encoding="utf-8")
-    menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
-    menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
-
-    assert menu.count(".name =") == 73
-    assert '"Vlog Monitor"' in menu
-    assert '"Start/Stop Monitoring"' in menu
-    assert '"Monitor Status"' in menu
-    assert '"Monitor Performance"' in menu
+    assert "MENU_EOL" in menu
+    assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
+    assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     for name in (
-        '"Task State"', '"Configured Interval"', '"Actual Interval"',
-        '"Last Duration"', '"Average Duration"', '"Maximum Duration"',
-        '"Attempts"', '"Valid Samples"', '"Invalid Samples"',
-        '"Low Confidence"', '"Blocked"', '"Skipped"', '"Overruns"',
-        '"Last Error"'):
+        '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"',
+        '"SAD Score"', '"Laplacian Score"', '"Sampling Interval"',
+        '"Measure"', '"Focus Step"', '"Focus Test"', '"AF Mode"',
+        '"Sharpness Metric"', '"Step Size"', '"Status"', '"Stop"',
+        '"PANIC / Emergency Stop"', '"Rearm Safe Mode"'):
         assert name in menu
-    assert 'Periodic read-only sharpness monitoring' in menu
-    assert '"SAD Score"' in menu
-    assert '"Laplacian Score"' in menu
-    assert '"Smoothed Score"' in menu
-    assert '"Reference Score"' in menu
-    assert '"Possible Blur"' in menu
-    assert '"Sampling Interval"' in menu
-    assert '1000 ms' in menu
-    assert '500 ms' in menu
-    assert '250 ms' in menu
-    assert '100 ms' in menu
-    assert 'SMOOTHAF_TASK_MONITOR' in source
+    for forbidden in (
+        '"Canon AF Assist"', '"Trigger Canon AF"', '"Debug Logging"',
+        '"Log Count"', '"Log Failures"', '"Log Page"', '"Log Entry"',
+        '"Previous"', '"Next"', '"Clear History"', '"Export AF Log"',
+        '"Test SD Write"', '"Test Root Create"', '"Test Root Edit"',
+        '"Test File Paths"', '"Path Entry"', '"Path Result"', 'FIO_'):
+        assert forbidden not in source
+    assert 'smoothaf_af_assist' not in source
+    assert 'SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS' not in source
+    assert 'smoothaf_log_' not in source
+    assert 'smoothaf_diag_' not in source
+    assert '#include "smoothaf_diagnostics.h"' in source
+    assert 'smoothaf_telemetry' in source
     assert 'smoothaf_monitor_task' in source
-    assert 'smoothaf_task_exited' in source
     assert 'smoothaf_task_stop_requested' in source
     assert 'smoothaf_task_exited = 1;' in source
-    assert 'smoothaf_session_finished_ms = (uint32_t)get_ms_clock();' in source
-    normal_menu = re.sub(
-        r'#if SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS.*?#endif', '', menu,
-        flags=re.S)
-    for name in (
-        '"Export AF Log"', '"Test SD Write"', '"Test Root Create"',
-        '"Test Root Edit"', '"Test File Paths"', '"Path Entry"',
-        '"ML_CARD"', '"SHOOTING_CARD"', '"Path Result"'):
-        assert name not in normal_menu
-    assert '#define SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS 0' in source
-    assert 'SMOOTHAF-ROOT-TEST.LOG' in source
-    assert 'B:/SMOOTHAF-ROOT-TEST.LOG' in source
-    assert 'A:/SMOOTHAF-ROOT-TEST.LOG' in source
-    assert 'ML/SMOOTHAF-ROOT-TEST.LOG' in source
-    assert 'B:/AUTOEXEC.BIN' in source
-    assert 'B:/ML/MODULES/smoothaf.mo' in source
-    assert 'B:/SMAFRT.LOG' in source
-    assert 'FIO_OpenFile(smoothaf_fio_paths[i], O_RDONLY)' in source
-    assert 'open_called' in source
-    assert 'open_handle' in source
-    path_select = source.split('static MENU_SELECT_FUNC(smoothaf_fio_paths_select)', 1)[1].split('static MENU_SELECT_FUNC(smoothaf_fio_root_create_select)', 1)[0]
-    for forbidden in (
-        'FIO_CreateFile', 'FIO_CreateFileOrAppend', 'FIO_WriteFile',
-        'FIO_RemoveFile', 'FIO_SeekSkipFile', 'FIO_CreateDirectory',
-        'task_create'):
-        assert forbidden not in path_select
-    assert 'FIO_CloseFile(file)' in path_select
-    assert 'get_ml_card()' in source
-    assert 'get_shooting_card()' in source
-    assert 'SMOOTHAF-ROOT-CREATE.LOG' in source
-    assert 'SMOOTHAF-ROOT-TEST.LOG' in source
-    assert 'SMOOTHAF_FIO_ROOT_CREATE_CONTENT' in source
-    assert 'SMOOTHAF_FIO_ROOT_EDIT_CONTENT' in source
-    assert 'FIO_OpenFile(SMOOTHAF_FIO_ROOT_EDIT_PATH, O_RDWR | O_SYNC)' in source
-    assert 'FIO_SeekSkipFile(file, 0, SEEK_SET)' in source
-    assert 'O_CREAT' not in source.split('smoothaf_fio_root_edit_select', 1)[1].split('static MENU_SELECT_FUNC', 1)[0]
-    assert 'O_TRUNC' not in source.split('smoothaf_fio_root_edit_select', 1)[1].split('static MENU_SELECT_FUNC', 1)[0]
-    assert 'O_APPEND' not in source.split('smoothaf_fio_root_edit_select', 1)[1].split('static MENU_SELECT_FUNC', 1)[0]
-    assert '"Test FIO Callback"' not in menu
-    assert 'smoothaf_fio_task' not in source
-    assert '"Sample Count"' in menu
-    assert '"Log Count"' in menu
-    assert '"Log Failures"' in menu
-    assert '"Canon AF Assist"' in menu
-    assert '"Trigger Canon AF"' in menu
-    assert 'SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED' in source
-    assert 'smoothaf_af_assist_block_name' in source
-    assert 'smoothaf_af_assist_request' in source
-    assert '"AF Mode"' in menu
-    assert '"Debug Logging"' in menu
-    assert 'CHOICES("Legacy HC", "Adaptive HC", "Normal AF")' in menu
-    assert 'CONFIG_INT("smoothaf.af_mode", smoothaf_af_mode, -1)' in source
-    assert "smoothaf_normal_run" in source
-    assert "smoothaf_adaptive_run" in source
-    assert "lens_focus(direction, smoothaf_step, 1, 0)" in source
-    assert "MENU_EOL" in menu
-    assert '"Export AF Log"' not in normal_menu
-    assert '"Test SD Write"' not in normal_menu
-    assert 'SMOOTHAF_SD_TEST_PATH' in source
-    assert 'SMOOTHAF_SD_TEST_CONTENT' in source
-    assert 'FIO_CreateFile(SMOOTHAF_SD_TEST_PATH)' in source
-    assert 'SMOOTHAF_EXPORT_STAGE_FILE_CREATE' in source
-    assert 'handle=NULL' in source
-    assert 'smoothaf_last_export_raw_return' in source
-    normal_source = source.split('#if SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS', 1)[0]
-    assert 'FIO_OpenFile' not in normal_source
-    assert 'FIO_WriteFile' not in normal_source
-    assert '"Log Page"' in menu
-    assert '"Log Entry"' in menu
-    assert '"Previous"' in menu
-    assert '"Next"' in menu
-    assert '"Clear History"' in menu
-    assert '"PANIC / Emergency Stop"' not in menu
-    assert '"Rearm Safe Mode"' not in menu
-    assert 'smoothaf_panic' not in source
-    assert 'Safe Mode' not in source
-    assert 'Rearm' not in source
-    assert 'task_create' not in menu.split('"Vlog Monitor"', 1)[1].split('"Diagnostic"', 1)[0]
-    assert 'lens_focus' not in menu.split('"Vlog Monitor"', 1)[1].split('"Diagnostic"', 1)[0]
-    assert 'get_yuv422_vram' not in menu.split('"Vlog Monitor"', 1)[1].split('"Diagnostic"', 1)[0]
-    assert "smoothaf_diag_previous_select" in source
-    assert "smoothaf_diag_next_select" in source
-    assert "smoothaf_log_clear(&smoothaf_log)" in source
-    assert "smoothaf_start_task" not in menu.split('"Log Page"', 1)[1].split("MENU_EOL", 1)[0]
+    assert 'lens_focus(direction, smoothaf_step, 1, 0)' in source
+    assert 'smoothaf_panic_latch' in source
+    assert 'smoothaf_panic_rearm' in source
+    assert 'smoothaf_can_start(smoothaf_enabled' in source
+    assert re.search(r"struct smoothaf_telemetry\s*\{", (ROOT / "src" / "smoothaf_diagnostics.h").read_text())
+
+
+def test_removed_integration_files_are_not_present():
+    for relative in ("src/smoothaf_af_assist.h", "src/smoothaf_log_export.h", "src/smoothaf_fio_test.h"):
+        assert not (ROOT / relative).exists(), relative
 
 
 if __name__ == "__main__":
-    test_top_level_menu_does_not_count_menu_eol()
-    test_all_smoothaf_menu_entries_have_names()
+    test_menu_shape_and_lifecycle()
+    test_removed_integration_files_are_not_present()
     print("SmoothAF menu regression tests passed")

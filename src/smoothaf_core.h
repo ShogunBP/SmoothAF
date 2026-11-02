@@ -129,10 +129,28 @@ static inline int smoothaf_has_confidence(int score, int mean)
     return mean >= SMOOTHAF_MIN_LUMA && score >= SMOOTHAF_MIN_SCORE;
 }
 
-/* Movement still requires explicit Enable and an idle task reservation. */
-static inline int smoothaf_can_start(int enabled, int running)
+/* Safe-mode writes are lock-free so emergency stop remains available while
+ * the focus task owns the semaphore or is blocked in lens_focus(). */
+static inline void smoothaf_panic_latch(volatile int *enabled,
+                                        volatile int *cancel,
+                                        volatile int *panic)
 {
-    return enabled && !running;
+    *panic = 1;
+    *cancel = 1;
+    *enabled = 0;
+}
+
+static inline void smoothaf_panic_rearm(volatile int *cancel,
+                                        volatile int *panic)
+{
+    *panic = 0;
+    *cancel = 0;
+}
+
+/* Movement still requires explicit Enable, no panic latch, and an idle task. */
+static inline int smoothaf_can_start(int enabled, int panic, int running)
+{
+    return enabled && !panic && !running;
 }
 
 /*

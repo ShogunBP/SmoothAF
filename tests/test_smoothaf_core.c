@@ -21,7 +21,6 @@
 #include <string.h>
 #include "../src/smoothaf_core.h"
 #include "../src/smoothaf_diagnostics.h"
-#include "../src/smoothaf_af_assist.h"
 
 static int failures = 0;
 
@@ -32,32 +31,6 @@ static int failures = 0;
             failures++; \
         } \
     } while (0)
-
-static void test_af_assist_unavailable(void)
-{
-    struct smoothaf_af_assist assist;
-
-    smoothaf_af_assist_init(&assist);
-    CHECK(assist.state == SMOOTHAF_AF_ASSIST_UNAVAILABLE,
-          "Canon AF Assist starts unavailable");
-    CHECK(assist.block == SMOOTHAF_AF_ASSIST_BLOCK_UNSUPPORTED,
-          "Canon AF Assist starts blocked");
-    CHECK(smoothaf_af_assist_request(&assist,
-          SMOOTHAF_AF_ASSIST_BLOCK_NONE) ==
-          SMOOTHAF_AF_ASSIST_RESULT_UNAVAILABLE,
-          "unsupported Canon AF request is rejected");
-    CHECK(assist.state == SMOOTHAF_AF_ASSIST_UNAVAILABLE,
-          "rejected request does not enter flight");
-    CHECK(!assist.cleanup_required, "unavailable request needs no cleanup");
-    CHECK(smoothaf_af_assist_cancel(&assist) ==
-          SMOOTHAF_AF_ASSIST_RESULT_CANCELLED,
-          "cancel is deterministic");
-    CHECK(assist.state == SMOOTHAF_AF_ASSIST_CANCELLED,
-          "cancel records cancelled state");
-    smoothaf_af_assist_reset(&assist);
-    CHECK(assist.state == SMOOTHAF_AF_ASSIST_UNAVAILABLE,
-          "reset restores unavailable state");
-}
 
 static int abs_i(int v)
 {
@@ -391,11 +364,30 @@ static void sim_reset(struct sim_ctx *s)
     memset(s, 0, sizeof(*s));
 }
 
+static void test_safe_mode_panic(void)
+{
+    volatile int enabled = 1;
+    volatile int cancel = 0;
+    volatile int panic = 0;
+
+    CHECK(smoothaf_can_start(enabled, panic, 0),
+          "safe mode allows enabled idle start");
+    smoothaf_panic_latch(&enabled, &cancel, &panic);
+    CHECK(panic && cancel && !enabled,
+          "panic disables and cancels immediately");
+    CHECK(!smoothaf_can_start(1, panic, 0),
+          "panic blocks a new task");
+    smoothaf_panic_rearm(&cancel, &panic);
+    CHECK(!panic && !cancel, "rearm clears panic and cancellation");
+    CHECK(!smoothaf_can_start(enabled, panic, 0),
+          "rearm leaves safe mode disabled");
+}
+
 static void test_enable_and_task_gate(void)
 {
-    CHECK(!smoothaf_can_start(0, 0), "movement starts disabled");
-    CHECK(smoothaf_can_start(1, 0), "enabled movement may reserve a task");
-    CHECK(!smoothaf_can_start(1, 1), "active task blocks a second task");
+    CHECK(!smoothaf_can_start(0, 0, 0), "movement starts disabled");
+    CHECK(smoothaf_can_start(1, 0, 0), "enabled movement may reserve a task");
+    CHECK(!smoothaf_can_start(1, 0, 1), "active task blocks a second task");
     CHECK(SMOOTHAF_MAX_COMMANDS == 16, "command limit is preserved");
     CHECK(SMOOTHAF_MAX_REVERSALS == 4, "reversal limit is preserved");
 }
@@ -417,7 +409,8 @@ static void test_measure_all_metrics(void)
 
 static void test_monitor_states_are_passive(void)
 {
-    CHECK(SMOOTHAF_DIAG_CAPACITY == 32, "monitor history stays bounded");
+    CHECK(sizeof(struct smoothaf_telemetry) <= 32,
+          "telemetry remains a small fixed-RAM record");
     CHECK(SMOOTHAF_METRIC_SAD == 0, "monitor uses existing metric contract");
     CHECK(SMOOTHAF_METRIC_LAPLACIAN == 1,
           "monitor exposes the existing Laplacian contract");
@@ -567,49 +560,24 @@ static void test_hill_climb(void)
     CHECK(hc.dir == -1 || hc.dir == 1, "direction is never zero");
 }
 
-static void test_diagnostics(void)
+static void test_telemetry(void)
 {
-    struct smoothaf_log_buffer log;
-    struct smoothaf_log_entry snapshot[SMOOTHAF_DIAG_CAPACITY];
-    size_t count;
-    size_t i;
+    struct smoothaf_telemetry telemetry;
 
-    smoothaf_log_init(&log);
-    smoothaf_log_write(&log, SMOOTHAF_LOG_MOVE, 1, 2, 3);
-    CHECK(log.count == 0, "logging is off by default");
-
-    smoothaf_log_set_enabled(&log, 1);
-    for (i = 0; i < SMOOTHAF_DIAG_CAPACITY + 3; i++)
-    {
-        smoothaf_log_tick(&log, 10);
-        smoothaf_log_write(&log, SMOOTHAF_LOG_MEASURE, (int)i, 0, 0);
-    }
-    CHECK(log.count == SMOOTHAF_DIAG_CAPACITY, "logging keeps fixed capacity");
-    CHECK(log.dropped == 3, "logging counts overwritten records");
-    count = smoothaf_log_snapshot(&log, snapshot, SMOOTHAF_DIAG_CAPACITY);
-    CHECK(count == SMOOTHAF_DIAG_CAPACITY, "snapshot copies all retained records");
-    CHECK(snapshot[0].value1 == 3, "snapshot starts at oldest retained record");
-    CHECK(snapshot[SMOOTHAF_DIAG_CAPACITY - 1].value1 == 34,
-          "snapshot ends at newest retained record");
-    CHECK(strcmp(smoothaf_log_type_name(SMOOTHAF_LOG_MEASURE), "MEASURE") == 0,
-          "diagnostic type has a stable display name");
-
-    smoothaf_log_clear(&log);
-    smoothaf_log_set_enabled(&log, 1);
-    SMOOTHAF_LOG_WRITE_CONTROLLER(&log, 7, 800, -3, 5, -1);
-    CHECK(log.entries[0].value1 == 7 && log.entries[0].value2 == 800 &&
-          log.entries[0].value3 == -3 && log.entries[0].value4 == 5 &&
-          log.entries[0].value5 == -1,
-          "controller logging preserves the complete payload");
-    SMOOTHAF_LOG_WRITE_TASK_END(&log, SMOOTHAF_RESULT_LIMIT, 800, 5, 12, 3);
-    CHECK(log.entries[1].type == SMOOTHAF_LOG_TASK_END &&
-          log.entries[1].value1 == SMOOTHAF_RESULT_LIMIT &&
-          log.entries[1].value4 == 12 && log.entries[1].value5 == 3,
-          "task-end logging preserves result counters");
-
-    smoothaf_log_clear(&log);
-    CHECK(smoothaf_log_snapshot(&log, snapshot, SMOOTHAF_DIAG_CAPACITY) == 0,
-          "clear removes all records");
+    smoothaf_telemetry_init(&telemetry);
+    CHECK(telemetry.score == 0 && telemetry.duration_ms == 0,
+          "telemetry initializes to zero");
+    telemetry.score = 1234;
+    telemetry.duration_ms = 42;
+    telemetry.direction = -1;
+    telemetry.step = 2;
+    telemetry.state = 3;
+    telemetry.error = 1;
+    telemetry.reason = 7;
+    CHECK(telemetry.score == 1234 && telemetry.duration_ms == 42 &&
+          telemetry.direction == -1 && telemetry.step == 2 &&
+          telemetry.state == 3 && telemetry.error == 1 && telemetry.reason == 7,
+          "telemetry retains score, timing, direction, step, state, error and reason");
 }
 
 static void test_normal_af(void)
@@ -729,17 +697,17 @@ static void test_adaptive_hill_climb(void)
 
 int main(void)
 {
-    test_af_assist_unavailable();
     test_uyvy_offsets();
     test_roi_and_geometry();
     test_metrics();
     test_enable_and_task_gate();
+    test_safe_mode_panic();
     test_measure_all_metrics();
     test_monitor_states_are_passive();
     test_hill_climb();
     test_adaptive_hill_climb();
     test_normal_af();
-    test_diagnostics();
+    test_telemetry();
 
     if (failures)
     {
