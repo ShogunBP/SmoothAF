@@ -24,6 +24,45 @@ int main(void)
     struct smoothaf_monitor_sample s;
     int from;
     int to;
+    struct smoothaf_vlog_af af;
+
+    smoothaf_vlog_af_init(&af);
+    CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
+          "Vlog AF initializes OFF and disarmed");
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1000);
+    CHECK(af.armed && af.state == SMOOTHAF_VLOG_AF_WAITING,
+          "new episode is manually armed and waiting");
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(smoothaf_vlog_af_dry_run_request(&af, 0, 100) &&
+          af.commands == 1 && af.dry_run_requests == 1 &&
+          af.state == SMOOTHAF_VLOG_AF_SETTLING,
+          "DRY RUN records an intent without physical adapter");
+    CHECK(af.awaiting_result && af.settle_until_ms == 220,
+          "DRY RUN uses settle deadline");
+    CHECK(!smoothaf_vlog_af_result_due(&af, 219) &&
+          smoothaf_vlog_af_result_due(&af, 220),
+          "results wait until settle deadline");
+    smoothaf_vlog_af_record_result(&af, 1100, 300);
+    CHECK(af.state == SMOOTHAF_VLOG_AF_COOLDOWN && af.armed,
+          "improved result enters cooldown while budget remains");
+    CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_IMPROVED,
+          "improvement is distinct from physical movement confirmation");
+    CHECK(SMOOTHAF_VLOG_AF_MAX_COMMANDS == 4 &&
+          SMOOTHAF_VLOG_AF_MAX_REVERSALS == 1,
+          "local search is limited to four commands and one reversal");
+    CHECK(af.post_move_score == 1100 && af.score_delta == 100,
+          "post-move score and delta are recorded");
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(!smoothaf_vlog_af_can_command(&af, 0, 0),
+          "ACTIVE requires Enable");
+    CHECK(smoothaf_vlog_af_can_command(&af, 1, 0),
+          "ACTIVE permits command only when enabled");
+    smoothaf_vlog_af_record_command(&af, 0);
+    smoothaf_vlog_af_stop(&af);
+    CHECK(!af.armed && af.state == SMOOTHAF_VLOG_AF_COMPLETE,
+          "Stop ends an armed episode");
 
     CHECK(smoothaf_monitor_interval_ms(SMOOTHAF_MONITOR_INTERVAL_1000) == 1000,
           "1000 ms interval");

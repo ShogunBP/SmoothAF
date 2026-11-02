@@ -14,6 +14,10 @@
 
 /* Configuration - compile-time constants */
 #define SMOOTHAF_DIAG_CAPACITY      32
+/* AF-only history is separate so legacy 32-entry viewers remain unchanged.
+ * 128 entries cost 128 * 28 = 3584 bytes per buffer; the AF buffer is static,
+ * never placed on a task stack, and is copied in bounded chunks for export. */
+#define SMOOTHAF_AF_DIAG_CAPACITY   128
 
 /* Log entry types */
 typedef enum
@@ -57,6 +61,57 @@ struct smoothaf_log_buffer
     uint32_t tick;           /* Simulated time counter */
     size_t dropped;          /* Entries overwritten due to wrap-around */
 };
+
+struct smoothaf_af_log_buffer
+{
+    struct smoothaf_log_entry entries[SMOOTHAF_AF_DIAG_CAPACITY];
+    size_t head;
+    size_t count;
+    size_t dropped;
+};
+
+static inline void smoothaf_af_log_init(struct smoothaf_af_log_buffer *log)
+{
+    log->head = 0;
+    log->count = 0;
+    log->dropped = 0;
+}
+
+static inline void smoothaf_af_log_write(struct smoothaf_af_log_buffer *log,
+                                         uint32_t timestamp_ms,
+                                         smoothaf_log_type_t type,
+                                         int32_t v1, int32_t v2, int32_t v3,
+                                         int32_t v4, int32_t v5)
+{
+    struct smoothaf_log_entry *entry = &log->entries[log->head];
+    entry->type = type;
+    entry->timestamp_ms = timestamp_ms;
+    entry->value1 = v1;
+    entry->value2 = v2;
+    entry->value3 = v3;
+    entry->value4 = v4;
+    entry->value5 = v5;
+    log->head = (log->head + 1) % SMOOTHAF_AF_DIAG_CAPACITY;
+    if (log->count < SMOOTHAF_AF_DIAG_CAPACITY)
+        log->count++;
+    else
+        log->dropped++;
+}
+
+static inline size_t smoothaf_af_log_snapshot(
+    const struct smoothaf_af_log_buffer *log,
+    struct smoothaf_log_entry *out, size_t max_entries)
+{
+    size_t n = log->count < max_entries ? log->count : max_entries;
+    size_t start;
+    size_t i;
+    if (!n) return 0;
+    start = (log->head + SMOOTHAF_AF_DIAG_CAPACITY - log->count) %
+            SMOOTHAF_AF_DIAG_CAPACITY;
+    for (i = 0; i < n; i++)
+        out[i] = log->entries[(start + i) % SMOOTHAF_AF_DIAG_CAPACITY];
+    return n;
+}
 
 /* Initialize log buffer */
 static inline void smoothaf_log_init(struct smoothaf_log_buffer *log)

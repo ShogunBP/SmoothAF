@@ -17,7 +17,7 @@ $ProjectRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
 $Dockerfile = Join-Path $ProjectRoot 'docker\Dockerfile'
 $Image = 'smoothaf-legacy-build:bookworm'
 $OutputRoot = Join-Path $ProjectRoot 'artifacts'
-$ModulePath = Join-Path $OutputRoot 'consolidated\smoothaf.mo'
+$ModulePath = Join-Path $OutputRoot 'v0.8\smoothaf.mo'
 
 if ([string]::IsNullOrWhiteSpace($LegacyRoot)) {
     $legacyCandidates = @(
@@ -63,7 +63,7 @@ Run-Docker @('build', '-t', $Image, '-f', $Dockerfile, $ProjectRoot)
 
 if ($TestOnly) {
     $mount = "type=bind,source=$ProjectRoot,target=/src"
-    Run-Docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', 'gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_core /src/tests/test_smoothaf_core.c && /tmp/test_smoothaf_core && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_monitor /src/tests/test_smoothaf_monitor.c && /tmp/test_smoothaf_monitor && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/benchmark_smoothaf /src/tests/benchmark_smoothaf.c && /tmp/benchmark_smoothaf && python3 /src/tests/test_smoothaf_menu_regression.py')
+    Run-Docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', 'gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_core /src/tests/test_smoothaf_core.c && /tmp/test_smoothaf_core && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_monitor /src/tests/test_smoothaf_monitor.c && /tmp/test_smoothaf_monitor && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_diagnostics /src/tests/test_smoothaf_diagnostics.c && /tmp/test_smoothaf_diagnostics && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/benchmark_smoothaf /src/tests/benchmark_smoothaf.c && /tmp/benchmark_smoothaf && python3 /src/tests/test_smoothaf_menu_regression.py')
     exit 0
 }
 

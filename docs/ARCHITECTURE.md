@@ -34,11 +34,17 @@ States include `IDLE`, `MONITORING`, `STABLE`, `POSSIBLE_BLUR`, `UNCERTAIN`, `PA
 
 Sampling intervals are 1000 ms, 500 ms (default), 250 ms and 100 ms experimental. Movie and recording gates pause acquisition without backlog. Stop is cooperative and freezes the session; unload with a still-running task remains unsafe under Legacy.
 
+## Experimental v0.8 Vlog AF local-search POC
+
+The v0.8 proof of concept extends the existing monitor task; it does not create a second task. `Vlog AF Mode` starts `OFF`. A manually armed episode can run in `DRY RUN` or `ACTIVE`; DRY RUN records a command intent without calling the movement adapter, while ACTIVE requires `Enable` and rechecks `smoothaf_block_reason()` immediately before `smoothaf_move()`.
+
+Each first-test local-search episode is limited to four commands and one reversal, with `SETTLING` after a command and cooldown after improvement. A result is eligible only after the settle deadline; the current implementation uses the same periodic sample for monitor metrics and episode scoring, so physical validation must treat this as experimental. Invalid or low-confidence samples terminate the episode. Stop disarms the episode, but cannot interrupt a synchronous `lens_focus(wait=1)` already in flight. The POC uses `POSSIBLE_BLUR` only as its trigger and does not claim Canon Native Continuous AF or `LOCKED` from a score alone. `AF Lens Calls` proves API invocation, not physical displacement; `AF Episode Result` distinguishes measured improvement, block, failure and cancellation. Relative positions are command-count estimates, not encoder readings. Best-position recovery result codes are reserved until a return path is fully implemented.
+
 ## Diagnostics
 
-Debug Logging remains off by default and uses the fixed 32-entry circular history. Manual completed measurements preserve the v0.5 logging contract. Automatic samples update in-memory metrics only; the monitor logs only start/stop and important state transitions, not every sample. Snapshots and formatting occur outside extended hardware work, and no continuous card writes are performed.
+Debug Logging remains off by default and uses the fixed 32-entry circular history. Manual completed measurements preserve the v0.5 logging contract. Automatic samples update in-memory metrics only; the monitor logs only start/stop and important state transitions, not every sample. Snapshots and formatting occur outside extended hardware work. AF telemetry and history are fixed-size, volatile and RAM-only; no dynamic allocation or card I/O occurs during initialization, autofocus, monitoring, normal diagnostics or logging callbacks. `Log Page`, `Log Entry`, `Previous`, `Next` and `Clear History` expose the bounded RAM snapshot, with clearing allowed only when no task is active. Filesystem export and FIO probes are temporarily excluded from the normal menu and build; their source remains isolated behind `SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS=1` for future explicit investigation.
 
-`Diagnostic > Measure` remains a single read-only LiveView sample and can run with `Enable=OFF`. The diagnostic viewer remains read-only with Previous/Next navigation and Clear History only while no SmoothAF task is active.
+`Diagnostic > Measure` remains a single read-only LiveView sample and can run with `Enable=OFF`. The diagnostic viewer remains read-only with Previous/Next navigation and task-safe Clear History. Filesystem actions are intentionally absent from the normal menu; no FIO operation is reachable through initialization, autofocus, monitor, normal diagnostics or logging callbacks. Future FIO investigation is opt-in only through the explicit `SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS` build flag and is outside the production path.
 
 ## Canon AF Assist boundary
 

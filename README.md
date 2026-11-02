@@ -1,10 +1,10 @@
 # SmoothAF
 
-**SmoothAF v0.6.0 — Experimental**
+**SmoothAF v0.8.0 — Experimental Local Search POC**
 
 **Fast focus. Minimal movement.**
 
-SmoothAF is an experimental autofocus module for Magic Lantern, designed for bounded single-shot focus experiments and read-only sharpness monitoring. It is built for Canon EOS cameras and does not implement automatic autofocus in v0.6.
+SmoothAF is an experimental autofocus module for Magic Lantern, designed for bounded single-shot focus experiments, read-only sharpness monitoring and a separately armed v0.8 Vlog AF local-search proof of concept. It is built for Canon EOS cameras and does not implement Canon Native Continuous AF.
 
 ## Overview
 
@@ -21,12 +21,16 @@ This repository is an independently organized source distribution designed to in
 - Cooperative `Stop`; an in-flight synchronous lens command may finish.
 - Read-only `Diagnostic > Measure`, including with `Enable` off.
 - Asynchronous passive `Vlog Monitor` using one shared SmoothAF task.
+- Experimental `Vlog AF Mode`: `OFF`, `DRY RUN` and explicitly armed `ACTIVE`; DRY RUN never moves the lens.
+- Vlog AF local search uses only the existing `smoothaf_move()` boundary, up to four commands and one reversal per first-test episode, post-command settle and cooldown.
 - Sampling intervals of 1000 ms, 500 ms (default), 250 ms and 100 ms experimental.
 - No backlog: each sample schedules the next one from completion time.
 - `Vlog Monitor > Monitor Performance` is a read-only submenu exposing task state, configured/actual start-to-start interval, duration last/average/max, attempts, valid/invalid, low confidence, blocked/skipped, overruns and last error. Unavailable intervals/durations display `N/A`; values remain visible after cooperative Stop.
 - Actual interval is start-to-start; the first sample has no interval. Duration covers an executed measurement, including invalid results. Blocked and skipped cycles are not counted once per polling sleep.
 - Hysteresis, persistent blur detection, low-confidence handling and lighting-change uncertainty.
 - Fixed 32-record Debug Logging viewer with read-only navigation and task-safe Clear History.
+- AF telemetry and history remain fixed-size, volatile and RAM-only; no allocation or card I/O is used by logging, autofocus, monitor or normal diagnostics.
+- Filesystem diagnostics and `Export AF Log` are temporarily disabled in the normal menu. Experimental FIO code remains isolated behind `SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS=1` and is not copied or built by the default path.
 - Docker host and ARM build validation.
 
 ## Monitor safety boundary
@@ -44,7 +48,7 @@ Build target:
 - Magic Lantern Legacy Lua Fix.
 - Canon EF 50mm f/1.8 STM used in earlier physical testing.
 
-The v0.6 ARM build is compilation/dependency evidence only. No physical v0.6 validation has been performed. No compatibility claim is made for other cameras, firmware versions, Legacy branches or lenses.
+The v0.8 POC is experimental local-search contrast correction, not Canon Native Continuous AF. Host tests and ARM build results are validation evidence only; no physical v0.8 validation has been performed. No compatibility claim is made for other cameras, firmware versions, Legacy branches or lenses.
 
 ## Installation
 
@@ -54,7 +58,25 @@ Make an SD-card backup first. Copy the built module manually to:
 ML/MODULES/smoothaf.mo
 ```
 
-The repository never copies files to the card automatically. Do not replace `AUTOEXEC.BIN`, firmware or the loader.
+The repository never copies files to the card automatically. Do not replace `AUTOEXEC.BIN`, firmware or the loader. The v0.8 experimental artifact is `artifacts/v0.8/smoothaf.mo`; copy it manually only after controlled validation.
+
+`Log Page`, `Log Entry`, `Previous`, `Next` and `Clear History` expose the RAM snapshot after a task finishes; `Clear History` remains task-safe. Filesystem export is not available in the normal v0.8 menu, and no file is created automatically. A future experimental FIO build must be explicitly enabled and separately validated. The RAM viewer remains capped at 32 records; AF-specific events use a separate 128-entry volatile ring (about 3.5 KiB).
+
+
+```text
+SmoothAF Version: 0.8.0
+Log Format: 1
+Mode: ACTIVE
+Configured Interval: 500 ms
+Observed Interval: 498 ms
+Session Start: 12000 ms
+Session End: 15750 ms
+Events Dropped: 2
+Timestamp(ms) Type Value1 Value2 Value3 Value4 Value5
+12000 MEASURE 842 96 840 2 0
+12500 MOVE 1 1 0 0 0
+15750 TASK-END 6 851 1 0 0
+```
 
 ## Building
 
@@ -67,7 +89,27 @@ Requirements and private Legacy integration inputs are documented in [docs/DEVEL
 .\build-smoothaf.ps1 -Release
 ```
 
-ARM validation uses a temporary staging copy of the Legacy tree and the supplied `600D_102.SYM`; the original `docs/references` tree is not modified. The v0.6 experimental artifact is `artifacts/v0.6/smoothaf.mo`.
+ARM validation uses a temporary staging copy of the Legacy tree and the supplied `600D_102.SYM`; the original `docs/references` tree is not modified. The v0.8 experimental artifact is `artifacts/v0.8/smoothaf.mo`; earlier artifacts are not replaced.
+
+## First physical v0.8 POC tests
+
+### DRY RUN
+
+1. Use photographic LiveView with recording stopped; do not test in Movie Mode.
+2. Load `artifacts/v0.8/smoothaf.mo`; confirm `Enable=OFF` and no movement during loading.
+3. Start `Vlog Monitor`, select `Vlog AF Mode > DRY RUN`, then select `Start New AF Episode`.
+4. Use a static target and a small manual defocus. Confirm requests/state changes without lens movement, half-shutter, Canon AF or exposure changes.
+5. Stop the monitor before unloading. Never unload or reload while the task is active.
+
+### ACTIVE
+
+1. Run only after DRY RUN passes, in photographic LiveView with recording stopped and a static target.
+2. Set `Enable=ON`, select `Vlog AF Mode > ACTIVE`, start the monitor, and explicitly select `Start New AF Episode`.
+3. Observe the first episode. It is limited to four commands and one reversal, with post-command settling and cooldown.
+4. Confirm that Movie Mode, recording, MF and competing focus controllers prevent movement. Press Stop cooperatively.
+5. Require a new manual episode for another attempt. Do not unload or reload while the task is active.
+
+The ACTIVE POC is a controlled experiment, not a promise of continuous autofocus or a `LOCKED` result.
 
 ## First physical monitor test
 

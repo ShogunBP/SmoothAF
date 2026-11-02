@@ -23,6 +23,35 @@ The v0.6 test set covers core metrics, simultaneous SAD/Laplacian ROI calculatio
 
 The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output `DEP=23` and `Will load on: 600D` confirm build-time resolution only.
 
+## SmoothAF v0.8 validation procedure
+
+The v0.8 POC must be validated in this order:
+
+The normal build does not include filesystem export or FIO probes. `Export AF Log`, `Test SD Write`, Root FIO tests and path probes are absent from the normal menu. Logging and AF telemetry are fixed-size, volatile and RAM-only; no FIO operation is performed during initialization, autofocus, monitoring or normal diagnostics. The experimental FIO sources remain isolated and are not compiled by the default `-TestOnly` path.
+
+1. Run `.\build-smoothaf.ps1 -TestOnly` and preserve the `(SIMULATION)` label on benchmark output.
+2. Use host tests to validate mode, arm, episode, four-command limit, settle, cooldown, no-reversal behavior and Stop. Host tests do not prove lens movement safety on camera.
+3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, `DEP=23` and ELF ARM/EABI5. Save the experimental module only as `artifacts/v0.8/smoothaf.mo`.
+4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
+5. Test ACTIVE only after DRY RUN passes, with `Enable=ON`, one static target, one manually armed episode and a new manual arm for any later episode.
+6. Before interpreting the episode, record `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode` and `AF Episode Result`.
+7. `AF Lens Calls=1` proves only that `lens_focus()` was invoked. It does not prove physical displacement. `COMPLETE` alone is not success; a zero-call episode must show a no-movement, blocked or cancelled result.
+8. Do not test Movie Mode, recording, MF or competing focus controllers. Do not unload/reload while the shared task is active.
+
+A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has no general task join/kill guarantee; a task still active after the bounded deinit wait remains an unload hazard.
+
+## SmoothAF v0.8 validation record
+
+- Host tests: passed after the settle-deadline and cooldown corrections (`All SmoothAF core tests passed`; `SmoothAF monitor tests passed`).
+- Comparative benchmark: passed; scenarios reported `invariants=PASS` and output remained `(SIMULATION)`.
+- Menu regression: passed (`SmoothAF menu regression tests passed`).
+- `git diff --check`: passed; line-ending conversion warnings are non-fatal.
+- ARM staging build: passed after the Root Create/Root Edit change in an isolated Legacy-tree copy; `Will load on: 600D`, `DEP=23`, ELF ARM/EABI5, size 43480 bytes, SHA-256 `2f6d1878ec7a7d890fa303da94d01b5fa03caae503f63ec47038ee1c6197c4e9`.
+- The pre-build v0.8 artifact was preserved as `artifacts/v0.8/smoothaf.mo.pre-fio-20261101`, size 40736 bytes, SHA-256 `38711b884fff39d5922850c138a250bc7ab33a970c1ac8e49898d03d0d575ff0`.
+- Previous v0.7 experimental artifact remains preserved under `artifacts/v0.7/`; no v0.7 artifact was replaced.
+- No physical v0.8 validation or SD-card installation has been performed. DRY RUN must have zero physical lens commands; ACTIVE remains a limited experimental POC.
+- FIO export and filesystem probes are intentionally not part of the normal v0.8 validation path. The normal menu performs no card writes; host validation covers only volatile RAM telemetry and history. Experimental FIO tests remain isolated for a future explicitly enabled build and must not be treated as production validation.
+
 ## SmoothAF v0.6 validation record
 
 - Branch: `feature/vlog-monitor-async-v0.6`.

@@ -1,7 +1,14 @@
 #!/bin/bash
 
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command')
+if command -v jq >/dev/null 2>&1; then
+  COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command')
+elif command -v python >/dev/null 2>&1; then
+  COMMAND=$(printf '%s' "$INPUT" | python -c 'import json,sys; print(json.load(sys.stdin).get("tool_input", {}).get("command", ""))')
+else
+  echo "BLOCKED: cannot validate Git command because neither jq nor python is available." >&2
+  exit 2
+fi
 
 DANGEROUS_PATTERNS=(
   "git push"

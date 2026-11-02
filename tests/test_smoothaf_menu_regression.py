@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -21,7 +22,7 @@ def test_all_smoothaf_menu_entries_have_names():
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
 
-    assert menu.count(".name =") == 47
+    assert menu.count(".name =") == 73
     assert '"Vlog Monitor"' in menu
     assert '"Start/Stop Monitoring"' in menu
     assert '"Monitor Status"' in menu
@@ -48,6 +49,47 @@ def test_all_smoothaf_menu_entries_have_names():
     assert 'smoothaf_monitor_task' in source
     assert 'smoothaf_task_exited' in source
     assert 'smoothaf_task_stop_requested' in source
+    assert 'smoothaf_task_exited = 1;' in source
+    assert 'smoothaf_session_finished_ms = (uint32_t)get_ms_clock();' in source
+    normal_menu = re.sub(
+        r'#if SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS.*?#endif', '', menu,
+        flags=re.S)
+    for name in (
+        '"Export AF Log"', '"Test SD Write"', '"Test Root Create"',
+        '"Test Root Edit"', '"Test File Paths"', '"Path Entry"',
+        '"ML_CARD"', '"SHOOTING_CARD"', '"Path Result"'):
+        assert name not in normal_menu
+    assert '#define SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS 0' in source
+    assert 'SMOOTHAF-ROOT-TEST.LOG' in source
+    assert 'B:/SMOOTHAF-ROOT-TEST.LOG' in source
+    assert 'A:/SMOOTHAF-ROOT-TEST.LOG' in source
+    assert 'ML/SMOOTHAF-ROOT-TEST.LOG' in source
+    assert 'B:/AUTOEXEC.BIN' in source
+    assert 'B:/ML/MODULES/smoothaf.mo' in source
+    assert 'B:/SMAFRT.LOG' in source
+    assert 'FIO_OpenFile(smoothaf_fio_paths[i], O_RDONLY)' in source
+    assert 'open_called' in source
+    assert 'open_handle' in source
+    path_select = source.split('static MENU_SELECT_FUNC(smoothaf_fio_paths_select)', 1)[1].split('static MENU_SELECT_FUNC(smoothaf_fio_root_create_select)', 1)[0]
+    for forbidden in (
+        'FIO_CreateFile', 'FIO_CreateFileOrAppend', 'FIO_WriteFile',
+        'FIO_RemoveFile', 'FIO_SeekSkipFile', 'FIO_CreateDirectory',
+        'task_create'):
+        assert forbidden not in path_select
+    assert 'FIO_CloseFile(file)' in path_select
+    assert 'get_ml_card()' in source
+    assert 'get_shooting_card()' in source
+    assert 'SMOOTHAF-ROOT-CREATE.LOG' in source
+    assert 'SMOOTHAF-ROOT-TEST.LOG' in source
+    assert 'SMOOTHAF_FIO_ROOT_CREATE_CONTENT' in source
+    assert 'SMOOTHAF_FIO_ROOT_EDIT_CONTENT' in source
+    assert 'FIO_OpenFile(SMOOTHAF_FIO_ROOT_EDIT_PATH, O_RDWR | O_SYNC)' in source
+    assert 'FIO_SeekSkipFile(file, 0, SEEK_SET)' in source
+    assert 'O_CREAT' not in source.split('smoothaf_fio_root_edit_select', 1)[1].split('static MENU_SELECT_FUNC', 1)[0]
+    assert 'O_TRUNC' not in source.split('smoothaf_fio_root_edit_select', 1)[1].split('static MENU_SELECT_FUNC', 1)[0]
+    assert 'O_APPEND' not in source.split('smoothaf_fio_root_edit_select', 1)[1].split('static MENU_SELECT_FUNC', 1)[0]
+    assert '"Test FIO Callback"' not in menu
+    assert 'smoothaf_fio_task' not in source
     assert '"Sample Count"' in menu
     assert '"Log Count"' in menu
     assert '"Log Failures"' in menu
@@ -64,6 +106,17 @@ def test_all_smoothaf_menu_entries_have_names():
     assert "smoothaf_adaptive_run" in source
     assert "lens_focus(direction, smoothaf_step, 1, 0)" in source
     assert "MENU_EOL" in menu
+    assert '"Export AF Log"' not in normal_menu
+    assert '"Test SD Write"' not in normal_menu
+    assert 'SMOOTHAF_SD_TEST_PATH' in source
+    assert 'SMOOTHAF_SD_TEST_CONTENT' in source
+    assert 'FIO_CreateFile(SMOOTHAF_SD_TEST_PATH)' in source
+    assert 'SMOOTHAF_EXPORT_STAGE_FILE_CREATE' in source
+    assert 'handle=NULL' in source
+    assert 'smoothaf_last_export_raw_return' in source
+    normal_source = source.split('#if SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS', 1)[0]
+    assert 'FIO_OpenFile' not in normal_source
+    assert 'FIO_WriteFile' not in normal_source
     assert '"Log Page"' in menu
     assert '"Log Entry"' in menu
     assert '"Previous"' in menu

@@ -26,6 +26,74 @@
 #define SMOOTHAF_MONITOR_CONFIRM_SAMPLES 2
 #define SMOOTHAF_MONITOR_LIGHT_DELTA 32
 
+#define SMOOTHAF_VLOG_AF_OFF       0
+#define SMOOTHAF_VLOG_AF_DRY_RUN   1
+#define SMOOTHAF_VLOG_AF_ACTIVE    2
+
+#define SMOOTHAF_VLOG_AF_WAITING   0
+#define SMOOTHAF_VLOG_AF_PROBING   1
+#define SMOOTHAF_VLOG_AF_SETTLING  2
+#define SMOOTHAF_VLOG_AF_COOLDOWN  3
+#define SMOOTHAF_VLOG_AF_COMPLETE  4
+#define SMOOTHAF_VLOG_AF_ERROR     5
+
+#define SMOOTHAF_VLOG_AF_MAX_COMMANDS   4
+#define SMOOTHAF_VLOG_AF_MAX_REVERSALS  1
+#define SMOOTHAF_VLOG_AF_COOLDOWN_MS    1000
+#define SMOOTHAF_VLOG_AF_TIMEOUT_MS     5000
+
+#define SMOOTHAF_VLOG_AF_RESULT_NONE             0
+#define SMOOTHAF_VLOG_AF_RESULT_API_SUCCESS      1
+#define SMOOTHAF_VLOG_AF_RESULT_NO_MOVEMENT      2
+#define SMOOTHAF_VLOG_AF_RESULT_BLOCKED          3
+#define SMOOTHAF_VLOG_AF_RESULT_FAILED           4
+#define SMOOTHAF_VLOG_AF_RESULT_CANCELLED        5
+#define SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT   6
+#define SMOOTHAF_VLOG_AF_RESULT_DRY_RUN          7
+#define SMOOTHAF_VLOG_AF_RESULT_ARMED            8
+#define SMOOTHAF_VLOG_AF_RESULT_IMPROVED         9
+#define SMOOTHAF_VLOG_AF_RESULT_WORSE           10
+#define SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN       11
+#define SMOOTHAF_VLOG_AF_RESULT_TIMEOUT         12
+#define SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT    13
+#define SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED  14
+#define SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED 15
+#define SMOOTHAF_VLOG_AF_SETTLE_MS      120
+
+static inline int smoothaf_vlog_af_deadband(int best)
+{
+    int relative = best / 64;
+    return relative > 24 ? relative : 24;
+}
+
+struct smoothaf_vlog_af
+{
+    int mode;
+    int state;
+    int armed;
+    int direction;
+    int last_direction;
+    int baseline;
+    int best;
+    uint32_t commands;
+    uint32_t reversals;
+    uint32_t session_commands;
+    uint32_t generation;
+    uint32_t settle_until_ms;
+    uint32_t cooldown_until_ms;
+    int awaiting_result;
+    int dry_run_requests;
+    int episode_result;
+    int initial_score;
+    int previous_score;
+    int post_move_score;
+    int score_delta;
+    int best_position;
+    int current_position;
+    uint32_t started_ms;
+    int uncertain;
+};
+
 struct smoothaf_monitor_sample
 {
     int score;
@@ -103,6 +171,170 @@ struct smoothaf_monitor
     int transition_state;
     struct smoothaf_monitor_metrics metrics;
 };
+
+static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
+{
+    af->mode = SMOOTHAF_VLOG_AF_OFF;
+    af->state = SMOOTHAF_VLOG_AF_WAITING;
+    af->armed = 0;
+    af->direction = 1;
+    af->last_direction = 1;
+    af->baseline = 0;
+    af->best = 0;
+    af->commands = 0;
+    af->reversals = 0;
+    af->session_commands = 0;
+    af->generation = 0;
+    af->settle_until_ms = 0;
+    af->cooldown_until_ms = 0;
+    af->awaiting_result = 0;
+    af->dry_run_requests = 0;
+    af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
+    af->initial_score = 0;
+    af->previous_score = 0;
+    af->post_move_score = 0;
+    af->score_delta = 0;
+    af->best_position = 0;
+    af->current_position = 0;
+    af->last_direction = 1;
+    af->started_ms = 0;
+    af->uncertain = 0;
+}
+
+static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
+                                                int mode, int direction,
+                                                int baseline)
+{
+    af->generation++;
+    af->mode = mode;
+    af->state = SMOOTHAF_VLOG_AF_WAITING;
+    af->armed = 1;
+    af->direction = direction < 0 ? -1 : 1;
+    af->last_direction = af->direction;
+    af->baseline = baseline;
+    af->best = baseline;
+    af->commands = 0;
+    af->reversals = 0;
+    af->settle_until_ms = 0;
+    af->cooldown_until_ms = 0;
+    af->awaiting_result = 0;
+    af->dry_run_requests = 0;
+    af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
+    af->initial_score = baseline;
+    af->previous_score = baseline;
+    af->post_move_score = 0;
+    af->score_delta = 0;
+    af->best_position = 0;
+    af->current_position = 0;
+    af->last_direction = af->direction;
+    af->started_ms = 0;
+    af->uncertain = 0;
+}
+
+static inline void smoothaf_vlog_af_stop(struct smoothaf_vlog_af *af)
+{
+    af->armed = 0;
+    af->awaiting_result = 0;
+    if (af->episode_result == SMOOTHAF_VLOG_AF_RESULT_NONE ||
+        af->episode_result == SMOOTHAF_VLOG_AF_RESULT_ARMED)
+        af->episode_result = af->commands
+                         ? SMOOTHAF_VLOG_AF_RESULT_CANCELLED
+                         : SMOOTHAF_VLOG_AF_RESULT_NO_MOVEMENT;
+    af->state = SMOOTHAF_VLOG_AF_COMPLETE;
+}
+
+static inline void smoothaf_vlog_af_record_command(
+    struct smoothaf_vlog_af *af, uint32_t now)
+{
+    if (af->commands != UINT32_MAX) af->commands++;
+    if (af->session_commands != UINT32_MAX) af->session_commands++;
+    if (!af->started_ms) af->started_ms = now;
+    af->awaiting_result = 1;
+    af->state = SMOOTHAF_VLOG_AF_SETTLING;
+    af->settle_until_ms = now + SMOOTHAF_VLOG_AF_SETTLE_MS;
+    af->last_direction = af->direction;
+}
+
+static inline int smoothaf_vlog_af_can_command(
+    struct smoothaf_vlog_af *af, int enabled, uint32_t now)
+{
+    if (!af->armed || af->mode == SMOOTHAF_VLOG_AF_OFF) return 0;
+    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && !enabled) return 0;
+    if (af->awaiting_result) return 0;
+    if (af->state == SMOOTHAF_VLOG_AF_COOLDOWN &&
+        (int32_t)(now - af->cooldown_until_ms) >= 0)
+        af->state = SMOOTHAF_VLOG_AF_PROBING;
+    if (af->state != SMOOTHAF_VLOG_AF_PROBING) return 0;
+    if (af->commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS) return 0;
+    if (af->session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS) return 0;
+    if (af->cooldown_until_ms && (int32_t)(now - af->cooldown_until_ms) < 0)
+        return 0;
+    return 1;
+}
+
+static inline int smoothaf_vlog_af_result_due(
+    const struct smoothaf_vlog_af *af, uint32_t now)
+{
+    return af->awaiting_result &&
+           (int32_t)(now - af->settle_until_ms) >= 0;
+}
+
+static inline int smoothaf_vlog_af_dry_run_request(
+    struct smoothaf_vlog_af *af, int enabled, uint32_t now)
+{
+    if (af->mode != SMOOTHAF_VLOG_AF_DRY_RUN ||
+        !smoothaf_vlog_af_can_command(af, enabled, now))
+        return 0;
+    if (af->dry_run_requests != INT32_MAX) af->dry_run_requests++;
+    smoothaf_vlog_af_record_command(af, now);
+    return 1;
+}
+
+static inline int smoothaf_vlog_af_record_result(
+    struct smoothaf_vlog_af *af, int score, uint32_t now)
+{
+    int delta = score - af->previous_score;
+    int deadband = smoothaf_vlog_af_deadband(af->best);
+    af->post_move_score = score;
+    af->score_delta = delta;
+    af->awaiting_result = 0;
+    if (score > af->best)
+    {
+        af->best = score;
+        af->best_position = af->current_position;
+    }
+    if (delta > deadband)
+    {
+        af->previous_score = score;
+        af->episode_result = SMOOTHAF_VLOG_AF_RESULT_IMPROVED;
+        af->cooldown_until_ms = now + SMOOTHAF_VLOG_AF_COOLDOWN_MS;
+        af->state = SMOOTHAF_VLOG_AF_COOLDOWN;
+        if (af->commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+        {
+            af->armed = 0;
+            af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
+        }
+        return 1;
+    }
+    if (delta < -deadband)
+    {
+        af->episode_result = SMOOTHAF_VLOG_AF_RESULT_WORSE;
+        if (af->reversals < SMOOTHAF_VLOG_AF_MAX_REVERSALS)
+        {
+            af->reversals++;
+            af->direction = -af->direction;
+            af->state = SMOOTHAF_VLOG_AF_PROBING;
+            return 0;
+        }
+    }
+    else
+    {
+        af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT;
+    }
+    af->armed = 0;
+    af->state = SMOOTHAF_VLOG_AF_COMPLETE;
+    return 0;
+}
 
 static inline uint32_t smoothaf_monitor_interval_ms(int index)
 {
