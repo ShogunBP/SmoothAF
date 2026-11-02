@@ -462,6 +462,16 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->uncertain = 0;
 }
 
+/* Reset operational authorization for a new monitor session without changing
+ * the mode selected in the menu.  The selected mode is user preference; armed,
+ * cooldown and safety fields are session state and must not survive STOP. */
+static inline void smoothaf_vlog_af_reset_session(struct smoothaf_vlog_af *af,
+                                                  int selected_mode)
+{
+    smoothaf_vlog_af_init(af);
+    af->mode = selected_mode;
+}
+
 static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
                                                 int mode, int direction,
                                                 int baseline)

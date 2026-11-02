@@ -5,6 +5,24 @@
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
+static void test_monitor_session_preserves_mode(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    af.mode = SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
+    af.continuous_armed = 1;
+    smoothaf_vlog_af_reset_session(&af, af.mode);
+    CHECK(af.mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS &&
+          !af.armed && !af.continuous_armed && !af.safety_paused,
+          "monitor session reset preserves selected mode but clears authorization");
+    smoothaf_vlog_af_reset_session(&af, SMOOTHAF_VLOG_AF_DRY_RUN);
+    CHECK(af.mode == SMOOTHAF_VLOG_AF_DRY_RUN && !af.armed,
+          "session reset accepts the selected DRY RUN mode");
+    smoothaf_vlog_af_reset_session(&af, SMOOTHAF_VLOG_AF_OFF);
+    CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
+          "session reset preserves an explicitly selected OFF mode");
+}
+
 static struct smoothaf_monitor_sample sample(int score, int mean, int valid, int confident)
 {
     struct smoothaf_monitor_sample s;
@@ -405,6 +423,7 @@ int main(void)
     test_vlog_af_lifecycle();
     test_movie_recording_policy();
     test_continuous_active();
+    test_monitor_session_preserves_mode();
 
     smoothaf_vlog_af_init(&af);
     CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,

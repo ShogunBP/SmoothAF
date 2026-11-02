@@ -13,7 +13,7 @@ def test_menu_shape_and_lifecycle():
     assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     for name in (
-        '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"',
+        '"Build Info"', '"AF Performance"', '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"', '"Algorithm Performance"',
         '"Task State"', '"Configured Interval"', '"Actual Interval"',
         '"Last Duration"', '"Average Duration"', '"Maximum Duration"',
         '"Attempts"', '"Valid Samples"', '"Invalid Samples"',
@@ -22,16 +22,16 @@ def test_menu_shape_and_lifecycle():
         '"Vlog AF Mode"', '"OFF"', '"DRY RUN"', '"ACTIVE"', '"ACTIVE CONTINUOUS"',
         '"Movie Active Experimental"',
         '"Vlog AF State"', '"Start New AF Episode"', '"AF Episode Result"',
-        '"AF Move Attempts"', '"AF Lens Calls"', '"AF Move Successes"',
-        '"AF Last Block"', '"AF Command Block"', '"AF Episode Reason"',
+        '"AF Move Attempts"', '"Move Attempts"', '"AF Lens Calls"', '"Lens Calls"', '"AF Move Successes"', '"Move Successes"',
+        '"AF Last Block"', '"AF Command Block"', '"Last Block / Command Block"', '"AF Episode Reason"',
         '"AF State Before Error"', '"AF Last Move Result"',
-        '"AF Post-Move Valid"', '"AF Last Result Valid"', '"AF Commands"',
-        '"AF Commands Available"', '"AF Episode Command Limit"',
+        '"AF Post-Move Valid"', '"AF Last Result Valid"', '"AF Commands"', '"Commands This Episode"',
+        '"AF Commands Available"', '"Commands Available"', '"AF Episode Command Limit"',
         '"AF Episodes Completed"', '"AF Consecutive Failures"',
         '"AF Cooldown Remaining"',
-        '"AF Time Since Move"', '"AF Timeout Remaining"', '"AF Commands This Episode"', '"AF Initial Score"',
-        '"AF Post-Move Score"', '"AF Best Score"', '"AF Score Delta"',
-        '"AF Best Relative Position"', '"AF Current Relative Position"',
+        '"AF Time Since Move"', '"Time Since Move"', '"AF Timeout Remaining"', '"AF Initial Score"', '"Initial Score"',
+        '"AF Post-Move Score"', '"Post-Move Score"', '"AF Best Score"', '"Best Score"', '"AF Score Delta"', '"Score Delta"',
+        '"AF Best Relative Position"', '"AF Current Relative Position"', '"Current/Best Relative Position"',
         '"AF Last Direction"',
         '"Log Page"', '"Log Entry"', '"Previous"', '"Next"', '"Clear History"',
         '"SAD Score"', '"Laplacian Score"', '"Movie Dry Run Recording"',
@@ -75,6 +75,12 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_movie_recording_cbr' in source
     assert 'smoothaf_movie_start_automatic' in source
     assert 'smoothaf_movie_stop_automatic' in source
+    assert 'smoothaf_vlog_af_reset_session' in source
+    assert 'SMOOTHAF_BUILD_ID' in source
+    assert 'smoothaf_movie_automatic_session' in source
+    assert 'smoothaf_movie_start_pending' in source
+    assert 'smoothaf_movie_active_experimental = 0;' in source
+    assert 'smoothaf_build_info_update' in source
     assert 'smoothaf_cancel_pending_measure(' in source
     assert 'smoothaf_measure_route_for(' in source
     assert 'smoothaf_diag_page_after_refresh(' in source
@@ -84,6 +90,9 @@ def test_menu_shape_and_lifecycle():
     assert 'SMOOTHAF_LOG_ERROR' in source
     assert 'SMOOTHAF_LOG_ABORT' in source
     assert source.count('MENU_SET_HELP(') >= 8
+    assert 'smoothaf_vlog_af_reset_session' in source
+    assert 'SMOOTHAF_BUILD_ID' in source
+    assert 'smoothaf_movie_start_pending' in source
     assert re.search(r"struct smoothaf_telemetry\s*\{", (ROOT / "src" / "smoothaf_diagnostics.h").read_text())
 
 

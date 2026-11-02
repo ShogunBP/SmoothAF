@@ -19,6 +19,7 @@
 #include "smoothaf_core.h"
 #include "smoothaf_monitor.h"
 #include "smoothaf_diagnostics.h"
+#include "smoothaf_build_id.h"
 
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
@@ -134,6 +135,8 @@ static volatile int smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
 static volatile int smoothaf_monitor_task_requested;
 static volatile int smoothaf_monitor_deinit;
 static struct smoothaf_movie_recording_state smoothaf_movie_recording;
+static volatile int smoothaf_movie_automatic_session;
+static volatile int smoothaf_movie_start_pending;
 static struct semaphore *smoothaf_sem;
 
 #define SMOOTHAF_MEASURE_OK       0
@@ -349,11 +352,17 @@ static void smoothaf_movie_stop_automatic(void);
 
 static unsigned int smoothaf_movie_recording_cbr(unsigned int ctx)
 {
+    int recording_class;
     (void)ctx;
-    smoothaf_movie_recording_transition(
-        smoothaf_movie_recording_class(RECORDING_H264, RECORDING_CUSTOM,
-                                       RECORDING_RAW),
-        (uint32_t)get_ms_clock());
+    recording_class = smoothaf_movie_recording_class(RECORDING_H264,
+                                                     RECORDING_CUSTOM,
+                                                     RECORDING_RAW);
+    smoothaf_movie_recording_transition(recording_class,
+                                       (uint32_t)get_ms_clock());
+    if (recording_class == SMOOTHAF_MOVIE_RECORDING_H264 &&
+        smoothaf_movie_start_pending && !smoothaf_monitor.enabled &&
+        !smoothaf_is_task_running())
+        smoothaf_movie_start_automatic();
     return CBR_RET_CONTINUE;
 }
 
@@ -361,9 +370,20 @@ static void smoothaf_movie_start_automatic(void)
 {
     if (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS ||
         !smoothaf_movie_active_experimental || !smoothaf_enabled ||
-        smoothaf_panic || smoothaf_cancel || smoothaf_monitor.enabled ||
-        smoothaf_is_task_running())
+        smoothaf_panic || smoothaf_monitor.enabled)
         return;
+    if (smoothaf_cancel)
+    {
+        smoothaf_movie_start_pending = 0;
+        return;
+    }
+    if (smoothaf_is_task_running())
+    {
+        smoothaf_movie_start_pending = 1;
+        return;
+    }
+    if (smoothaf_movie_start_pending == 0 && smoothaf_movie_recording.active)
+        smoothaf_movie_start_pending = 1;
     if (!smoothaf_movie_active_gate_allowed(
             smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
             is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW,
@@ -378,11 +398,12 @@ static void smoothaf_movie_start_automatic(void)
     smoothaf_task_stop_requested = 0;
     smoothaf_task_exited = 0;
     smoothaf_cancel = 0;
-    smoothaf_vlog_af_init(&smoothaf_vlog_af);
-    smoothaf_vlog_af_mode = SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
+    smoothaf_vlog_af_reset_session(&smoothaf_vlog_af, smoothaf_vlog_af_mode);
     smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
                                     smoothaf_direction_value(),
                                     smoothaf_monitor.score);
+    smoothaf_movie_automatic_session = 1;
+    smoothaf_movie_start_pending = 0;
     smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af,
                                        smoothaf_vlog_episode_limit);
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_ARMED;
@@ -392,18 +413,22 @@ static void smoothaf_movie_start_automatic(void)
     {
         smoothaf_monitor_stop(&smoothaf_monitor);
         smoothaf_monitor_task_requested = 0;
+        smoothaf_movie_automatic_session = 0;
         smoothaf_vlog_af_stop(&smoothaf_vlog_af);
     }
 }
 
 static void smoothaf_movie_stop_automatic(void)
 {
-    if (!smoothaf_monitor_task_requested || smoothaf_movie_recording.active)
+    smoothaf_movie_start_pending = 0;
+    if (!smoothaf_movie_automatic_session || !smoothaf_monitor_task_requested ||
+        smoothaf_movie_recording.active)
         return;
     smoothaf_vlog_af_stop(&smoothaf_vlog_af);
     smoothaf_task_stop_requested = 1;
     smoothaf_monitor_stop(&smoothaf_monitor);
     smoothaf_monitor_task_requested = 0;
+    smoothaf_movie_automatic_session = 0;
     smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 5, 0, 0, 0, 0);
 }
 
@@ -1100,17 +1125,23 @@ static void smoothaf_search_task(void)
     if (use_normal)
     {
         result = smoothaf_normal_run(&normal, score, &start);
+        smoothaf_last_mode = SMOOTHAF_AF_NORMAL;
+        smoothaf_last_phase = normal.phase;
         smoothaf_last_commands = normal.commands;
         smoothaf_last_reversals = normal.reversals;
         smoothaf_last_best = normal.best;
+        smoothaf_last_focus_pos = normal.best_pos;
         smoothaf_last_score = normal.current;
     }
     else if (use_adaptive)
     {
         result = smoothaf_adaptive_run(&adaptive, score, &start);
+        smoothaf_last_mode = SMOOTHAF_HC_ADAPTIVE;
+        smoothaf_last_phase = adaptive.phase;
         smoothaf_last_commands = adaptive.commands;
         smoothaf_last_reversals = adaptive.reversals;
         smoothaf_last_best = adaptive.best;
+        smoothaf_last_focus_pos = adaptive.best_pos;
         smoothaf_last_score = adaptive.current;
     }
     else
@@ -1118,9 +1149,12 @@ static void smoothaf_search_task(void)
         result = smoothaf_hc_run(&hc, score, smoothaf_direction_value(),
                                  smoothaf_search_move, smoothaf_search_measure,
                                  smoothaf_search_abort, &start);
+        smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
+        smoothaf_last_phase = hc.local_max ? 2 : 0;
         smoothaf_last_commands = hc.commands;
         smoothaf_last_reversals = hc.reversals;
         smoothaf_last_best = hc.best;
+        smoothaf_last_focus_pos = hc.best_pos;
         smoothaf_last_score = hc.current;
     }
     smoothaf_status = smoothaf_status_from_result(result);
@@ -1295,8 +1329,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
     }
     smoothaf_monitor_start(&smoothaf_monitor, smoothaf_metric,
                            (uint32_t)get_ms_clock());
-    smoothaf_vlog_af_init(&smoothaf_vlog_af);
-    smoothaf_vlog_af_mode = SMOOTHAF_VLOG_AF_OFF;
+    smoothaf_vlog_af_reset_session(&smoothaf_vlog_af, smoothaf_vlog_af_mode);
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     smoothaf_af_commands_episode = 0;
     smoothaf_measure_requested = 0;
@@ -1717,6 +1750,57 @@ static MENU_UPDATE_FUNC(smoothaf_af_cooldown_update)
 { MENU_SET_VALUE("%d ms", (int)smoothaf_vlog_af_cooldown_remaining(
                                &smoothaf_vlog_af, (uint32_t)get_ms_clock())); }
 
+static const char *smoothaf_algorithm_name(void)
+{
+    return smoothaf_af_mode == SMOOTHAF_AF_NORMAL ? "Normal AF" :
+           smoothaf_af_mode == SMOOTHAF_HC_ADAPTIVE ? "Adaptive HC" :
+           "Legacy HC";
+}
+
+static const char *smoothaf_algorithm_phase_name(void)
+{
+    switch (smoothaf_last_phase)
+    {
+        case 1: return "ACQUISITION";
+        case 2: return "REFINEMENT";
+        case 3: return "CONFIRM";
+        case 4: return "RETURN";
+        default: return "SEARCH";
+    }
+}
+
+static MENU_UPDATE_FUNC(smoothaf_build_info_update)
+{ MENU_SET_VALUE("%s", SMOOTHAF_BUILD_ID); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_update)
+{ MENU_SET_VALUE("%s", smoothaf_algorithm_name()); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_phase_update)
+{ MENU_SET_VALUE("%s", smoothaf_algorithm_phase_name()); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_direction_step_update)
+{ MENU_SET_VALUE("%d / %d", (int)smoothaf_direction_value(), smoothaf_step); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_search_evolution_update)
+{ MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
+                  (int)smoothaf_last_best, (int)smoothaf_last_focus_pos); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_reversals_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_last_reversals); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_convergence_update)
+{ MENU_SET_VALUE("%s", smoothaf_vlog_af_result_name(smoothaf_af_episode_result)); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_evaluation_update)
+{ MENU_SET_VALUE("%s", smoothaf_status_name()); }
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_time_update)
+{ MENU_SET_VALUE("%d ms", (int)smoothaf_last_time); }
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_confidence_update)
+{ MENU_SET_VALUE("valid=%d low=%d", (int)smoothaf_monitor.metrics.valid,
+                  (int)smoothaf_monitor.metrics.low_confidence); }
+
 static MENU_SELECT_FUNC(smoothaf_stop_select)
 {
     int monitor_was_enabled = smoothaf_monitor.enabled;
@@ -1733,6 +1817,8 @@ static MENU_SELECT_FUNC(smoothaf_stop_select)
         smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_ARMED)
         smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
     smoothaf_cancel_pending_measure();
+    smoothaf_movie_automatic_session = 0;
+    smoothaf_movie_start_pending = 0;
     if (monitor_was_enabled)
     {
         smoothaf_monitor_stop(&smoothaf_monitor);
@@ -1754,6 +1840,8 @@ static MENU_SELECT_FUNC(smoothaf_panic_select)
         smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
     smoothaf_cancel_pending_measure();
     smoothaf_monitor_stop(&smoothaf_monitor);
+    smoothaf_movie_automatic_session = 0;
+    smoothaf_movie_start_pending = 0;
 }
 
 static MENU_SELECT_FUNC(smoothaf_rearm_select)
@@ -1792,6 +1880,103 @@ static struct menu_entry smoothaf_menu[] =
 {
     { .name = "Enable", .priv = &smoothaf_enabled, .max = 1,
       .help = "Enable lens movement for explicit focus actions." },
+    { .name = "Build Info", .update = smoothaf_build_info_update,
+      .help = "Deterministic source/configuration identifier for this module." },
+    { .name = "AF Performance", .select = menu_open_submenu,
+      .children = (struct menu_entry[]){
+        { .name = "AF Session State", .update = smoothaf_vlog_af_state_update },
+        { .name = "AF State", .update = smoothaf_vlog_af_state_update },
+        { .name = "Episode Result/Reason", .update = smoothaf_vlog_af_result_update },
+        { .name = "Episodes Completed", .update = smoothaf_af_episodes_completed_update },
+        { .name = "Move Attempts", .update = smoothaf_af_move_attempts_update },
+        { .name = "Lens Calls", .update = smoothaf_af_lens_calls_update },
+        { .name = "Move Successes", .update = smoothaf_af_move_successes_update },
+        { .name = "Commands This Episode", .update = smoothaf_af_commands_episode_update },
+        { .name = "Episode Command Limit", .priv = &smoothaf_vlog_episode_limit,
+          .min = SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT, .max = SMOOTHAF_VLOG_AF_MAX_COMMANDS },
+        { .name = "Commands Available", .update = smoothaf_vlog_af_available_update },
+        { .name = "Initial Score", .update = smoothaf_af_initial_score_update },
+        { .name = "Post-Move Score", .update = smoothaf_af_post_move_score_update },
+        { .name = "Best Score", .update = smoothaf_af_best_score_update },
+        { .name = "Score Delta", .update = smoothaf_af_score_delta_update },
+        { .name = "Current/Best Relative Position", .update = smoothaf_af_current_position_update },
+        { .name = "Consecutive Failures", .update = smoothaf_af_consecutive_failures_update },
+        { .name = "Cooldown Remaining", .update = smoothaf_af_cooldown_update },
+        { .name = "Time Since Move", .update = smoothaf_vlog_af_last_command_update },
+        { .name = "Last Block / Command Block", .update = smoothaf_af_command_block_update },
+        { .name = "AF Move Attempts", .update = smoothaf_af_move_attempts_update },
+        { .name = "AF Lens Calls", .update = smoothaf_af_lens_calls_update },
+        { .name = "AF Move Successes", .update = smoothaf_af_move_successes_update },
+        { .name = "AF Last Block", .update = smoothaf_af_last_block_update },
+        { .name = "AF Command Block", .update = smoothaf_af_command_block_update },
+        { .name = "AF Episode Reason", .update = smoothaf_af_episode_reason_update },
+        { .name = "AF State Before Error", .update = smoothaf_af_episode_state_before_error_update },
+        { .name = "AF Last Move Result", .update = smoothaf_af_last_move_result_update },
+        { .name = "AF Post-Move Valid", .update = smoothaf_af_post_move_valid_update },
+        { .name = "AF Last Result Valid", .update = smoothaf_af_last_result_valid_update },
+        { .name = "AF Commands", .update = smoothaf_vlog_af_commands_update },
+        { .name = "AF Commands Available", .update = smoothaf_vlog_af_available_update },
+        { .name = "AF Episode Command Limit", .priv = &smoothaf_vlog_episode_limit,
+          .min = SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT, .max = SMOOTHAF_VLOG_AF_MAX_COMMANDS },
+        { .name = "AF Episodes Completed", .update = smoothaf_af_episodes_completed_update },
+        { .name = "AF Consecutive Failures", .update = smoothaf_af_consecutive_failures_update },
+        { .name = "AF Cooldown Remaining", .update = smoothaf_af_cooldown_update },
+        { .name = "AF Time Since Move", .update = smoothaf_vlog_af_last_command_update },
+        { .name = "AF Timeout Remaining", .update = smoothaf_vlog_af_timeout_update },
+        { .name = "AF Commands This Episode", .update = smoothaf_af_commands_episode_update },
+        { .name = "AF Initial Score", .update = smoothaf_af_initial_score_update },
+        { .name = "AF Post-Move Score", .update = smoothaf_af_post_move_score_update },
+        { .name = "AF Best Score", .update = smoothaf_af_best_score_update },
+        { .name = "AF Score Delta", .update = smoothaf_af_score_delta_update },
+        { .name = "AF Best Relative Position", .update = smoothaf_af_best_position_update },
+        { .name = "AF Current Relative Position", .update = smoothaf_af_current_position_update },
+        { .name = "AF Last Direction", .update = smoothaf_af_last_direction_update },
+        MENU_EOL,
+    } },
+    { .name = "Monitor Performance", .select = menu_open_submenu,
+      .children = (struct menu_entry[]){
+        { .name = "Monitor Status", .update = smoothaf_monitor_status_update },
+        { .name = "SAD Score", .update = smoothaf_monitor_sad_update },
+        { .name = "Laplacian Score", .update = smoothaf_monitor_laplacian_update },
+        { .name = "Smoothed Score", .update = smoothaf_monitor_smoothed_update },
+        { .name = "Reference Score", .update = smoothaf_monitor_reference_update },
+        { .name = "Possible Blur", .update = smoothaf_monitor_blur_update },
+        { .name = "Confidence/Validity", .update = smoothaf_monitor_confidence_update },
+        { .name = "Sample Count", .update = smoothaf_monitor_samples_update },
+        { .name = "Sampling Interval", .priv = &smoothaf_monitor_interval,
+          .min = SMOOTHAF_MONITOR_INTERVAL_1000, .max = SMOOTHAF_MONITOR_INTERVAL_100,
+          .choices = CHOICES("1000 ms", "500 ms", "250 ms", "100 ms") },
+        { .name = "Recording State", .update = smoothaf_movie_recording_update },
+        { .name = "Movie Dry Run Recording", .update = smoothaf_movie_recording_update },
+        { .name = "Task State", .update = smoothaf_monitor_task_state_update },
+        { .name = "Configured Interval", .update = smoothaf_monitor_configured_interval_update },
+        { .name = "Actual Interval", .update = smoothaf_monitor_actual_interval_update },
+        { .name = "Last Duration", .update = smoothaf_monitor_last_duration_update },
+        { .name = "Average Duration", .update = smoothaf_monitor_average_duration_update },
+        { .name = "Maximum Duration", .update = smoothaf_monitor_max_duration_update },
+        { .name = "Attempts", .update = smoothaf_monitor_attempts_update },
+        { .name = "Valid Samples", .update = smoothaf_monitor_valid_update },
+        { .name = "Invalid Samples", .update = smoothaf_monitor_invalid_update },
+        { .name = "Low Confidence", .update = smoothaf_monitor_low_confidence_update },
+        { .name = "Blocked", .update = smoothaf_monitor_blocked_update },
+        { .name = "Skipped", .update = smoothaf_monitor_skipped_update },
+        { .name = "Overruns", .update = smoothaf_monitor_overruns_update },
+        { .name = "Last Error", .update = smoothaf_monitor_error_update },
+        MENU_EOL,
+    } },
+    { .name = "Algorithm Performance", .select = menu_open_submenu,
+      .children = (struct menu_entry[]){
+        { .name = "Algorithm", .update = smoothaf_algorithm_update },
+        { .name = "Search Phase", .update = smoothaf_algorithm_phase_update },
+        { .name = "Direction / Step", .update = smoothaf_algorithm_direction_step_update },
+        { .name = "Best Score / Position", .update = smoothaf_algorithm_search_evolution_update },
+        { .name = "Search Evolution", .update = smoothaf_algorithm_search_evolution_update },
+        { .name = "Reversals", .update = smoothaf_algorithm_reversals_update },
+        { .name = "Convergence Reason", .update = smoothaf_algorithm_convergence_update },
+        { .name = "Evaluation Result", .update = smoothaf_algorithm_evaluation_update },
+        { .name = "Evaluation Time", .update = smoothaf_algorithm_time_update },
+        MENU_EOL,
+    } },
     { .name = "Vlog Monitor", .select = menu_open_submenu,
       .children = (struct menu_entry[]){
         { .name = "Start/Stop Monitoring", .select = smoothaf_monitor_toggle_select,
@@ -1802,106 +1987,16 @@ static struct menu_entry smoothaf_menu[] =
           .min = SMOOTHAF_VLOG_AF_OFF, .max = SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
           .choices = CHOICES("OFF", "DRY RUN", "ACTIVE", "ACTIVE CONTINUOUS"),
           .update = smoothaf_vlog_af_mode_update,
-          .help = "Experimental contrast correction; DRY RUN never moves the lens." },
+          .help = "Selected mode is independent from monitor/episode authorization." },
         { .name = "Movie Active Experimental", .priv = &smoothaf_movie_active_experimental,
           .max = 1,
           .help = "Authorize physical lens_focus only for normal H.264 Movie; default OFF." },
         { .name = "Vlog AF State", .update = smoothaf_vlog_af_state_update,
-          .help = "Episode state; ACTIVE modes require Enable and manual arming." },
+          .help = "Episode state; ACTIVE modes require Enable and arming." },
         { .name = "Start New AF Episode", .select = smoothaf_vlog_af_episode_select,
-          .help = "Manual arm only; no movement is issued by this action." },
-        { .name = "AF Move Attempts", .update = smoothaf_af_move_attempts_update,
-          .help = "Movement calls attempted by manual and Vlog AF actions." },
-        { .name = "AF Lens Calls", .update = smoothaf_af_lens_calls_update,
-          .help = "Physical lens_focus calls issued in this session." },
-        { .name = "AF Move Successes", .update = smoothaf_af_move_successes_update,
-          .help = "Lens calls that reported success." },
-        { .name = "AF Last Block", .update = smoothaf_af_last_block_update,
-          .help = "Last safety gate or measurement block reason." },
-        { .name = "AF Command Block", .update = smoothaf_af_command_block_update,
-          .help = "Exact Vlog AF command-gate reason." },
-        { .name = "AF Episode Reason", .update = smoothaf_af_episode_reason_update,
-          .help = "Exact result that ended the latest episode." },
-        { .name = "AF State Before Error", .update = smoothaf_af_episode_state_before_error_update,
-          .help = "Vlog AF state captured before an ERROR transition." },
-        { .name = "AF Last Move Result", .update = smoothaf_af_last_move_result_update,
-          .help = "Nonzero means lens_focus accepted the call; not focus confirmation." },
-        { .name = "AF Post-Move Valid", .update = smoothaf_af_post_move_valid_update,
-          .help = "Whether the last post-command score was valid and confident." },
-        { .name = "AF Last Result Valid", .update = smoothaf_af_last_result_valid_update,
-          .help = "Whether the latest lens_focus return was nonzero." },
-        { .name = "AF Commands", .update = smoothaf_vlog_af_commands_update,
-          .help = "Vlog AF commands accumulated since monitor start." },
-        { .name = "AF Episode Command Limit", .priv = &smoothaf_vlog_episode_limit,
-          .min = SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT,
-          .max = SMOOTHAF_VLOG_AF_MAX_COMMANDS,
-          .help = "Conservative command budget reset for each ACTIVE episode." },
-        { .name = "AF Commands Available", .update = smoothaf_vlog_af_available_update,
-          .help = "Remaining commands in this episode; ACTIVE continuous has no session cap." },
-        { .name = "AF Episodes Completed", .update = smoothaf_af_episodes_completed_update,
-          .help = "Completed ACTIVE continuous correction episodes." },
-        { .name = "AF Consecutive Failures", .update = smoothaf_af_consecutive_failures_update,
-          .help = "Failures since the last valid post-move score." },
-        { .name = "AF Cooldown Remaining", .update = smoothaf_af_cooldown_update,
-          .help = "Time before a new continuous episode may start." },
-        { .name = "AF Time Since Move", .update = smoothaf_vlog_af_last_command_update,
-          .help = "Elapsed time since the last Vlog AF command." },
-        { .name = "AF Timeout Remaining", .update = smoothaf_vlog_af_timeout_update,
-          .help = "Remaining time in the current armed episode." },
-        { .name = "AF Commands This Episode", .update = smoothaf_af_commands_episode_update,
-          .help = "Commands issued by the current or last armed episode." },
+          .help = "Manual LiveView arm; Movie H.264 REC START arms continuous mode automatically." },
         { .name = "AF Episode Result", .update = smoothaf_vlog_af_result_update,
-          .help = "Latest episode outcome; ARMED means waiting for blur evidence." },
-        { .name = "AF Initial Score", .update = smoothaf_af_initial_score_update,
-          .help = "Monitor score captured when the episode was armed." },
-        { .name = "AF Post-Move Score", .update = smoothaf_af_post_move_score_update,
-          .help = "Score measured after the last episode command." },
-        { .name = "AF Best Score", .update = smoothaf_af_best_score_update,
-          .help = "Best score observed during the episode." },
-        { .name = "AF Score Delta", .update = smoothaf_af_score_delta_update,
-          .help = "Post-move score minus the previous episode score." },
-        { .name = "AF Best Relative Position", .update = smoothaf_af_best_position_update,
-          .help = "Relative motor position of the best episode score." },
-        { .name = "AF Current Relative Position", .update = smoothaf_af_current_position_update,
-          .help = "Relative motor position after the latest episode command." },
-        { .name = "AF Last Direction", .update = smoothaf_af_last_direction_update,
-          .help = "Last motor direction used by the episode." },
-        { .name = "Monitor Performance", .select = menu_open_submenu,
-          .children = (struct menu_entry[]){
-            { .name = "Task State", .update = smoothaf_monitor_task_state_update },
-            { .name = "Configured Interval", .update = smoothaf_monitor_configured_interval_update },
-            { .name = "Actual Interval", .update = smoothaf_monitor_actual_interval_update },
-            { .name = "Last Duration", .update = smoothaf_monitor_last_duration_update },
-            { .name = "Average Duration", .update = smoothaf_monitor_average_duration_update },
-            { .name = "Maximum Duration", .update = smoothaf_monitor_max_duration_update },
-            { .name = "Attempts", .update = smoothaf_monitor_attempts_update },
-            { .name = "Valid Samples", .update = smoothaf_monitor_valid_update },
-            { .name = "Invalid Samples", .update = smoothaf_monitor_invalid_update },
-            { .name = "Low Confidence", .update = smoothaf_monitor_low_confidence_update },
-            { .name = "Blocked", .update = smoothaf_monitor_blocked_update },
-            { .name = "Skipped", .update = smoothaf_monitor_skipped_update },
-            { .name = "Overruns", .update = smoothaf_monitor_overruns_update },
-            { .name = "Last Error", .update = smoothaf_monitor_error_update },
-            MENU_EOL,
-        } },
-        { .name = "SAD Score", .update = smoothaf_monitor_sad_update,
-          .help = "Latest read-only SAD score." },
-        { .name = "Laplacian Score", .update = smoothaf_monitor_laplacian_update,
-          .help = "Latest read-only Laplacian score." },
-        { .name = "Smoothed Score", .update = smoothaf_monitor_smoothed_update,
-          .help = "Conservative smoothing of available samples." },
-        { .name = "Reference Score", .update = smoothaf_monitor_reference_update,
-          .help = "Reference from the first available sample; not a focus guarantee." },
-        { .name = "Possible Blur", .update = smoothaf_monitor_blur_update,
-          .help = "Heuristic only; scene changes and lighting can invalidate it." },
-        { .name = "Movie Dry Run Recording", .update = smoothaf_movie_recording_update,
-          .help = "H.264 recording samples only; no lens command is issued." },
-        { .name = "Sample Count", .update = smoothaf_monitor_samples_update,
-          .help = "Automatic monitor sampling attempts in the current session." },
-        { .name = "Sampling Interval", .priv = &smoothaf_monitor_interval,
-          .min = SMOOTHAF_MONITOR_INTERVAL_1000, .max = SMOOTHAF_MONITOR_INTERVAL_100,
-          .choices = CHOICES("1000 ms", "500 ms", "250 ms", "100 ms"),
-          .help = "Periodic read-only sampling; 100 ms is experimental." },
+          .help = "Latest bounded episode outcome." },
         MENU_EOL,
     } },
     { .name = "Diagnostic", .select = menu_open_submenu,
@@ -1954,6 +2049,7 @@ static struct menu_entry smoothaf_menu[] =
 
 static unsigned int smoothaf_init(void)
 {
+    smoothaf_movie_active_experimental = 0;
     smoothaf_sem = create_named_semaphore("smoothaf_sem", 1);
     if (!smoothaf_sem) return 1;
     smoothaf_enabled = 0;
@@ -1985,6 +2081,8 @@ static unsigned int smoothaf_init(void)
     smoothaf_monitor_deinit = 0;
     smoothaf_vlog_af_init(&smoothaf_vlog_af);
     smoothaf_vlog_af_mode = SMOOTHAF_VLOG_AF_OFF;
+    smoothaf_movie_automatic_session = 0;
+    smoothaf_movie_start_pending = 0;
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     smoothaf_log_init(&smoothaf_log);
     smoothaf_diag_count = 0;

@@ -87,6 +87,11 @@ try {
     New-Item -ItemType Directory -Path $integration -Force | Out-Null
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf.c') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_core.h') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_build_id.h') $integration -Force
+    $commit = (& git -C $ProjectRoot rev-parse --short=12 HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) { throw 'Unable to determine source commit for Build ID.' }
+    $buildId = "${commit}-600D.102"
+    Set-Content -LiteralPath (Join-Path $integration 'smoothaf_build_id.h') -Value @("#ifndef SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID `"$buildId`"", "#define SMOOTHAF_BUILD_CONFIG `"600D.102`"", "#endif") -Encoding ascii
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_diagnostics.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_monitor.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'integration\Makefile') $integration -Force
@@ -112,6 +117,9 @@ try {
     $size = $bytes.Length
     Write-Output "SIZE=$size"
     Write-Output "SHA256=$sha"
+    Write-Output "BUILD_ID=$buildId"
+    $strings = & docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', "strings -a /src/legacy/modules/smoothaf/smoothaf.mo | grep -F '$buildId'")
+    if ($LASTEXITCODE -ne 0 -or -not ($strings -match [regex]::Escape($buildId))) { throw 'Final module does not contain the expected Build ID.' }
     Write-Output 'DEP=23'
 
     if ($Release) {
