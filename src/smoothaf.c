@@ -107,6 +107,11 @@ static volatile int smoothaf_af_score_delta;
 static volatile int smoothaf_af_best_position;
 static volatile int smoothaf_af_current_position;
 static volatile int smoothaf_af_last_direction = 1;
+static volatile int smoothaf_af_command_block;
+static volatile int smoothaf_af_episode_state_before_error;
+static volatile int smoothaf_af_episode_reason;
+static volatile int smoothaf_af_post_move_valid;
+static volatile int smoothaf_af_last_result_valid;
 static volatile int smoothaf_measure_requested;
 static uint32_t smoothaf_session_started_ms;
 static uint32_t smoothaf_session_finished_ms;
@@ -389,6 +394,9 @@ static int smoothaf_move(int direction)
                               smoothaf_status, 0, SMOOTHAF_BLOCK_NONE);
     result = lens_focus(direction, smoothaf_step, 1, 0);
     smoothaf_last_lens_return = result;
+    /* lens_focus() returning nonzero means the Canon call was accepted.  It
+     * does not confirm that the image score improved; that is measured later. */
+    smoothaf_af_last_result_valid = result ? 1 : 0;
     smoothaf_log_event_extended(SMOOTHAF_LOG_CONTROLLER, direction,
                                 smoothaf_step, smoothaf_last_focus_pos,
                                 result, smoothaf_last_block);
@@ -472,6 +480,26 @@ static int smoothaf_status_from_result(enum smoothaf_result result)
     }
 }
 
+#define SMOOTHAF_VLOG_AF_ERROR_LOG_BASE 100
+
+static void smoothaf_vlog_af_fail(int result, int block)
+{
+    smoothaf_af_episode_state_before_error = smoothaf_vlog_af.state;
+    smoothaf_af_episode_reason = result;
+    smoothaf_af_episode_result = result;
+    if (block != SMOOTHAF_VLOG_AF_BLOCK_NONE)
+        smoothaf_af_command_block = block;
+    smoothaf_log_event_extended(SMOOTHAF_LOG_ERROR,
+                                SMOOTHAF_VLOG_AF_ERROR_LOG_BASE + result,
+                                smoothaf_vlog_af.state,
+                                (int)smoothaf_vlog_af.commands,
+                                (int)smoothaf_vlog_af_commands_available(&smoothaf_vlog_af),
+                                block);
+    smoothaf_vlog_af_stop(&smoothaf_vlog_af);
+    smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
+    smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
+}
+
 static void smoothaf_monitor_task(void)
 {
     uint32_t completed;
@@ -482,6 +510,7 @@ static void smoothaf_monitor_task(void)
     int laplacian = 0;
     int valid;
     int result_processed;
+    int gate_reason;
     struct smoothaf_monitor_sample sample;
     while (smoothaf_monitor.enabled && !smoothaf_cancel &&
            !smoothaf_monitor_deinit && !smoothaf_task_stop_requested)
@@ -494,11 +523,8 @@ static void smoothaf_monitor_task(void)
         /* A stale episode must not issue another move after its time budget. */
         if (smoothaf_vlog_af_timeout_due(&smoothaf_vlog_af,
                                          (uint32_t)get_ms_clock()))
-        {
-            smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_TIMEOUT;
-            smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-            smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
-        }
+            smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_TIMEOUT,
+                                  SMOOTHAF_VLOG_AF_BLOCK_NONE);
         if (smoothaf_vlog_af_should_cancel(&smoothaf_vlog_af,
                                            smoothaf_vlog_af_mode))
         {
@@ -516,11 +542,8 @@ static void smoothaf_monitor_task(void)
         {
             smoothaf_last_block = smoothaf_measure_block_reason();
             if (smoothaf_vlog_af.armed && smoothaf_vlog_af.awaiting_result)
-            {
-                smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
-                smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-                smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
-            }
+                smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_BLOCKED,
+                                      SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT);
             smoothaf_monitor_record_blocked(&smoothaf_monitor);
             smoothaf_monitor_record_skip(&smoothaf_monitor);
             smoothaf_monitor_schedule_after(&smoothaf_monitor, (uint32_t)get_ms_clock());
@@ -556,21 +579,20 @@ static void smoothaf_monitor_task(void)
         if (smoothaf_vlog_af.armed && smoothaf_vlog_af_result_due(&smoothaf_vlog_af, completed))
         {
             if (smoothaf_vlog_af_timeout_due(&smoothaf_vlog_af, completed))
-            {
-                smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_TIMEOUT;
-                smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-                smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
-            }
+                smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_TIMEOUT,
+                                      SMOOTHAF_VLOG_AF_BLOCK_NONE);
             else if (!sample.valid || !sample.confident || smoothaf_monitor.state == SMOOTHAF_MONITOR_UNCERTAIN)
             {
-                smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN;
                 smoothaf_vlog_af.uncertain = 1;
-                smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-                smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
+                smoothaf_af_post_move_valid = 0;
+                smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN,
+                                      SMOOTHAF_VLOG_AF_BLOCK_NONE);
             }
             else
             {
                 smoothaf_vlog_af_record_result(&smoothaf_vlog_af, sample.score, completed);
+                smoothaf_af_post_move_valid = 1;
+                smoothaf_af_episode_reason = smoothaf_vlog_af.episode_result;
                 smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
                 smoothaf_af_post_move_score = smoothaf_vlog_af.post_move_score;
                 smoothaf_af_best_score = smoothaf_vlog_af.best;
@@ -588,13 +610,16 @@ static void smoothaf_monitor_task(void)
         if (!result_processed && smoothaf_vlog_af.armed && smoothaf_vlog_af.state == SMOOTHAF_VLOG_AF_PROBING &&
             !smoothaf_vlog_af.awaiting_result)
         {
-            if (!smoothaf_vlog_af_can_command(&smoothaf_vlog_af, smoothaf_enabled, completed))
+            gate_reason = smoothaf_vlog_af_command_block_reason_for(
+                &smoothaf_vlog_af, smoothaf_vlog_af_mode,
+                smoothaf_enabled, completed);
+            if (gate_reason != SMOOTHAF_VLOG_AF_BLOCK_NONE)
             {
-                if (smoothaf_vlog_af.mode == SMOOTHAF_VLOG_AF_ACTIVE && !smoothaf_enabled)
+                smoothaf_af_command_block = gate_reason;
+                if (gate_reason == SMOOTHAF_VLOG_AF_BLOCK_DISABLED)
                     smoothaf_last_block = SMOOTHAF_BLOCK_DISABLED;
-                smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
-                smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-                smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
+                smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_BLOCKED,
+                                      gate_reason);
             }
             else if (smoothaf_vlog_af_uses_dry_run(&smoothaf_vlog_af,
                                                     smoothaf_vlog_af_mode))
@@ -606,15 +631,13 @@ static void smoothaf_monitor_task(void)
             else if (smoothaf_block_reason())
             {
                 smoothaf_last_block = smoothaf_block_reason();
-                smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
-                smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-                smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
+                smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_BLOCKED,
+                                      SMOOTHAF_VLOG_AF_BLOCK_SAFETY_GATE);
             }
             else if (!smoothaf_move(smoothaf_vlog_af.direction))
             {
-                smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_FAILED;
-                smoothaf_vlog_af_stop(&smoothaf_vlog_af);
-                smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_ERROR;
+                smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_FAILED,
+                                      SMOOTHAF_VLOG_AF_BLOCK_NONE);
             }
             else
             {
@@ -1016,6 +1039,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
         if (smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_NONE ||
             smoothaf_af_episode_result == SMOOTHAF_VLOG_AF_RESULT_ARMED)
             smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
+        smoothaf_af_episode_reason = smoothaf_vlog_af.episode_result;
         smoothaf_cancel_pending_measure();
         smoothaf_task_stop_requested = 1;
         smoothaf_monitor_stop(&smoothaf_monitor);
@@ -1123,9 +1147,9 @@ static const char *smoothaf_vlog_af_mode_name(void)
            smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN ? "DRY RUN" : "OFF";
 }
 
-static const char *smoothaf_vlog_af_state_name(void)
+static const char *smoothaf_vlog_af_state_name_for(int state)
 {
-    switch (smoothaf_vlog_af.state)
+    switch (state)
     {
         case SMOOTHAF_VLOG_AF_PROBING: return "PROBING";
         case SMOOTHAF_VLOG_AF_SETTLING: return "SETTLING";
@@ -1134,6 +1158,11 @@ static const char *smoothaf_vlog_af_state_name(void)
         case SMOOTHAF_VLOG_AF_ERROR: return "ERROR";
         default: return "WAITING";
     }
+}
+
+static const char *smoothaf_vlog_af_state_name(void)
+{
+    return smoothaf_vlog_af_state_name_for(smoothaf_vlog_af.state);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_vlog_af_mode_update)
@@ -1159,6 +1188,21 @@ static MENU_UPDATE_FUNC(smoothaf_af_last_block_update)
 
 static MENU_UPDATE_FUNC(smoothaf_af_last_move_result_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_last_lens_return); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_command_block_update)
+{ MENU_SET_VALUE("%s", smoothaf_vlog_af_block_name(smoothaf_af_command_block)); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_episode_reason_update)
+{ MENU_SET_VALUE("%s", smoothaf_vlog_af_result_name(smoothaf_af_episode_reason)); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_episode_state_before_error_update)
+{ MENU_SET_VALUE("%s", smoothaf_vlog_af_state_name_for(smoothaf_af_episode_state_before_error)); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_post_move_valid_update)
+{ MENU_SET_VALUE("%s", smoothaf_af_post_move_valid ? "YES" : "NO"); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_last_result_valid_update)
+{ MENU_SET_VALUE("%s", smoothaf_af_last_result_valid ? "YES" : "NO"); }
 
 static MENU_UPDATE_FUNC(smoothaf_af_commands_episode_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_af_commands_episode); }
@@ -1193,10 +1237,20 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
                                   smoothaf_monitor_task_requested,
                                   smoothaf_vlog_af.armed))
         return;
+    if (smoothaf_vlog_af.session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+    {
+        smoothaf_af_command_block = SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT;
+        smoothaf_af_episode_reason = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
+        smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
+        return;
+    }
     reason = smoothaf_block_reason();
     if (reason)
     {
         smoothaf_last_block = reason;
+        smoothaf_af_command_block = SMOOTHAF_VLOG_AF_BLOCK_NONE;
+        smoothaf_af_episode_reason = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
+        smoothaf_af_episode_state_before_error = smoothaf_vlog_af.state;
         smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
         return;
     }
@@ -1205,6 +1259,11 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
                                  smoothaf_monitor.score);
     smoothaf_af_commands_episode = 0;
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_ARMED;
+    smoothaf_af_episode_reason = SMOOTHAF_VLOG_AF_RESULT_ARMED;
+    smoothaf_af_command_block = SMOOTHAF_VLOG_AF_BLOCK_NONE;
+    smoothaf_af_episode_state_before_error = SMOOTHAF_VLOG_AF_WAITING;
+    smoothaf_af_post_move_valid = 0;
+    smoothaf_af_last_result_valid = 0;
     smoothaf_af_initial_score = smoothaf_monitor.score;
     smoothaf_af_post_move_score = 0;
     smoothaf_af_best_score = smoothaf_monitor.score;
@@ -1338,6 +1397,20 @@ static MENU_UPDATE_FUNC(smoothaf_measure_result_update)
 static MENU_UPDATE_FUNC(smoothaf_vlog_af_commands_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_vlog_af.session_commands); }
 
+static MENU_UPDATE_FUNC(smoothaf_vlog_af_available_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_vlog_af_commands_available(&smoothaf_vlog_af)); }
+
+static MENU_UPDATE_FUNC(smoothaf_vlog_af_last_command_update)
+{
+    uint32_t now = (uint32_t)get_ms_clock();
+    MENU_SET_VALUE("%d ms", smoothaf_vlog_af.last_command_ms
+                   ? (int)(now - smoothaf_vlog_af.last_command_ms) : -1);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_vlog_af_timeout_update)
+{ MENU_SET_VALUE("%d ms", (int)smoothaf_vlog_af_timeout_remaining(
+                              &smoothaf_vlog_af, (uint32_t)get_ms_clock())); }
+
 static MENU_SELECT_FUNC(smoothaf_stop_select)
 {
     int monitor_was_enabled = smoothaf_monitor.enabled;
@@ -1436,10 +1509,26 @@ static struct menu_entry smoothaf_menu[] =
           .help = "Lens calls that reported success." },
         { .name = "AF Last Block", .update = smoothaf_af_last_block_update,
           .help = "Last safety gate or measurement block reason." },
+        { .name = "AF Command Block", .update = smoothaf_af_command_block_update,
+          .help = "Exact Vlog AF command-gate reason." },
+        { .name = "AF Episode Reason", .update = smoothaf_af_episode_reason_update,
+          .help = "Exact result that ended the latest episode." },
+        { .name = "AF State Before Error", .update = smoothaf_af_episode_state_before_error_update,
+          .help = "Vlog AF state captured before an ERROR transition." },
         { .name = "AF Last Move Result", .update = smoothaf_af_last_move_result_update,
-          .help = "Raw lens_focus return for the last physical call." },
+          .help = "Nonzero means lens_focus accepted the call; not focus confirmation." },
+        { .name = "AF Post-Move Valid", .update = smoothaf_af_post_move_valid_update,
+          .help = "Whether the last post-command score was valid and confident." },
+        { .name = "AF Last Result Valid", .update = smoothaf_af_last_result_valid_update,
+          .help = "Whether the latest lens_focus return was nonzero." },
         { .name = "AF Commands", .update = smoothaf_vlog_af_commands_update,
-          .help = "Vlog AF commands issued since the monitor started." },
+          .help = "Vlog AF commands accumulated since monitor start." },
+        { .name = "AF Commands Available", .update = smoothaf_vlog_af_available_update,
+          .help = "Remaining commands under both episode and session limits." },
+        { .name = "AF Time Since Move", .update = smoothaf_vlog_af_last_command_update,
+          .help = "Elapsed time since the last Vlog AF command." },
+        { .name = "AF Timeout Remaining", .update = smoothaf_vlog_af_timeout_update,
+          .help = "Remaining time in the current armed episode." },
         { .name = "AF Commands This Episode", .update = smoothaf_af_commands_episode_update,
           .help = "Commands issued by the current or last armed episode." },
         { .name = "AF Episode Result", .update = smoothaf_vlog_af_result_update,

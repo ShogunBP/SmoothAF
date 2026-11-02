@@ -176,6 +176,60 @@ int main(void)
           "OFF mode cannot be armed");
     CHECK(!smoothaf_vlog_af_can_arm(SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 1),
           "an already armed episode blocks a second arming");
+    CHECK(smoothaf_vlog_af_command_block_reason(&af, 1, 0) ==
+          SMOOTHAF_VLOG_AF_BLOCK_DISARMED &&
+          smoothaf_vlog_af_command_block_reason_for(&af, SMOOTHAF_VLOG_AF_OFF, 1, 0) ==
+          SMOOTHAF_VLOG_AF_BLOCK_DISARMED,
+          "command diagnostics identify a disarmed episode");
+
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    while (af.commands < SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+    {
+        CHECK(smoothaf_vlog_af_can_command(&af, 1, af.commands + 100),
+              "four-command episode accepts commands within its budget");
+        smoothaf_vlog_af_record_command(&af, af.commands + 100);
+        af.awaiting_result = 0;
+        af.state = SMOOTHAF_VLOG_AF_PROBING;
+    }
+    CHECK(smoothaf_vlog_af_commands_available(&af) == 0,
+          "no commands remain after the episode limit");
+    CHECK(smoothaf_vlog_af_command_block_reason(&af, 1, 1000) ==
+          SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT,
+          "command diagnostics identify the episode limit");
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(af.commands == 0 && af.session_commands == SMOOTHAF_VLOG_AF_MAX_COMMANDS,
+          "new episode resets only its counter, not the session budget");
+    CHECK(smoothaf_vlog_af_commands_available(&af) == 0 &&
+          smoothaf_vlog_af_command_block_reason(&af, 1, 1000) ==
+          SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT,
+          "second episode reports the global session limit explicitly");
+    CHECK(strcmp(smoothaf_vlog_af_block_name(SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT),
+                 "SESSION_LIMIT") == 0,
+          "command-block reason has a diagnostic name");
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(smoothaf_vlog_af_commands_available(&af) == SMOOTHAF_VLOG_AF_MAX_COMMANDS &&
+          smoothaf_vlog_af_can_command(&af, 1, 1000),
+          "restarting the monitor is the explicit session-budget recovery");
+
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    af.awaiting_result = 1;
+    CHECK(smoothaf_vlog_af_command_block_reason(&af, 1, 1000) ==
+          SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT,
+          "command diagnostics identify a pending post-move result");
+    af.awaiting_result = 0;
+    CHECK(smoothaf_vlog_af_command_block_reason_for(&af,
+          SMOOTHAF_VLOG_AF_ACTIVE, 0, 1000) ==
+          SMOOTHAF_VLOG_AF_BLOCK_DISABLED,
+          "command diagnostics identify the ACTIVE Enable gate");
+    af.cooldown_until_ms = 2000;
+    CHECK(smoothaf_vlog_af_command_block_reason(&af, 1, 1000) ==
+          SMOOTHAF_VLOG_AF_BLOCK_COOLDOWN,
+          "command diagnostics identify cooldown");
 
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1000);
     CHECK(af.armed && af.state == SMOOTHAF_VLOG_AF_WAITING,

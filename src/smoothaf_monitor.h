@@ -58,6 +58,37 @@
 #define SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT    13
 #define SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED  14
 #define SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED 15
+
+/* Reasons a command gate can deny an otherwise armed episode.  These are
+ * diagnostic values; the safety limits themselves remain unchanged. */
+#define SMOOTHAF_VLOG_AF_BLOCK_NONE             0
+#define SMOOTHAF_VLOG_AF_BLOCK_OFF              1
+#define SMOOTHAF_VLOG_AF_BLOCK_DISARMED         2
+#define SMOOTHAF_VLOG_AF_BLOCK_DISABLED         3
+#define SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT   4
+#define SMOOTHAF_VLOG_AF_BLOCK_STATE            5
+#define SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT   6
+#define SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT   7
+#define SMOOTHAF_VLOG_AF_BLOCK_COOLDOWN         8
+#define SMOOTHAF_VLOG_AF_BLOCK_SAFETY_GATE      9
+
+static inline const char *smoothaf_vlog_af_block_name(int reason)
+{
+    switch (reason)
+    {
+        case SMOOTHAF_VLOG_AF_BLOCK_OFF: return "OFF";
+        case SMOOTHAF_VLOG_AF_BLOCK_DISARMED: return "DISARMED";
+        case SMOOTHAF_VLOG_AF_BLOCK_DISABLED: return "DISABLED";
+        case SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT: return "WAITING_RESULT";
+        case SMOOTHAF_VLOG_AF_BLOCK_STATE: return "STATE";
+        case SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT: return "EPISODE_LIMIT";
+        case SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT: return "SESSION_LIMIT";
+        case SMOOTHAF_VLOG_AF_BLOCK_COOLDOWN: return "COOLDOWN";
+        case SMOOTHAF_VLOG_AF_BLOCK_SAFETY_GATE: return "SAFETY_GATE";
+        default: return "NONE";
+    }
+}
+
 #define SMOOTHAF_VLOG_AF_SETTLE_MS      120
 
 static inline const char *smoothaf_monitor_state_name(int state)
@@ -132,6 +163,7 @@ struct smoothaf_vlog_af
     uint32_t generation;
     uint32_t settle_until_ms;
     uint32_t cooldown_until_ms;
+    uint32_t last_command_ms;
     int awaiting_result;
     int dry_run_requests;
     int episode_result;
@@ -248,6 +280,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->generation = 0;
     af->settle_until_ms = 0;
     af->cooldown_until_ms = 0;
+    af->last_command_ms = 0;
     af->awaiting_result = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
@@ -278,6 +311,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->reversals = 0;
     af->settle_until_ms = 0;
     af->cooldown_until_ms = 0;
+    af->last_command_ms = 0;
     af->awaiting_result = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
@@ -310,6 +344,7 @@ static inline void smoothaf_vlog_af_record_command(
     if (af->commands != UINT32_MAX) af->commands++;
     if (af->session_commands != UINT32_MAX) af->session_commands++;
     if (!af->started_ms) af->started_ms = now;
+    af->last_command_ms = now;
     af->awaiting_result = 1;
     af->state = SMOOTHAF_VLOG_AF_SETTLING;
     af->settle_until_ms = now + SMOOTHAF_VLOG_AF_SETTLE_MS;
@@ -327,18 +362,47 @@ static inline int smoothaf_vlog_af_advance_cooldown(
     return 1;
 }
 
+static inline int smoothaf_vlog_af_command_block_reason_for(
+    const struct smoothaf_vlog_af *af, int mode, int enabled, uint32_t now)
+{
+    if (!af->armed) return SMOOTHAF_VLOG_AF_BLOCK_DISARMED;
+    if (mode == SMOOTHAF_VLOG_AF_OFF) return SMOOTHAF_VLOG_AF_BLOCK_OFF;
+    if (mode == SMOOTHAF_VLOG_AF_ACTIVE && !enabled)
+        return SMOOTHAF_VLOG_AF_BLOCK_DISABLED;
+    if (af->awaiting_result) return SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT;
+    if (af->state != SMOOTHAF_VLOG_AF_PROBING) return SMOOTHAF_VLOG_AF_BLOCK_STATE;
+    if (af->commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+        return SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT;
+    if (af->session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+        return SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT;
+    if (af->cooldown_until_ms && (int32_t)(now - af->cooldown_until_ms) < 0)
+        return SMOOTHAF_VLOG_AF_BLOCK_COOLDOWN;
+    return SMOOTHAF_VLOG_AF_BLOCK_NONE;
+}
+
+static inline int smoothaf_vlog_af_command_block_reason(
+    const struct smoothaf_vlog_af *af, int enabled, uint32_t now)
+{
+    return smoothaf_vlog_af_command_block_reason_for(af, af->mode, enabled, now);
+}
+
 static inline int smoothaf_vlog_af_can_command(
     struct smoothaf_vlog_af *af, int enabled, uint32_t now)
 {
-    if (!af->armed || af->mode == SMOOTHAF_VLOG_AF_OFF) return 0;
-    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && !enabled) return 0;
-    if (af->awaiting_result) return 0;
-    if (af->state != SMOOTHAF_VLOG_AF_PROBING) return 0;
-    if (af->commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS) return 0;
-    if (af->session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS) return 0;
-    if (af->cooldown_until_ms && (int32_t)(now - af->cooldown_until_ms) < 0)
-        return 0;
-    return 1;
+    return smoothaf_vlog_af_command_block_reason(af, enabled, now) ==
+           SMOOTHAF_VLOG_AF_BLOCK_NONE;
+}
+
+static inline uint32_t smoothaf_vlog_af_commands_available(
+    const struct smoothaf_vlog_af *af)
+{
+    uint32_t episode = SMOOTHAF_VLOG_AF_MAX_COMMANDS -
+                       (af->commands < SMOOTHAF_VLOG_AF_MAX_COMMANDS
+                        ? af->commands : SMOOTHAF_VLOG_AF_MAX_COMMANDS);
+    uint32_t session = SMOOTHAF_VLOG_AF_MAX_COMMANDS -
+                       (af->session_commands < SMOOTHAF_VLOG_AF_MAX_COMMANDS
+                        ? af->session_commands : SMOOTHAF_VLOG_AF_MAX_COMMANDS);
+    return episode < session ? episode : session;
 }
 
 /* Overall episode timeout, checked between monitor samples.  An armed episode
@@ -348,6 +412,17 @@ static inline int smoothaf_vlog_af_timeout_due(
 {
     return af->armed && af->started_ms &&
            (uint32_t)(now - af->started_ms) > SMOOTHAF_VLOG_AF_TIMEOUT_MS;
+}
+
+static inline uint32_t smoothaf_vlog_af_timeout_remaining(
+    const struct smoothaf_vlog_af *af, uint32_t now)
+{
+    uint32_t elapsed;
+    if (!af->armed) return 0;
+    if (!af->started_ms) return SMOOTHAF_VLOG_AF_TIMEOUT_MS;
+    elapsed = now - af->started_ms;
+    return elapsed >= SMOOTHAF_VLOG_AF_TIMEOUT_MS
+         ? 0 : SMOOTHAF_VLOG_AF_TIMEOUT_MS - elapsed;
 }
 
 /* Switching the menu mode to OFF must not leave an armed episode able to
@@ -407,6 +482,7 @@ static inline int smoothaf_vlog_af_record_result(
         if (af->commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
         {
             af->armed = 0;
+            af->state = SMOOTHAF_VLOG_AF_COMPLETE;
             af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
         }
         return 1;

@@ -17,8 +17,11 @@ def test_menu_shape_and_lifecycle():
         '"Vlog AF Mode"', '"OFF"', '"DRY RUN"', '"ACTIVE"',
         '"Vlog AF State"', '"Start New AF Episode"', '"AF Episode Result"',
         '"AF Move Attempts"', '"AF Lens Calls"', '"AF Move Successes"',
-        '"AF Last Block"', '"AF Last Move Result"',
-        '"AF Commands This Episode"', '"AF Initial Score"',
+        '"AF Last Block"', '"AF Command Block"', '"AF Episode Reason"',
+        '"AF State Before Error"', '"AF Last Move Result"',
+        '"AF Post-Move Valid"', '"AF Last Result Valid"', '"AF Commands"',
+        '"AF Commands Available"', '"AF Time Since Move"',
+        '"AF Timeout Remaining"', '"AF Commands This Episode"', '"AF Initial Score"',
         '"AF Post-Move Score"', '"AF Best Score"', '"AF Score Delta"',
         '"AF Best Relative Position"', '"AF Current Relative Position"',
         '"AF Last Direction"',
@@ -48,6 +51,9 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_panic_rearm' in source
     assert 'smoothaf_can_start(smoothaf_enabled' in source
     assert 'smoothaf_vlog_af_can_arm(' in source
+    assert 'smoothaf_vlog_af_command_block_reason' in source
+    assert 'smoothaf_vlog_af_commands_available' in source
+    assert 'SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT' in source
     assert 'smoothaf_vlog_af_should_probe(' in source
     assert 'smoothaf_vlog_af_advance_cooldown(' in source
     assert 'smoothaf_vlog_af_timeout_due(' in source
