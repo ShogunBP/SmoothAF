@@ -22,7 +22,15 @@ There is no global arbitration across every Magic Lantern module. SmoothAF maint
 
 ## Focus controllers
 
+The persisted Vlog selection is `Current Vlog`, `Legacy HC`, `Adaptive HC`, or `Normal AF`; invalid values normalize to `Current Vlog`. Focus Test remains isolated and advertises only the three reusable controllers. Vlog selection is copied into the episode at a safe boundary, and a menu edit during an active episode is shown as pending rather than replacing the live controller.
+
+Current Vlog retains the monitor-native bounded policy. Legacy HC, Adaptive HC, and Normal AF use the reusable core state machines through the cooperative monitor task, with the same per-command safety gate, settle/result cycle, cancellation, cooldown and episode budgets. Confirmation measurements do not issue lens commands. No controller claims Canon-native AF or physical lock from a score alone.
+
 Legacy HC remains the default bounded controller and preserves `lens_focus(direction, smoothaf_step, 1, 0)`. Adaptive HC remains experimental. Normal AF remains bounded single-shot. None of these changes alter the existing movement limits or introduce continuous AF.
+
+## Experimental far-focus recovery
+
+Far Focus Recovery is a separate, camera-independent bounded phase used only by the Current Vlog path when the score is below its experimental threshold. It records coarse acquisition, a two-sided bracket, fine refinement, best-position tracking and an explicit completion result. The adapter owns one lens command at a time and the recovery has a fixed command budget; cancellation and all existing movement gates remain authoritative. Recovery is disabled during Movie unless the existing experimental Movie authorization is explicitly enabled. The state machine and tests are not evidence of global recovery or real STM performance; Canon T3i validation is required.
 
 ## Asynchronous passive Vlog Monitor
 

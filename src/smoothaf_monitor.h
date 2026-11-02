@@ -2,6 +2,9 @@
 #define SMOOTHAF_MONITOR_H
 
 #include <stdint.h>
+#include "smoothaf_core.h"
+#include "smoothaf_algorithm.h"
+#include "smoothaf_recovery.h"
 
 #define SMOOTHAF_MONITOR_INTERVAL_1000 0
 #define SMOOTHAF_MONITOR_INTERVAL_500  1
@@ -194,11 +197,10 @@ static inline int smoothaf_movie_active_recording_allowed(
     int mode, int experimental, int liveview, int movie,
     int recording_h264, int recording_custom, int recording_raw)
 {
-    (void)recording_h264;
     return experimental &&
            (mode == SMOOTHAF_VLOG_AF_ACTIVE ||
             mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) && liveview && movie &&
-           !recording_custom && !recording_raw;
+           recording_h264 && !recording_custom && !recording_raw;
 }
 
 static inline int smoothaf_movie_active_gate_allowed(
@@ -297,6 +299,16 @@ static inline int smoothaf_vlog_af_deadband(int best)
 struct smoothaf_vlog_af
 {
     int mode;
+    int algorithm;
+    int controller_initialized;
+    int controller_step;
+    int command_step;
+    int controller_action;
+    int controller_pending;
+    int controller_measure_only;
+    struct smoothaf_hc legacy_controller;
+    struct smoothaf_adaptive_hc adaptive_controller;
+    struct smoothaf_normal_af normal_controller;
     int state;
     int armed;
     int direction;
@@ -328,6 +340,7 @@ struct smoothaf_vlog_af
     int score_delta;
     int best_position;
     int current_position;
+    int controller_terminal_result;
     uint32_t started_ms;
     int uncertain;
     uint32_t image_ms;
@@ -336,6 +349,7 @@ struct smoothaf_vlog_af
     uint32_t stabilization_ms;
     uint32_t lens_calls;
     uint32_t last_result_ms;
+    struct smoothaf_recovery recovery;
 };
 
 /* The passive monitor only promotes an armed episode after it has confirmed
@@ -486,6 +500,13 @@ struct smoothaf_monitor
 static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
 {
     af->mode = SMOOTHAF_VLOG_AF_OFF;
+    af->algorithm = SMOOTHAF_ALGORITHM_CURRENT_VLOG;
+    af->controller_initialized = 0;
+    af->controller_step = 1;
+    af->command_step = 1;
+    af->controller_action = 0;
+    af->controller_pending = 0;
+    af->controller_measure_only = 0;
     af->state = SMOOTHAF_VLOG_AF_WAITING;
     af->armed = 0;
     af->direction = 1;
@@ -517,6 +538,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->score_delta = 0;
     af->best_position = 0;
     af->current_position = 0;
+    af->controller_terminal_result = 0;
     af->last_direction = 1;
     af->started_ms = 0;
     af->uncertain = 0;
@@ -526,6 +548,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->stabilization_ms = 0;
     af->lens_calls = 0;
     af->last_result_ms = 0;
+    smoothaf_recovery_init(&af->recovery);
 }
 
 /* Reset operational authorization for a new monitor session without changing
@@ -534,8 +557,16 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
 static inline void smoothaf_vlog_af_reset_session(struct smoothaf_vlog_af *af,
                                                   int selected_mode)
 {
+    int algorithm = af->algorithm;
     smoothaf_vlog_af_init(af);
     af->mode = selected_mode;
+    af->algorithm = smoothaf_algorithm_normalize(algorithm);
+}
+
+static inline void smoothaf_vlog_af_set_algorithm(struct smoothaf_vlog_af *af,
+                                                  int algorithm)
+{
+    af->algorithm = smoothaf_algorithm_normalize(algorithm);
 }
 
 static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
@@ -543,8 +574,10 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
                                                 int baseline)
 {
     uint32_t completed = af->episodes_completed;
+    int algorithm = af->algorithm;
     af->generation++;
     af->mode = mode;
+    af->algorithm = smoothaf_algorithm_normalize(algorithm);
     af->state = SMOOTHAF_VLOG_AF_WAITING;
     af->armed = 1;
     af->continuous_armed = mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
@@ -568,12 +601,17 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->awaiting_result = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
+    af->controller_initialized = 0;
+    af->controller_pending = 0;
+    af->controller_step = 1;
+    af->command_step = 1;
     af->initial_score = baseline;
     af->previous_score = baseline;
     af->post_move_score = 0;
     af->score_delta = 0;
     af->best_position = 0;
     af->current_position = 0;
+    af->controller_terminal_result = 0;
     af->last_direction = af->direction;
     af->started_ms = 0;
     af->uncertain = 0;
@@ -583,6 +621,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->stabilization_ms = 0;
     af->lens_calls = 0;
     af->last_result_ms = 0;
+    smoothaf_recovery_init(&af->recovery);
 }
 
 static inline void smoothaf_vlog_af_arm_continuous(
@@ -610,6 +649,7 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
 {
     uint32_t completed = af->episodes_completed;
     int continuous = af->continuous_armed;
+    int algorithm = af->algorithm;
     int failures = af->consecutive_failures;
     int safety_paused = af->safety_paused;
     int limit = af->episode_limit;
@@ -620,6 +660,7 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     af->consecutive_failures = failures;
     af->safety_paused = safety_paused;
     smoothaf_vlog_af_set_episode_limit(af, limit);
+    af->algorithm = smoothaf_algorithm_normalize(algorithm);
 }
 
 static inline void smoothaf_vlog_af_complete_continuous_episode(
@@ -655,6 +696,16 @@ static inline void smoothaf_vlog_af_stop(struct smoothaf_vlog_af *af)
                          ? SMOOTHAF_VLOG_AF_RESULT_CANCELLED
                          : SMOOTHAF_VLOG_AF_RESULT_NO_MOVEMENT;
     af->state = SMOOTHAF_VLOG_AF_COMPLETE;
+    smoothaf_recovery_init(&af->recovery);
+}
+
+static inline void smoothaf_vlog_af_record_measure(
+    struct smoothaf_vlog_af *af, uint32_t now)
+{
+    af->last_result_ms = now;
+    af->awaiting_result = 1;
+    af->settle_until_ms = now;
+    af->state = SMOOTHAF_VLOG_AF_SETTLING;
 }
 
 static inline void smoothaf_vlog_af_record_command(

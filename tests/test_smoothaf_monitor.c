@@ -290,9 +290,9 @@ static void test_movie_recording_policy(void)
           smoothaf_movie_active_recording_allowed(
               SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1, 1, 1, 0, 0),
           "authorized ACTIVE modes permit normal H.264 Movie recording");
-    CHECK(smoothaf_movie_active_recording_allowed(
+    CHECK(!smoothaf_movie_active_recording_allowed(
               SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 0, 0, 0),
-          "authorized ACTIVE permits Movie before recording starts");
+           "authorized ACTIVE remains blocked before H.264 recording starts");
     CHECK(!smoothaf_movie_active_recording_allowed(
               SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 1, 0) &&
           !smoothaf_movie_active_recording_allowed(

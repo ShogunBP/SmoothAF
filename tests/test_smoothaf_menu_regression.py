@@ -25,6 +25,8 @@ def test_menu_shape_and_lifecycle():
     assert '"Sample Int"' in vlog
     assert '"Vlog Metric"' in vlog
     assert '"Vlog Step"' in vlog
+    assert '"AF Algorithm"' in vlog
+    assert '"Far Focus Recovery"' in vlog
     assert vlog.index('"Start/Stop Monitoring"') < vlog.index('"Start New AF Episode"')
     assert vlog.index('"Start New AF Episode"') < vlog.index('"Vlog AF Mode"')
     assert vlog.index('"Sample Int"') < vlog.index('"Session State"')
@@ -88,6 +90,7 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_vlog_af_timeout_due(' in source
     assert 'smoothaf_vlog_af_should_cancel(' in source
     assert 'smoothaf_vlog_af_uses_dry_run(' in source
+    assert 'smoothaf_vlog_af.mode != SMOOTHAF_VLOG_AF_DRY_RUN' in source
     assert 'smoothaf_movie_dry_run_recording_allowed(' in source
     assert 'SMOOTHAF_LOG_RECORDING' in source
     assert 'smoothaf_movie_recording_transition(' in source
