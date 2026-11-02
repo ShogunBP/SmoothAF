@@ -1838,6 +1838,8 @@ static const char *smoothaf_algorithm_phase_name(void)
 
 static const char *smoothaf_movement_state_name(void)
 {
+    if (smoothaf_vlog_af.awaiting_result)
+        return "POST-MOVE PENDING";
     switch (smoothaf_physical_movement_state)
     {
         case SMOOTHAF_MOVEMENT_MOVING: return "MOVING";
