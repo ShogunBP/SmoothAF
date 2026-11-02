@@ -94,6 +94,93 @@ static inline const char *smoothaf_vlog_af_block_name(int reason)
 
 #define SMOOTHAF_VLOG_AF_SETTLE_MS      120
 
+#define SMOOTHAF_MOVIE_RECORDING_NONE   0
+#define SMOOTHAF_MOVIE_RECORDING_H264   1
+#define SMOOTHAF_MOVIE_RECORDING_CUSTOM 2
+#define SMOOTHAF_MOVIE_RECORDING_RAW    3
+
+static inline int smoothaf_movie_recording_class(int recording_h264,
+                                                 int recording_custom,
+                                                 int recording_raw)
+{
+    if (recording_raw) return SMOOTHAF_MOVIE_RECORDING_RAW;
+    if (recording_custom) return SMOOTHAF_MOVIE_RECORDING_CUSTOM;
+    if (recording_h264) return SMOOTHAF_MOVIE_RECORDING_H264;
+    return SMOOTHAF_MOVIE_RECORDING_NONE;
+}
+
+struct smoothaf_movie_recording_state
+{
+    int active;
+    int class_id;
+    uint32_t started_ms;
+    uint32_t ended_ms;
+    uint32_t samples;
+    uint32_t valid;
+    uint32_t invalid;
+};
+
+static inline void smoothaf_movie_recording_init(
+    struct smoothaf_movie_recording_state *state)
+{
+    state->active = 0;
+    state->class_id = SMOOTHAF_MOVIE_RECORDING_NONE;
+    state->started_ms = 0;
+    state->ended_ms = 0;
+    state->samples = 0;
+    state->valid = 0;
+    state->invalid = 0;
+}
+
+/* Return 1 for a new recording edge, 2 for an observed end edge, 0 otherwise. */
+static inline int smoothaf_movie_recording_observe(
+    struct smoothaf_movie_recording_state *state, int recording_class,
+    uint32_t now)
+{
+    int active = recording_class != SMOOTHAF_MOVIE_RECORDING_NONE;
+    if (active == state->active &&
+        (!active || recording_class == state->class_id)) return 0;
+    if (active)
+    {
+        state->active = 1;
+        state->class_id = recording_class;
+        state->started_ms = now;
+        state->samples = 0;
+        state->valid = 0;
+        state->invalid = 0;
+        return 1;
+    }
+    state->active = 0;
+    /* Keep the last class visible after STOP so the menu and end event retain
+     * whether the completed clip was H.264, custom or RAW. */
+    state->ended_ms = now;
+    return 2;
+}
+
+/* Movie Dry Run is deliberately narrower than ACTIVE.  It is a read-only
+ * observation path for normal H.264 movie recording only.  RAW/custom movie
+ * recording and every non-dry-run mode remain outside this exception. */
+static inline int smoothaf_movie_dry_run_recording_allowed(
+    int mode, int liveview, int movie, int recording_h264,
+    int recording_custom, int recording_raw)
+{
+    return mode == SMOOTHAF_VLOG_AF_DRY_RUN && liveview && movie &&
+           recording_h264 && !recording_custom && !recording_raw;
+}
+
+static inline int smoothaf_movie_dry_run_gate_allowed(
+    int mode, int liveview, int movie, int recording_h264,
+    int recording_custom, int recording_raw, int cancelled,
+    int manual_focus, int continuous_af, int follow_focus,
+    int rack_focus, int focus_stack)
+{
+    return smoothaf_movie_dry_run_recording_allowed(
+               mode, liveview, movie, recording_h264,
+               recording_custom, recording_raw) && !cancelled &&
+           !manual_focus && !continuous_af && !follow_focus &&
+           !rack_focus && !focus_stack;
+}
+
 static inline const char *smoothaf_monitor_state_name(int state)
 {
     switch (state)

@@ -14,7 +14,7 @@ See [Development](DEVELOPMENT.md) for integration and build inputs, [Research](R
 - Stop requests cooperative cancellation; a synchronous lens command already in flight may finish.
 - A task is reserved before `task_create()`; task-creation failure releases the reservation.
 - `smoothaf_sem` protects control state and diagnostic snapshots. VRAM reads and sleeps occur outside the semaphore.
-- Movie Mode, recording, MF, Continuous AF, Follow Focus, Rack Focus and Focus Stacking remain blocked.
+- Lens movement remains blocked in Movie Mode and recording. The sole recording exception is read-only Movie Dry Run for normal H.264; MF, Continuous AF, Follow Focus, Rack Focus and Focus Stacking remain blocked.
 - Timeout and cancellation are checked between synchronous lens commands. A `lens_focus()` command already in flight may finish.
 - Do not unload, reload or replace the module while a task is active. The Legacy loader does not provide a general task join/kill guarantee.
 
@@ -26,7 +26,7 @@ Legacy HC remains the default bounded controller and preserves `lens_focus(direc
 
 ## Asynchronous passive Vlog Monitor
 
-The v0.6 monitor uses the existing shared SmoothAF task with `SMOOTHAF_TASK_MONITOR`; it does not create a task per sample. Start is explicit and the monitor is disabled during module load. The first sample is immediate, then the next deadline is computed from the previous completion time. Slow samples increment overrun/skipped metrics and never create catch-up work.
+The v0.6 monitor uses the existing shared SmoothAF task with `SMOOTHAF_TASK_MONITOR`; it does not create a task per sample. Start is explicit and the monitor is disabled during module load. The first sample is immediate, then the next deadline is computed from the previous completion time. Slow samples increment overrun/skipped metrics and never create catch-up work. In H.264 Movie Dry Run, the same task records recording edges and sample validity/timing in RAM; it remains read-only.
 
 The monitor reads the same central 64x64 UYVY/YUV422 ROI through `smoothaf_measure()`. SAD, Laplacian and mean luminance come from the same frame. The monitor exposes a lightweight performance snapshot with task state, configured and actual start-to-start interval, attempt/result counters, duration and overrun data. Menu callbacks only format this snapshot. The monitor never calls `lens_focus()`, half-shutter, Canon AF, exposure controls or VRAM writes. Menu callbacks only change flags/configuration or display snapshots.
 

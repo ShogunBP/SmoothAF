@@ -40,6 +40,7 @@ typedef enum
     SMOOTHAF_LOG_BENCH_END,
     SMOOTHAF_LOG_TASK_END,
     SMOOTHAF_LOG_MONITOR,
+    SMOOTHAF_LOG_RECORDING,
 } smoothaf_log_type_t;
 
 struct smoothaf_log_entry
@@ -172,6 +173,7 @@ static inline const char *smoothaf_log_type_name(smoothaf_log_type_t type)
         case SMOOTHAF_LOG_BENCH_END: return "BENCH-";
         case SMOOTHAF_LOG_TASK_END: return "TASK-END";
         case SMOOTHAF_LOG_MONITOR: return "MONITOR";
+        case SMOOTHAF_LOG_RECORDING: return "RECORDING";
         default: return "NONE";
     }
 }

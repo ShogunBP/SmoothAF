@@ -61,9 +61,11 @@ Relevant properties and events found in the reviewed Legacy tree include:
 
 ## Continuous AF, Movie and recording
 
-The Legacy code distinguishes photo Continuous AF and Movie Servo AF through `is_continuous_af()`. SmoothAF and `lens_focus()` reject those states. SmoothAF also blocks Movie Mode and recording states (`RECORDING_H264`, `RECORDING_CUSTOM`, `RECORDING_RAW`). These gates remain required.
+The Legacy code distinguishes photo Continuous AF and Movie Servo AF through `is_continuous_af()`. `lens_focus()` rejects MF and Canon continuous/servo AF, and SmoothAF retains those protections. The former SmoothAF measurement gates also rejected Movie Mode and all recording states (`RECORDING_H264`, `RECORDING_CUSTOM`, `RECORDING_RAW`). Those gates remain required for movement and for every mode other than the explicitly isolated read-only Movie Dry Run path.
 
-No evidence proves that EOS 600D firmware 1.0.2 accepts a module-triggered AF operation during recording, preserves exposure, keeps FPS stable, avoids LiveView interruption or supports safe cancellation. LiveView outside recording, Movie Mode in standby and active recording are separate environments. Only the first is a candidate for a future manual PoC.
+Movie Dry Run now permits only LiveView + Movie + normal H.264 recording while `Vlog AF Mode=DRY RUN`. It reads the existing VRAM ROI and records sample validity, confidence, duration, score and recording start/end events in the fixed RAM telemetry/history path; it never calls `smoothaf_move()` or `lens_focus()`. Custom and RAW recording remain blocked, as do Movie standby and all non-Dry-Run operations. The existing menu is the least-invasive live visibility option, but it is not assumed to remain visible during recording; RAM Log Page/Log Entry is the post-clip fallback. This is a compatibility probe, not evidence that recording-time lens movement is safe.
+
+No evidence yet proves that EOS 600D firmware 1.0.2 accepts a module-triggered AF operation during recording, preserves exposure, keeps FPS stable, avoids LiveView interruption or supports safe cancellation. LiveView outside recording, Movie Mode in standby and active recording are separate environments. Movie Active remains disabled pending physical Dry Run evidence and a separate compatibility decision.
 
 Face Detection Live Mode integration was not established. The presence of Canon focus states does not prove that a module call preserves or invokes face selection.
 

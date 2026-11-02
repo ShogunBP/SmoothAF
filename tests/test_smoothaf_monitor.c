@@ -153,6 +153,72 @@ static void test_vlog_af_lifecycle(void)
     }
 }
 
+static void test_movie_recording_policy(void)
+{
+    CHECK(smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0),
+          "H.264 Movie Dry Run is explicitly allowed");
+    CHECK(!smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 0, 0),
+          "Movie ACTIVE remains unavailable during Dry Run validation");
+    CHECK(!smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 0, 1, 1, 0, 0),
+          "Movie Dry Run requires LiveView");
+    CHECK(!smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 0, 1, 0, 0),
+          "Movie Dry Run requires Movie mode");
+    CHECK(!smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 0, 0, 0),
+          "Movie Dry Run requires recording");
+    CHECK(!smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 1, 0),
+          "custom recording remains blocked");
+    CHECK(!smoothaf_movie_dry_run_recording_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 1),
+          "RAW recording remains blocked");
+    CHECK(smoothaf_movie_dry_run_gate_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0,
+              0, 0, 0, 0, 0, 0),
+          "Movie Dry Run safety gates are clear");
+    CHECK(!smoothaf_movie_dry_run_gate_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0,
+              1, 0, 0, 0, 0, 0) &&
+          !smoothaf_movie_dry_run_gate_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0,
+              0, 1, 0, 0, 0, 0) &&
+          !smoothaf_movie_dry_run_gate_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0,
+              0, 0, 1, 0, 0, 0) &&
+          !smoothaf_movie_dry_run_gate_allowed(
+              SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0,
+              0, 0, 0, 1, 0, 0),
+          "cancel, MF, Continuous AF and Follow Focus remain blocked");
+    CHECK(smoothaf_movie_recording_class(1, 0, 0) == SMOOTHAF_MOVIE_RECORDING_H264 &&
+          smoothaf_movie_recording_class(0, 1, 0) == SMOOTHAF_MOVIE_RECORDING_CUSTOM &&
+          smoothaf_movie_recording_class(0, 0, 1) == SMOOTHAF_MOVIE_RECORDING_RAW &&
+          smoothaf_movie_recording_class(0, 0, 0) == SMOOTHAF_MOVIE_RECORDING_NONE,
+          "recording classes distinguish H.264, custom, RAW and idle");
+    {
+        struct smoothaf_movie_recording_state recording;
+        smoothaf_movie_recording_init(&recording);
+        CHECK(smoothaf_movie_recording_observe(
+                  &recording, SMOOTHAF_MOVIE_RECORDING_H264, 100) == 1 &&
+              recording.active && recording.started_ms == 100,
+              "recording start edge is observable");
+        recording.samples = 3;
+        recording.valid = 2;
+        recording.invalid = 1;
+        CHECK(smoothaf_movie_recording_observe(
+                  &recording, SMOOTHAF_MOVIE_RECORDING_H264, 150) == 0,
+              "steady recording has no repeated edge");
+        CHECK(smoothaf_movie_recording_observe(
+                  &recording, SMOOTHAF_MOVIE_RECORDING_NONE, 200) == 2 &&
+              !recording.active && recording.ended_ms == 200 &&
+              recording.samples == 3 && recording.valid == 2,
+              "recording end edge preserves RAM counters");
+    }
+}
+
 static void test_continuous_active(void)
 {
     struct smoothaf_vlog_af af;
@@ -291,6 +357,7 @@ int main(void)
     struct smoothaf_vlog_af af;
 
     test_vlog_af_lifecycle();
+    test_movie_recording_policy();
     test_continuous_active();
 
     smoothaf_vlog_af_init(&af);

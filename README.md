@@ -19,6 +19,7 @@ This repository is an independently organized source distribution designed to in
 - Configurable Step Size.
 - `Enable` remains off at module load; lens movement is always manual and bounded.
 - Read-only periodic Vlog Monitor with SAD/Laplacian, ROI, blur, and performance counters.
+- Movie Dry Run probe for normal H.264 recording; it never calls the lens adapter.
 - Diagnostic measurement and one-step focus command.
 - Runtime status plus one fixed-RAM telemetry record for score, timing, direction, step, state, error, and reason.
 - Canon AF Assist, filesystem diagnostics, FIO export, and history/log viewers are not included.

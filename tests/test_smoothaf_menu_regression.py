@@ -33,7 +33,8 @@ def test_menu_shape_and_lifecycle():
         '"AF Best Relative Position"', '"AF Current Relative Position"',
         '"AF Last Direction"',
         '"Log Page"', '"Log Entry"', '"Previous"', '"Next"', '"Clear History"',
-        '"SAD Score"', '"Laplacian Score"', '"Sampling Interval"',
+        '"SAD Score"', '"Laplacian Score"', '"Movie Dry Run Recording"',
+        '"Sampling Interval"',
         '"Measure"', '"Measure Result"', '"Focus Step"', '"Focus Test"',
         '"AF Mode"', '"Sharpness Metric"', '"Step Size"', '"Status"', '"Stop"',
         '"PANIC / Emergency Stop"', '"Rearm Safe Mode"'):
@@ -67,6 +68,9 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_vlog_af_timeout_due(' in source
     assert 'smoothaf_vlog_af_should_cancel(' in source
     assert 'smoothaf_vlog_af_uses_dry_run(' in source
+    assert 'smoothaf_movie_dry_run_recording_allowed(' in source
+    assert 'SMOOTHAF_LOG_RECORDING' in source
+    assert 'smoothaf_movie_recording_transition(' in source
     assert 'smoothaf_cancel_pending_measure(' in source
     assert 'smoothaf_measure_route_for(' in source
     assert 'smoothaf_diag_page_after_refresh(' in source

@@ -129,6 +129,7 @@ static volatile int smoothaf_vlog_af_mode = SMOOTHAF_VLOG_AF_OFF;
 static volatile int smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
 static volatile int smoothaf_monitor_task_requested;
 static volatile int smoothaf_monitor_deinit;
+static struct smoothaf_movie_recording_state smoothaf_movie_recording;
 static struct semaphore *smoothaf_sem;
 
 #define SMOOTHAF_MEASURE_OK       0
@@ -314,18 +315,50 @@ static void smoothaf_publish_measurement(int score, int mean, int sad, int lapla
 
 static int smoothaf_measure_block_reason(void)
 {
+    int movie_dry_run = smoothaf_movie_dry_run_recording_allowed(
+        smoothaf_vlog_af_mode, lv, is_movie_mode(), RECORDING_H264,
+        RECORDING_CUSTOM, RECORDING_RAW);
     if (smoothaf_cancel) return SMOOTHAF_BLOCK_CANCELLED;
     if (!lv) return SMOOTHAF_BLOCK_NO_LV;
+    if (movie_dry_run)
+    {
+        if (is_manual_focus()) return SMOOTHAF_BLOCK_MANUAL_FOCUS;
+        if (is_continuous_af()) return SMOOTHAF_BLOCK_CONTINUOUS_AF;
+        if (is_follow_focus_active()) return SMOOTHAF_BLOCK_FOLLOW_FOCUS;
+        if (is_rack_focus_enabled()) return SMOOTHAF_BLOCK_RACK_FOCUS;
+        if (is_focus_stack_enabled()) return SMOOTHAF_BLOCK_FOCUS_STACK;
+        return SMOOTHAF_BLOCK_NONE;
+    }
     if (is_movie_mode()) return SMOOTHAF_BLOCK_MOVIE;
     if (RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW)
         return SMOOTHAF_BLOCK_RECORDING;
     return SMOOTHAF_BLOCK_NONE;
 }
 
+static void smoothaf_movie_recording_transition(int recording_class, uint32_t now)
+{
+    int edge = smoothaf_movie_recording_observe(
+        &smoothaf_movie_recording, recording_class, now);
+    if (edge == 1)
+        smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 1,
+                                    recording_class, 0, 0, 0);
+    else if (edge == 2)
+        smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 0,
+                                    SMOOTHAF_MOVIE_RECORDING_NONE,
+                                    (int)(now - smoothaf_movie_recording.started_ms),
+                                    (int)smoothaf_movie_recording.samples,
+                                    (int)smoothaf_movie_recording.valid);
+}
+
 static int smoothaf_block_reason(void)
 {
     int reason = smoothaf_measure_block_reason();
     if (reason) return reason;
+    /* The H.264 Movie Dry Run exception belongs only to read-only sampling;
+     * every path that can reach lens_focus() keeps Movie/recording blocked. */
+    if (is_movie_mode()) return SMOOTHAF_BLOCK_MOVIE;
+    if (RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW)
+        return SMOOTHAF_BLOCK_RECORDING;
     if (is_manual_focus()) return SMOOTHAF_BLOCK_MANUAL_FOCUS;
     if (is_continuous_af()) return SMOOTHAF_BLOCK_CONTINUOUS_AF;
     if (is_follow_focus_active()) return SMOOTHAF_BLOCK_FOLLOW_FOCUS;
@@ -349,7 +382,11 @@ static int smoothaf_measure(int *score_out, int *mean_out, int *sad_out,
     if (mean_out) *mean_out = 0;
     if (sad_out) *sad_out = 0;
     if (laplacian_out) *laplacian_out = 0;
-    if (!lv || is_movie_mode() || RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW)
+    if (!lv) return 0;
+    if (!smoothaf_movie_dry_run_recording_allowed(
+            smoothaf_vlog_af_mode, lv, is_movie_mode(), RECORDING_H264,
+            RECORDING_CUSTOM, RECORDING_RAW) &&
+        (is_movie_mode() || RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW))
         return 0;
     vram = get_yuv422_vram();
     if (!vram || !vram->vram ||
@@ -541,6 +578,12 @@ static void smoothaf_monitor_task(void)
     while (smoothaf_monitor.enabled && !smoothaf_cancel &&
            !smoothaf_monitor_deinit && !smoothaf_task_stop_requested)
     {
+        /* Observe recording edges even while Movie mode is blocked.  This is
+         * telemetry only; the edge tracker never authorizes lens movement. */
+        smoothaf_movie_recording_transition(
+            smoothaf_movie_recording_class(RECORDING_H264, RECORDING_CUSTOM,
+                                           RECORDING_RAW),
+            (uint32_t)get_ms_clock());
         if (smoothaf_measure_requested && !smoothaf_vlog_af.awaiting_result)
         {
             smoothaf_measure_requested = 0;
@@ -597,6 +640,23 @@ static void smoothaf_monitor_task(void)
         sample.metric = smoothaf_metric == SMOOTHAF_METRIC_LAPLACIAN
                       ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN : SMOOTHAF_MONITOR_METRIC_SAD;
         sample.duration_ms = completed - start;
+        if (smoothaf_movie_recording.active &&
+            smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN)
+        {
+            if (smoothaf_movie_recording.samples != UINT32_MAX)
+                smoothaf_movie_recording.samples++;
+            if (sample.valid && sample.confident)
+            {
+                if (smoothaf_movie_recording.valid != UINT32_MAX)
+                    smoothaf_movie_recording.valid++;
+            }
+            else if (smoothaf_movie_recording.invalid != UINT32_MAX)
+                smoothaf_movie_recording.invalid++;
+            smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING,
+                                        sample.valid ? 2 : 3,
+                                        sample.score, (int)sample.duration_ms,
+                                        sample.confident, smoothaf_monitor.state);
+        }
         if (sample.duration_ms > smoothaf_monitor_interval_ms(smoothaf_monitor.interval_index) &&
             smoothaf_monitor.metrics.overruns != UINT32_MAX) smoothaf_monitor.metrics.overruns++;
         if (!smoothaf_vlog_af.awaiting_result)
@@ -1217,6 +1277,18 @@ static MENU_UPDATE_FUNC(smoothaf_monitor_reference_update)
 static MENU_UPDATE_FUNC(smoothaf_monitor_blur_update)
 { MENU_SET_VALUE("%s", smoothaf_monitor.possible_blur ? "YES" : "NO"); }
 
+static MENU_UPDATE_FUNC(smoothaf_movie_recording_update)
+{
+    MENU_SET_VALUE("%s %d/%d", smoothaf_movie_recording.active ? "REC" : "IDLE",
+                   (int)smoothaf_movie_recording.valid,
+                   (int)smoothaf_movie_recording.samples);
+    MENU_SET_HELP("class=%d invalid=%d started=%ums ended=%ums",
+                  smoothaf_movie_recording.class_id,
+                  (int)smoothaf_movie_recording.invalid,
+                  (unsigned)smoothaf_movie_recording.started_ms,
+                  (unsigned)smoothaf_movie_recording.ended_ms);
+}
+
 static const char *smoothaf_vlog_af_mode_name(void)
 {
     return smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ? "ACTIVE" :
@@ -1304,6 +1376,20 @@ static MENU_UPDATE_FUNC(smoothaf_af_current_position_update)
 static MENU_UPDATE_FUNC(smoothaf_af_last_direction_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_af_last_direction); }
 
+static int smoothaf_vlog_af_arm_block_reason(void)
+{
+    int reason = smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN
+               ? smoothaf_measure_block_reason() : smoothaf_block_reason();
+    if (reason) return reason;
+    if (is_manual_focus()) return SMOOTHAF_BLOCK_MANUAL_FOCUS;
+    if (is_continuous_af()) return SMOOTHAF_BLOCK_CONTINUOUS_AF;
+    if (is_follow_focus_active()) return SMOOTHAF_BLOCK_FOLLOW_FOCUS;
+    if (is_rack_focus_enabled()) return SMOOTHAF_BLOCK_RACK_FOCUS;
+    if (is_focus_stack_enabled()) return SMOOTHAF_BLOCK_FOCUS_STACK;
+    if (smoothaf_step < 1 || smoothaf_step > 3) return SMOOTHAF_BLOCK_PARAMS;
+    return SMOOTHAF_BLOCK_NONE;
+}
+
 static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
 {
     int reason;
@@ -1325,7 +1411,7 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
         smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
         return;
     }
-    reason = smoothaf_block_reason();
+    reason = smoothaf_vlog_af_arm_block_reason();
     if (reason)
     {
         smoothaf_last_block = reason;
@@ -1444,6 +1530,12 @@ static MENU_UPDATE_FUNC(smoothaf_diag_entry_update)
             break;
         case SMOOTHAF_LOG_MONITOR:
             MENU_SET_HELP("from=%d to=%d ref=%d smooth=%d valid=%d",
+                          (int)record->value1, (int)record->value2,
+                          (int)record->value3, (int)record->value4,
+                          (int)record->value5);
+            break;
+        case SMOOTHAF_LOG_RECORDING:
+            MENU_SET_HELP("edge/sample=%d class/score=%d duration=%d confidence=%d state=%d",
                           (int)record->value1, (int)record->value2,
                           (int)record->value3, (int)record->value4,
                           (int)record->value5);
@@ -1685,6 +1777,8 @@ static struct menu_entry smoothaf_menu[] =
           .help = "Reference from the first available sample; not a focus guarantee." },
         { .name = "Possible Blur", .update = smoothaf_monitor_blur_update,
           .help = "Heuristic only; scene changes and lighting can invalidate it." },
+        { .name = "Movie Dry Run Recording", .update = smoothaf_movie_recording_update,
+          .help = "H.264 recording samples only; no lens command is issued." },
         { .name = "Sample Count", .update = smoothaf_monitor_samples_update,
           .help = "Automatic monitor sampling attempts in the current session." },
         { .name = "Sampling Interval", .priv = &smoothaf_monitor_interval,
@@ -1769,6 +1863,7 @@ static unsigned int smoothaf_init(void)
     smoothaf_measure_requested = 0;
     smoothaf_monitor_init(&smoothaf_monitor, smoothaf_metric,
                           SMOOTHAF_MONITOR_INTERVAL_DEFAULT);
+    smoothaf_movie_recording_init(&smoothaf_movie_recording);
     smoothaf_monitor_task_requested = 0;
     smoothaf_monitor_deinit = 0;
     smoothaf_vlog_af_init(&smoothaf_vlog_af);

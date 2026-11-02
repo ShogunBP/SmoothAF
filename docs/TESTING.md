@@ -33,10 +33,11 @@ The normal build does not include filesystem export or FIO probes. `Export AF Lo
 2. Use host tests to validate mode, arm, episode, four-command limit, settle, cooldown, no-reversal behavior and Stop. Host tests do not prove lens movement safety on camera.
 3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, `DEP=23` and ELF ARM/EABI5. Save the experimental module only as `artifacts/v0.8/smoothaf.mo`.
 4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
-5. Test ACTIVE only after DRY RUN passes, with `Enable=ON`, one static target, one manually armed episode and a new manual arm for any later episode.
-6. Before interpreting the episode, record `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode` and `AF Episode Result`.
-7. `AF Lens Calls=1` proves only that `lens_focus()` was invoked. It does not prove physical displacement. `COMPLETE` alone is not success; a zero-call episode must show a no-movement, blocked or cancelled result.
-8. Do not test Movie Mode, recording, MF or competing focus controllers. Do not unload/reload while the shared task is active.
+5. Test Movie Dry Run separately in normal H.264 recording. Start the monitor before recording, select `Vlog AF Mode=DRY RUN`, manually arm one episode, and use a second phone/camera to record the ML display. Confirm recording start/end events, sample count, validity/confidence, score, duration, blur transitions and zero `AF Lens Calls`; custom and RAW recording must remain blocked. The existing menu is the least-invasive visibility path, but it may not remain open or refresh over the recording UI; treat its values as opportunistic and use the fixed RAM Log Page/Log Entry after the clip as the authoritative fallback.
+6. Exercise four short scenes: initially focused static target, nearly focused target, heavily defocused target and a subject approaching/receding. Use short clips first; stop immediately on recording corruption, task stall, abnormal heat, battery/card warning or any unexpected lens command.
+7. Do not test Movie ACTIVE yet. It remains unavailable until Dry Run evidence is reviewed. MF and competing focus controllers remain blocked. Do not unload/reload while the shared task is active.
+8. For any existing non-Movie ACTIVE test, record `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode` and `AF Episode Result`.
+9. `AF Lens Calls=1` proves only that `lens_focus()` was invoked. It does not prove physical displacement. `COMPLETE` alone is not success; a zero-call episode must show a no-movement, blocked or cancelled result.
 
 A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has no general task join/kill guarantee; a task still active after the bounded deinit wait remains an unload hazard.
 
@@ -45,11 +46,12 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - Host tests: passed after the settle-deadline and cooldown corrections (`All SmoothAF core tests passed`; `SmoothAF monitor tests passed`).
 - Comparative benchmark: passed; scenarios reported `invariants=PASS` and output remained `(SIMULATION)`.
 - Menu regression: passed (`SmoothAF menu regression tests passed`).
+- Movie recording policy host assertions were added, but the C host suite was not runnable in this environment because neither GCC nor the Docker daemon was available.
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
-- ARM staging build: passed after the Root Create/Root Edit change in an isolated Legacy-tree copy; `Will load on: 600D`, `DEP=23`, ELF ARM/EABI5, size 43480 bytes, SHA-256 `2f6d1878ec7a7d890fa303da94d01b5fa03caae503f63ec47038ee1c6197c4e9`.
-- The pre-build v0.8 artifact was preserved as `artifacts/v0.8/smoothaf.mo.pre-fio-20261101`, size 40736 bytes, SHA-256 `38711b884fff39d5922850c138a250bc7ab33a970c1ac8e49898d03d0d575ff0`.
+- ARM staging build: pending for the Movie Dry Run changes; the prior artifact was preserved before editing.
+- The pre-build v0.8 artifact was preserved in the existing untracked `artifacts/v0.8/smoothaf.mo.pre-*` backups; no artifact was overwritten by this change.
 - Previous v0.7 experimental artifact remains preserved under `artifacts/v0.7/`; no v0.7 artifact was replaced.
-- No physical v0.8 validation or SD-card installation has been performed. DRY RUN must have zero physical lens commands; ACTIVE remains a limited experimental POC.
+- No physical v0.8 or Movie Dry Run validation or SD-card installation has been performed. Movie Dry Run must have zero physical lens commands; Movie ACTIVE is not enabled for recording.
 - FIO export and filesystem probes are intentionally not part of the normal v0.8 validation path. The normal menu performs no card writes; host validation covers only volatile RAM telemetry and history. Experimental FIO tests remain isolated for a future explicitly enabled build and must not be treated as production validation.
 
 ## SmoothAF v0.6 validation record
