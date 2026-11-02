@@ -95,6 +95,7 @@ static inline const char *smoothaf_vlog_af_block_name(int reason)
 }
 
 #define SMOOTHAF_VLOG_AF_SETTLE_MS      120
+#define SMOOTHAF_VLOG_AF_BLUR_RECHECK_MS 500
 
 #define SMOOTHAF_MOVIE_RECORDING_NONE   0
 #define SMOOTHAF_MOVIE_RECORDING_H264   1
@@ -280,6 +281,7 @@ struct smoothaf_vlog_af
     uint32_t generation;
     uint32_t settle_until_ms;
     uint32_t cooldown_until_ms;
+    uint32_t blur_recheck_until_ms;
     uint32_t last_command_ms;
     int episode_limit;
     int consecutive_failures;
@@ -328,7 +330,9 @@ static inline int smoothaf_vlog_af_should_resume_continuous(
 {
     return smoothaf_vlog_af_should_start_continuous(af, monitor_state, mode, enabled) &&
            (!af->cooldown_next_episode ||
-            (int32_t)(now - af->cooldown_until_ms) >= 0);
+            (int32_t)(now - af->cooldown_until_ms) >= 0) &&
+           (!af->wait_for_blur_clear ||
+            (int32_t)(now - af->blur_recheck_until_ms) >= 0);
 }
 
 static inline void smoothaf_vlog_af_update_continuous_latch(
@@ -434,6 +438,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->generation = 0;
     af->settle_until_ms = 0;
     af->cooldown_until_ms = 0;
+    af->blur_recheck_until_ms = 0;
     af->last_command_ms = 0;
     af->episode_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->consecutive_failures = 0;
@@ -475,6 +480,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->reversals = 0;
     af->settle_until_ms = 0;
     af->cooldown_until_ms = 0;
+    af->blur_recheck_until_ms = 0;
     af->last_command_ms = 0;
     af->episode_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->consecutive_failures = 0;
@@ -541,6 +547,7 @@ static inline void smoothaf_vlog_af_complete_continuous_episode(
     af->awaiting_result = 0;
     af->state = SMOOTHAF_VLOG_AF_COMPLETE;
     af->cooldown_until_ms = now + SMOOTHAF_VLOG_AF_COOLDOWN_MS;
+    af->blur_recheck_until_ms = now + SMOOTHAF_VLOG_AF_BLUR_RECHECK_MS;
     af->cooldown_next_episode = 1;
     af->wait_for_blur_clear = 1;
     if (af->episodes_completed != UINT32_MAX) af->episodes_completed++;

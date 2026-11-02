@@ -144,6 +144,7 @@ static struct semaphore *smoothaf_sem;
 static int smoothaf_is_task_running(void);
 static void smoothaf_measure_task(void);
 static void smoothaf_cancel_pending_measure(void);
+static int smoothaf_start_task(int task_id, int requires_enable);
 
 static const char *smoothaf_status_name(void)
 {
@@ -342,19 +343,90 @@ static int smoothaf_measure_block_reason(void)
     return SMOOTHAF_BLOCK_NONE;
 }
 
+static void smoothaf_movie_recording_transition(int recording_class, uint32_t now);
+static void smoothaf_movie_start_automatic(void);
+static void smoothaf_movie_stop_automatic(void);
+
+static unsigned int smoothaf_movie_recording_cbr(unsigned int ctx)
+{
+    (void)ctx;
+    smoothaf_movie_recording_transition(
+        smoothaf_movie_recording_class(RECORDING_H264, RECORDING_CUSTOM,
+                                       RECORDING_RAW),
+        (uint32_t)get_ms_clock());
+    return CBR_RET_CONTINUE;
+}
+
+static void smoothaf_movie_start_automatic(void)
+{
+    if (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS ||
+        !smoothaf_movie_active_experimental || !smoothaf_enabled ||
+        smoothaf_panic || smoothaf_cancel || smoothaf_monitor.enabled ||
+        smoothaf_is_task_running())
+        return;
+    if (!smoothaf_movie_active_gate_allowed(
+            smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+            is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW,
+            smoothaf_cancel, is_manual_focus(), is_continuous_af(),
+            is_follow_focus_active(), is_rack_focus_enabled(),
+            is_focus_stack_enabled()))
+        return;
+    smoothaf_monitor_start(&smoothaf_monitor, smoothaf_metric,
+                           (uint32_t)get_ms_clock());
+    smoothaf_monitor_task_requested = 1;
+    smoothaf_monitor_deinit = 0;
+    smoothaf_task_stop_requested = 0;
+    smoothaf_task_exited = 0;
+    smoothaf_cancel = 0;
+    smoothaf_vlog_af_init(&smoothaf_vlog_af);
+    smoothaf_vlog_af_mode = SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
+    smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
+                                    smoothaf_direction_value(),
+                                    smoothaf_monitor.score);
+    smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af,
+                                       smoothaf_vlog_episode_limit);
+    smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_ARMED;
+    smoothaf_af_episode_reason = SMOOTHAF_VLOG_AF_RESULT_ARMED;
+    smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 4, 1, 0, 0, 0);
+    if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))
+    {
+        smoothaf_monitor_stop(&smoothaf_monitor);
+        smoothaf_monitor_task_requested = 0;
+        smoothaf_vlog_af_stop(&smoothaf_vlog_af);
+    }
+}
+
+static void smoothaf_movie_stop_automatic(void)
+{
+    if (!smoothaf_monitor_task_requested || smoothaf_movie_recording.active)
+        return;
+    smoothaf_vlog_af_stop(&smoothaf_vlog_af);
+    smoothaf_task_stop_requested = 1;
+    smoothaf_monitor_stop(&smoothaf_monitor);
+    smoothaf_monitor_task_requested = 0;
+    smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 5, 0, 0, 0, 0);
+}
+
 static void smoothaf_movie_recording_transition(int recording_class, uint32_t now)
 {
     int edge = smoothaf_movie_recording_observe(
         &smoothaf_movie_recording, recording_class, now);
     if (edge == 1)
+    {
         smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 1,
                                     recording_class, 0, 0, 0);
+        if (recording_class == SMOOTHAF_MOVIE_RECORDING_H264)
+            smoothaf_movie_start_automatic();
+    }
     else if (edge == 2)
+    {
         smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 0,
                                     SMOOTHAF_MOVIE_RECORDING_NONE,
                                     (int)(now - smoothaf_movie_recording.started_ms),
                                     (int)smoothaf_movie_recording.samples,
                                     (int)smoothaf_movie_recording.valid);
+        smoothaf_movie_stop_automatic();
+    }
 }
 
 static int smoothaf_block_reason(void)
@@ -1970,6 +2042,10 @@ MODULE_INFO_START()
     MODULE_INIT(smoothaf_init)
     MODULE_DEINIT(smoothaf_deinit)
 MODULE_INFO_END()
+
+MODULE_CBRS_START()
+    MODULE_CBR(CBR_SHOOT_TASK, smoothaf_movie_recording_cbr, 0)
+MODULE_CBRS_END()
 
 MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_metric)

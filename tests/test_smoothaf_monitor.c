@@ -303,6 +303,11 @@ static void test_continuous_active(void)
                   SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(220 + episode * 3000)),
               "cooldown blocks an immediate retrigger");
+        CHECK(!smoothaf_vlog_af_should_resume_continuous(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
+                  (uint32_t)(1720 + episode * 3000)),
+              "persistent blur is held during the controlled recheck");
         CHECK(smoothaf_vlog_af_cooldown_remaining(
                   &af, (uint32_t)(1219 + episode * 3000)) == 1 &&
               smoothaf_vlog_af_cooldown_remaining(

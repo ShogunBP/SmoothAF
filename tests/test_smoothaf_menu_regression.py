@@ -72,6 +72,9 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_movie_dry_run_recording_allowed(' in source
     assert 'SMOOTHAF_LOG_RECORDING' in source
     assert 'smoothaf_movie_recording_transition(' in source
+    assert 'smoothaf_movie_recording_cbr' in source
+    assert 'smoothaf_movie_start_automatic' in source
+    assert 'smoothaf_movie_stop_automatic' in source
     assert 'smoothaf_cancel_pending_measure(' in source
     assert 'smoothaf_measure_route_for(' in source
     assert 'smoothaf_diag_page_after_refresh(' in source
