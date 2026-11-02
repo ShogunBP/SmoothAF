@@ -155,6 +155,44 @@ static void test_vlog_af_lifecycle(void)
 
 static void test_movie_recording_policy(void)
 {
+    CHECK(!smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 0, 1, 1, 1, 0, 0),
+          "Movie ACTIVE is blocked unless experimental authorization is ON");
+    CHECK(smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 0, 0) &&
+          smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1, 1, 1, 0, 0),
+          "authorized ACTIVE modes permit normal H.264 Movie recording");
+    CHECK(smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 0, 0, 0),
+          "authorized ACTIVE permits Movie before recording starts");
+    CHECK(!smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 1, 0) &&
+          !smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 0, 1),
+          "RAW and custom recording remain blocked");
+    CHECK(!smoothaf_movie_active_recording_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 0, 1, 0, 0),
+          "H.264 recording still requires Movie mode");
+    CHECK(!smoothaf_movie_active_gate_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 0, 0,
+              0, 1, 0, 0, 0, 0) &&
+          !smoothaf_movie_active_gate_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 0, 0,
+              0, 0, 0, 1, 0, 0),
+          "MF, Follow Focus, Rack Focus and stacking remain safety gates");
+    CHECK(smoothaf_movie_active_gate_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1, 1, 1, 0, 0,
+              0, 0, 0, 0, 0, 0),
+          "authorized ACTIVE gate accepts compatible H.264 state");
+    CHECK(!smoothaf_movie_active_gate_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 0, 0,
+              1, 0, 0, 0, 0, 0) &&
+          !smoothaf_movie_active_gate_allowed(
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 1, 1, 1, 0, 0,
+              0, 0, 1, 0, 0, 0),
+          "cancel and Continuous AF remain blocked for Movie Active");
+
     CHECK(smoothaf_movie_dry_run_recording_allowed(
               SMOOTHAF_VLOG_AF_DRY_RUN, 1, 1, 1, 0, 0),
           "H.264 Movie Dry Run is explicitly allowed");
@@ -226,10 +264,11 @@ static void test_continuous_active(void)
 
     smoothaf_vlog_af_init(&af);
     smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
-    CHECK(af.continuous_armed && !af.armed,
+    CHECK(af.mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS &&
+          af.continuous_armed && !af.armed,
           "continuous ACTIVE requires one persistent manual arm");
     CHECK(!smoothaf_vlog_af_should_resume_continuous(
-              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_VLOG_AF_ACTIVE, 1, 0),
+              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
           "continuous ACTIVE does not move without confirmed blur");
 
     for (episode = 0; episode < 3; episode++)
@@ -238,7 +277,7 @@ static void test_continuous_active(void)
             &af, SMOOTHAF_MONITOR_STABLE, (uint32_t)(100 + episode * 3000));
         CHECK(smoothaf_vlog_af_should_resume_continuous(
                   &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
-                  SMOOTHAF_VLOG_AF_ACTIVE, 1,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(100 + episode * 3000)),
               "confirmed blur starts another continuous episode");
         smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
@@ -257,9 +296,11 @@ static void test_continuous_active(void)
         CHECK(af.episodes_completed == (uint32_t)(episode + 1) &&
               !af.armed && af.continuous_armed,
               "continuous episode completes without cancelling authorization");
+        CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_CONVERGED,
+              "partial improvement is not reported as convergence until the episode completes");
         CHECK(!smoothaf_vlog_af_should_resume_continuous(
                   &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
-                  SMOOTHAF_VLOG_AF_ACTIVE, 1,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(220 + episode * 3000)),
               "cooldown blocks an immediate retrigger");
         CHECK(smoothaf_vlog_af_cooldown_remaining(
@@ -272,7 +313,7 @@ static void test_continuous_active(void)
             (uint32_t)(1220 + episode * 3000));
         CHECK(!smoothaf_vlog_af_should_resume_continuous(
                   &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
-                  SMOOTHAF_VLOG_AF_ACTIVE, 1,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(1220 + episode * 3000)),
               "blur-clear latch blocks retrigger after cooldown");
         smoothaf_vlog_af_update_continuous_latch(
@@ -314,7 +355,7 @@ static void test_continuous_active(void)
           "safety pause blocks a continuous command");
     CHECK(!smoothaf_vlog_af_should_resume_continuous(
               &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
-              SMOOTHAF_VLOG_AF_ACTIVE, 1, 0),
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
           "safety pause blocks automatic episode creation");
 
     smoothaf_vlog_af_init(&af);

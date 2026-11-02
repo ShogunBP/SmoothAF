@@ -74,6 +74,10 @@ static CONFIG_INT("smoothaf.monitor_interval", smoothaf_monitor_interval,
 static CONFIG_INT("smoothaf.vlog_episode_limit", smoothaf_vlog_episode_limit,
                  SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT);
 
+/* Deliberately volatile and default-off: authorization never arms an episode. */
+static CONFIG_INT("smoothaf.movie_active_experimental",
+                  smoothaf_movie_active_experimental, 0);
+
 static int smoothaf_enabled;
 static volatile int smoothaf_panic;
 static volatile int smoothaf_status = SMOOTHAF_STATUS_IDLE;
@@ -318,9 +322,12 @@ static int smoothaf_measure_block_reason(void)
     int movie_dry_run = smoothaf_movie_dry_run_recording_allowed(
         smoothaf_vlog_af_mode, lv, is_movie_mode(), RECORDING_H264,
         RECORDING_CUSTOM, RECORDING_RAW);
+    int movie_active = smoothaf_movie_active_recording_allowed(
+        smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+        is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW);
     if (smoothaf_cancel) return SMOOTHAF_BLOCK_CANCELLED;
     if (!lv) return SMOOTHAF_BLOCK_NO_LV;
-    if (movie_dry_run)
+    if (movie_dry_run || movie_active)
     {
         if (is_manual_focus()) return SMOOTHAF_BLOCK_MANUAL_FOCUS;
         if (is_continuous_af()) return SMOOTHAF_BLOCK_CONTINUOUS_AF;
@@ -354,10 +361,16 @@ static int smoothaf_block_reason(void)
 {
     int reason = smoothaf_measure_block_reason();
     if (reason) return reason;
-    /* The H.264 Movie Dry Run exception belongs only to read-only sampling;
-     * every path that can reach lens_focus() keeps Movie/recording blocked. */
-    if (is_movie_mode()) return SMOOTHAF_BLOCK_MOVIE;
-    if (RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW)
+    /* Only the explicit H.264 Movie Active experiment may reach lens_focus()
+     * during Movie/recording. RAW and custom recording remain blocked. */
+    if (is_movie_mode() && !smoothaf_movie_active_recording_allowed(
+            smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+            is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW))
+        return SMOOTHAF_BLOCK_MOVIE;
+    if ((RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW) &&
+        !smoothaf_movie_active_recording_allowed(
+            smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+            is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW))
         return SMOOTHAF_BLOCK_RECORDING;
     if (is_manual_focus()) return SMOOTHAF_BLOCK_MANUAL_FOCUS;
     if (is_continuous_af()) return SMOOTHAF_BLOCK_CONTINUOUS_AF;
@@ -386,6 +399,9 @@ static int smoothaf_measure(int *score_out, int *mean_out, int *sad_out,
     if (!smoothaf_movie_dry_run_recording_allowed(
             smoothaf_vlog_af_mode, lv, is_movie_mode(), RECORDING_H264,
             RECORDING_CUSTOM, RECORDING_RAW) &&
+        !smoothaf_movie_active_recording_allowed(
+            smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+            is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW) &&
         (is_movie_mode() || RECORDING_H264 || RECORDING_CUSTOM || RECORDING_RAW))
         return 0;
     vram = get_yuv422_vram();
@@ -408,14 +424,24 @@ static int smoothaf_move(int direction)
     int start;
     int result;
     int reason;
+    int movie_active;
     smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
+    movie_active = smoothaf_movie_active_recording_allowed(
+        smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+        is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW);
     if ((smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
-        smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE)
+        (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE &&
+         smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS))
         reason = SMOOTHAF_BLOCK_DISABLED;
     else if ((smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
+             (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+              smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) &&
              !smoothaf_enabled)
         reason = SMOOTHAF_BLOCK_DISABLED;
     else if (direction != -1 && direction != 1) reason = SMOOTHAF_BLOCK_PARAMS;
+    else if (is_movie_mode() && movie_active &&
+             !(smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed))
+        reason = SMOOTHAF_BLOCK_DISABLED;
     else if (smoothaf_step < 1 || smoothaf_step > 3) reason = SMOOTHAF_BLOCK_PARAMS;
     else reason = smoothaf_block_reason();
     if (reason)
@@ -438,7 +464,8 @@ static int smoothaf_move(int direction)
     smoothaf_telemetry_update(smoothaf_last_score, 0, direction, smoothaf_step,
                               smoothaf_status, 0, SMOOTHAF_BLOCK_NONE);
     if ((smoothaf_vlog_af.armed || smoothaf_vlog_af.continuous_armed) &&
-        (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE ||
+        ((smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE &&
+          smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) ||
          !smoothaf_enabled || smoothaf_panic || smoothaf_cancel ||
          smoothaf_task_stop_requested))
     {
@@ -541,7 +568,7 @@ static int smoothaf_status_from_result(enum smoothaf_result result)
 
 static void smoothaf_vlog_af_fail(int result, int block)
 {
-    int continuous = smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE &&
+    int continuous = smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS &&
                      smoothaf_vlog_af.continuous_armed;
     smoothaf_af_episode_state_before_error = smoothaf_vlog_af.state;
     smoothaf_af_episode_reason = result;
@@ -578,8 +605,8 @@ static void smoothaf_monitor_task(void)
     while (smoothaf_monitor.enabled && !smoothaf_cancel &&
            !smoothaf_monitor_deinit && !smoothaf_task_stop_requested)
     {
-        /* Observe recording edges even while Movie mode is blocked.  This is
-         * telemetry only; the edge tracker never authorizes lens movement. */
+        /* Observe recording edges for telemetry.  Authorization is checked
+         * independently immediately before every physical lens command. */
         smoothaf_movie_recording_transition(
             smoothaf_movie_recording_class(RECORDING_H264, RECORDING_CUSTOM,
                                            RECORDING_RAW),
@@ -596,7 +623,7 @@ static void smoothaf_monitor_task(void)
                                   SMOOTHAF_VLOG_AF_BLOCK_NONE);
         if (smoothaf_vlog_af_should_cancel(&smoothaf_vlog_af,
                                            smoothaf_vlog_af_mode) ||
-            (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE &&
+            (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS &&
              smoothaf_vlog_af.continuous_armed && !smoothaf_enabled))
         {
             smoothaf_vlog_af_stop(&smoothaf_vlog_af);
@@ -756,8 +783,10 @@ static void smoothaf_monitor_task(void)
             }
             else if (smoothaf_vlog_af_should_cancel(&smoothaf_vlog_af,
                                                     smoothaf_vlog_af_mode) ||
-                     !smoothaf_enabled || smoothaf_panic || smoothaf_cancel ||
-                     smoothaf_task_stop_requested)
+                     ((smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+                        smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) &&
+                       (!smoothaf_enabled || smoothaf_panic || smoothaf_cancel ||
+                        smoothaf_task_stop_requested)))
             {
                 smoothaf_vlog_af_stop(&smoothaf_vlog_af);
                 smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
@@ -768,8 +797,10 @@ static void smoothaf_monitor_task(void)
                 smoothaf_vlog_af_record_command(&smoothaf_vlog_af, (uint32_t)get_ms_clock());
                 if (smoothaf_vlog_af_should_cancel(&smoothaf_vlog_af,
                                                    smoothaf_vlog_af_mode) ||
-                    !smoothaf_enabled || smoothaf_panic || smoothaf_cancel ||
-                    smoothaf_task_stop_requested)
+                    ((smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+                        smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) &&
+                       (!smoothaf_enabled || smoothaf_panic || smoothaf_cancel ||
+                        smoothaf_task_stop_requested)))
                 {
                     smoothaf_vlog_af_stop(&smoothaf_vlog_af);
                     smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
@@ -1291,7 +1322,9 @@ static MENU_UPDATE_FUNC(smoothaf_movie_recording_update)
 
 static const char *smoothaf_vlog_af_mode_name(void)
 {
-    return smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ? "ACTIVE" :
+    return smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS
+             ? "ACTIVE CONTINUOUS" :
+           smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ? "ACTIVE" :
            smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN ? "DRY RUN" : "OFF";
 }
 
@@ -1380,6 +1413,13 @@ static int smoothaf_vlog_af_arm_block_reason(void)
 {
     int reason = smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN
                ? smoothaf_measure_block_reason() : smoothaf_block_reason();
+    if ((smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+         smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) &&
+        !smoothaf_movie_active_recording_allowed(
+            smoothaf_vlog_af_mode, smoothaf_movie_active_experimental, lv,
+            is_movie_mode(), RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW) &&
+        is_movie_mode())
+        return SMOOTHAF_BLOCK_MOVIE;
     if (reason) return reason;
     if (is_manual_focus()) return SMOOTHAF_BLOCK_MANUAL_FOCUS;
     if (is_continuous_af()) return SMOOTHAF_BLOCK_CONTINUOUS_AF;
@@ -1393,7 +1433,9 @@ static int smoothaf_vlog_af_arm_block_reason(void)
 static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
 {
     int reason;
-    if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE && !smoothaf_enabled)
+    if ((smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+         smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) &&
+        !smoothaf_enabled)
         return;
     if (smoothaf_vlog_af.continuous_armed)
         return;
@@ -1403,7 +1445,7 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
                                   smoothaf_monitor_task_requested,
                                   smoothaf_vlog_af.armed))
         return;
-    if (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE &&
+    if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE &&
         smoothaf_vlog_af.session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
     {
         smoothaf_af_command_block = SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT;
@@ -1421,7 +1463,7 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
         smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
         return;
     }
-    if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE)
+    if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS)
     {
         smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
                                         smoothaf_direction_value(),
@@ -1685,12 +1727,15 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Monitor Status", .update = smoothaf_monitor_status_update,
           .help = "Periodic read-only sharpness monitoring; no automatic lens movement." },
         { .name = "Vlog AF Mode", .priv = (void *)&smoothaf_vlog_af_mode,
-          .min = SMOOTHAF_VLOG_AF_OFF, .max = SMOOTHAF_VLOG_AF_ACTIVE,
-          .choices = CHOICES("OFF", "DRY RUN", "ACTIVE"),
+          .min = SMOOTHAF_VLOG_AF_OFF, .max = SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
+          .choices = CHOICES("OFF", "DRY RUN", "ACTIVE", "ACTIVE CONTINUOUS"),
           .update = smoothaf_vlog_af_mode_update,
           .help = "Experimental contrast correction; DRY RUN never moves the lens." },
+        { .name = "Movie Active Experimental", .priv = &smoothaf_movie_active_experimental,
+          .max = 1,
+          .help = "Authorize physical lens_focus only for normal H.264 Movie; default OFF." },
         { .name = "Vlog AF State", .update = smoothaf_vlog_af_state_update,
-          .help = "Episode state; ACTIVE requires Enable and manual arming." },
+          .help = "Episode state; ACTIVE modes require Enable and manual arming." },
         { .name = "Start New AF Episode", .select = smoothaf_vlog_af_episode_select,
           .help = "Manual arm only; no movement is issued by this action." },
         { .name = "AF Move Attempts", .update = smoothaf_af_move_attempts_update,

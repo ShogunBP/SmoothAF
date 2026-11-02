@@ -26,9 +26,10 @@
 #define SMOOTHAF_MONITOR_CONFIRM_SAMPLES 2
 #define SMOOTHAF_MONITOR_LIGHT_DELTA 32
 
-#define SMOOTHAF_VLOG_AF_OFF       0
-#define SMOOTHAF_VLOG_AF_DRY_RUN   1
-#define SMOOTHAF_VLOG_AF_ACTIVE    2
+#define SMOOTHAF_VLOG_AF_OFF              0
+#define SMOOTHAF_VLOG_AF_DRY_RUN          1
+#define SMOOTHAF_VLOG_AF_ACTIVE           2
+#define SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS 3
 
 #define SMOOTHAF_VLOG_AF_WAITING   0
 #define SMOOTHAF_VLOG_AF_PROBING   1
@@ -61,6 +62,7 @@
 #define SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT    13
 #define SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED  14
 #define SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED 15
+#define SMOOTHAF_VLOG_AF_RESULT_CONVERGED       16
 
 /* Reasons a command gate can deny an otherwise armed episode.  These are
  * diagnostic values; the safety limits themselves remain unchanged. */
@@ -157,9 +159,33 @@ static inline int smoothaf_movie_recording_observe(
     return 2;
 }
 
-/* Movie Dry Run is deliberately narrower than ACTIVE.  It is a read-only
- * observation path for normal H.264 movie recording only.  RAW/custom movie
- * recording and every non-dry-run mode remain outside this exception. */
+/* Movie Active is an explicitly authorized experiment.  It is deliberately
+ * limited to normal H.264 Movie recording; RAW/custom remain blocked. */
+static inline int smoothaf_movie_active_recording_allowed(
+    int mode, int experimental, int liveview, int movie,
+    int recording_h264, int recording_custom, int recording_raw)
+{
+    (void)recording_h264;
+    return experimental &&
+           (mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+            mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) && liveview && movie &&
+           !recording_custom && !recording_raw;
+}
+
+static inline int smoothaf_movie_active_gate_allowed(
+    int mode, int experimental, int liveview, int movie,
+    int recording_h264, int recording_custom, int recording_raw, int cancelled,
+    int manual_focus, int continuous_af, int follow_focus,
+    int rack_focus, int focus_stack)
+{
+    return smoothaf_movie_active_recording_allowed(
+               mode, experimental, liveview, movie, recording_h264,
+               recording_custom, recording_raw) && !cancelled &&
+           !manual_focus && !continuous_af && !follow_focus &&
+           !rack_focus && !focus_stack;
+}
+
+/* Movie Dry Run is read-only and remains narrower than ACTIVE. */
 static inline int smoothaf_movie_dry_run_recording_allowed(
     int mode, int liveview, int movie, int recording_h264,
     int recording_custom, int recording_raw)
@@ -214,6 +240,7 @@ static inline const char *smoothaf_vlog_af_result_name(int result)
         case SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT:    return "SEARCH_LIMIT";
         case SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED:  return "BEST_RECOVERED";
         case SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED: return "BEST_NOT_RECOVERED";
+        case SMOOTHAF_VLOG_AF_RESULT_CONVERGED:       return "CONVERGED";
         default:                                      return "NONE";
     }
 }
@@ -289,8 +316,9 @@ static inline int smoothaf_vlog_af_should_start_continuous(
     const struct smoothaf_vlog_af *af, int monitor_state, int mode,
     int enabled)
 {
-    return mode == SMOOTHAF_VLOG_AF_ACTIVE && enabled && af->continuous_armed &&
-           !af->armed && !af->safety_paused && !af->wait_for_blur_clear &&
+    return mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && enabled &&
+           af->continuous_armed && !af->armed && !af->safety_paused &&
+           !af->wait_for_blur_clear &&
            monitor_state == SMOOTHAF_MONITOR_POSSIBLE_BLUR;
 }
 
@@ -438,7 +466,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->mode = mode;
     af->state = SMOOTHAF_VLOG_AF_WAITING;
     af->armed = 1;
-    af->continuous_armed = 0;
+    af->continuous_armed = mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
     af->direction = direction < 0 ? -1 : 1;
     af->last_direction = af->direction;
     af->baseline = baseline;
@@ -451,7 +479,6 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->episode_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->consecutive_failures = 0;
     af->safety_paused = 0;
-    af->continuous_armed = 0;
     af->episodes_completed = completed;
     af->wait_for_blur_clear = 0;
     af->cooldown_next_episode = 0;
@@ -474,7 +501,7 @@ static inline void smoothaf_vlog_af_arm_continuous(
     struct smoothaf_vlog_af *af, int direction, int baseline)
 {
     uint32_t completed = af->episodes_completed;
-    smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE,
+    smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
                                  direction, baseline);
     af->armed = 0;
     af->continuous_armed = 1;
@@ -498,7 +525,7 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     int failures = af->consecutive_failures;
     int safety_paused = af->safety_paused;
     int limit = af->episode_limit;
-    smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE,
+    smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
                                  direction, baseline);
     af->continuous_armed = continuous;
     af->episodes_completed = completed;
@@ -577,9 +604,11 @@ static inline int smoothaf_vlog_af_command_block_reason_for(
     if (!af->armed) return SMOOTHAF_VLOG_AF_BLOCK_DISARMED;
     if (effective_mode == SMOOTHAF_VLOG_AF_OFF)
         return SMOOTHAF_VLOG_AF_BLOCK_OFF;
-    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && af->safety_paused)
+    if ((af->mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+         af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) && af->safety_paused)
         return SMOOTHAF_VLOG_AF_BLOCK_SAFETY_GATE;
-    if (effective_mode == SMOOTHAF_VLOG_AF_ACTIVE && !enabled)
+    if ((effective_mode == SMOOTHAF_VLOG_AF_ACTIVE ||
+         effective_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) && !enabled)
         return SMOOTHAF_VLOG_AF_BLOCK_DISABLED;
     if (af->awaiting_result) return SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT;
     if (af->state != SMOOTHAF_VLOG_AF_PROBING) return SMOOTHAF_VLOG_AF_BLOCK_STATE;
@@ -587,7 +616,7 @@ static inline int smoothaf_vlog_af_command_block_reason_for(
                                    ? af->episode_limit
                                    : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT))
         return SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT;
-    if (!(af->mode == SMOOTHAF_VLOG_AF_ACTIVE && af->continuous_armed) &&
+    if (!(af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed) &&
         af->session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
         return SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT;
     if ((af->cooldown_next_episode || af->cooldown_until_ms) &&
@@ -617,7 +646,7 @@ static inline uint32_t smoothaf_vlog_af_commands_available(
                    : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     uint32_t episode = limit - (af->commands < limit ? af->commands : limit);
     uint32_t session;
-    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && af->continuous_armed)
+    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed)
         return episode;
     session = SMOOTHAF_VLOG_AF_MAX_COMMANDS -
               (af->session_commands < SMOOTHAF_VLOG_AF_MAX_COMMANDS
@@ -665,10 +694,7 @@ static inline uint32_t smoothaf_vlog_af_timeout_remaining(
 static inline int smoothaf_vlog_af_should_cancel(
     const struct smoothaf_vlog_af *af, int mode)
 {
-    return (af->armed || af->continuous_armed) &&
-           (mode == SMOOTHAF_VLOG_AF_OFF ||
-            (mode == SMOOTHAF_VLOG_AF_DRY_RUN &&
-             af->mode == SMOOTHAF_VLOG_AF_ACTIVE));
+    return (af->armed || af->continuous_armed) && mode != af->mode;
 }
 
 /* An episode armed as DRY RUN must stay dry even if the menu mode changes,
@@ -720,10 +746,15 @@ static inline int smoothaf_vlog_af_record_result(
         af->episode_result = SMOOTHAF_VLOG_AF_RESULT_IMPROVED;
         af->cooldown_until_ms = now + SMOOTHAF_VLOG_AF_COOLDOWN_MS;
         af->state = SMOOTHAF_VLOG_AF_COOLDOWN;
-        if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && af->continuous_armed)
+        if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed)
         {
+            /* Improvement is not convergence.  Keep the continuous consent
+             * alive, but finish this bounded episode and wait for fresh blur
+             * evidence before starting another one. */
             if (af->commands >= (uint32_t)limit)
                 af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
+            else
+                af->episode_result = SMOOTHAF_VLOG_AF_RESULT_CONVERGED;
             smoothaf_vlog_af_complete_continuous_episode(af, now);
             return 1;
         }
@@ -743,7 +774,7 @@ static inline int smoothaf_vlog_af_record_result(
         if (af->commands >= (uint32_t)limit)
         {
             af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
-            if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && af->continuous_armed)
+            if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed)
                 smoothaf_vlog_af_complete_continuous_episode(af, now);
             else
             {
@@ -764,7 +795,7 @@ static inline int smoothaf_vlog_af_record_result(
     {
         af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT;
     }
-    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE && af->continuous_armed)
+    if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed)
     {
         smoothaf_vlog_af_complete_continuous_episode(af, now);
         return 0;

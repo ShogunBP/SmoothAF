@@ -1,6 +1,6 @@
 # SmoothAF Research
 
-This document records research, code-confirmed facts, technical inferences and hypotheses requiring physical validation. It does not enable new movement, Continuous AF, Movie AF or recording-time AF.
+This document records research, code-confirmed facts, technical inferences and hypotheses requiring physical validation. Movie Active is an explicitly authorized experimental path only; it does not claim compatibility, Canon Native Continuous AF, or safe recording-time movement before physical evidence.
 
 See [Architecture](ARCHITECTURE.md), [Testing](TESTING.md) and [Roadmap](ROADMAP.md).
 

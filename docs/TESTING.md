@@ -1,4 +1,4 @@
-# SmoothAF Testing and Validation
+﻿# SmoothAF Testing and Validation
 
 ## Evidence classes
 
@@ -35,8 +35,11 @@ The normal build does not include filesystem export or FIO probes. `Export AF Lo
 4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
 5. Test Movie Dry Run separately in normal H.264 recording. Start the monitor before recording, select `Vlog AF Mode=DRY RUN`, manually arm one episode, and use a second phone/camera to record the ML display. Confirm recording start/end events, sample count, validity/confidence, score, duration, blur transitions and zero `AF Lens Calls`; custom and RAW recording must remain blocked. The existing menu is the least-invasive visibility path, but it may not remain open or refresh over the recording UI; treat its values as opportunistic and use the fixed RAM Log Page/Log Entry after the clip as the authoritative fallback.
 6. Exercise four short scenes: initially focused static target, nearly focused target, heavily defocused target and a subject approaching/receding. Use short clips first; stop immediately on recording corruption, task stall, abnormal heat, battery/card warning or any unexpected lens command.
-7. Do not test Movie ACTIVE yet. It remains unavailable until Dry Run evidence is reviewed. MF and competing focus controllers remain blocked. Do not unload/reload while the shared task is active.
-8. For any existing non-Movie ACTIVE test, record `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode` and `AF Episode Result`.
+7. Movie ACTIVE is now available only as an explicitly authorized experiment: set `Movie Active Experimental=ON`, `Enable=ON`, select one-shot `ACTIVE` or persistent `ACTIVE CONTINUOUS`, start monitoring, and manually arm. Use normal H.264 Movie only; RAW/custom, MF and competing focus controllers remain blocked. Begin with Test A (one command), then bounded Test B, and only then Test C continuous episodes. Do not enable B or C automatically. Do not unload/reload while the shared task is active.
+
+Test A: H.264 recording, experimental ON, one-shot ACTIVE, episode limit 1, verify at most one STM command and intact clip. Test B: H.264 recording, one-shot ACTIVE, bounded episode search, verify controlled completion. Test C: H.264 recording, ACTIVE CONTINUOUS, one manual arm, multiple episodes, verify cooldown/blur-clear latch and STOP/PANIC interruption.
+8. For Movie Active tests record `Movie Recording State`, mode, `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode`, `AF Episode Result`, scores, delta, direction, cooldown and episode count. `AF Lens Calls=1` proves only API invocation, not physical displacement. Stop immediately on recording corruption, unexpected lens activity, task stall, abnormal heat or battery/card warning.
+9. For any existing non-Movie ACTIVE test, record the same AF fields.
 9. `AF Lens Calls=1` proves only that `lens_focus()` was invoked. It does not prove physical displacement. `COMPLETE` alone is not success; a zero-call episode must show a no-movement, blocked or cancelled result.
 
 A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has no general task join/kill guarantee; a task still active after the bounded deinit wait remains an unload hazard.
