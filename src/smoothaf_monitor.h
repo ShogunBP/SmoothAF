@@ -77,6 +77,34 @@
 #define SMOOTHAF_VLOG_AF_BLOCK_COOLDOWN         8
 #define SMOOTHAF_VLOG_AF_BLOCK_SAFETY_GATE      9
 
+/* Why a persistent ACTIVE CONTINUOUS session cannot start its next bounded
+ * episode.  These values describe eligibility, not command safety limits. */
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_NONE          0
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_MODE          1
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISABLED      2
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISARMED      3
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_SAFETY_PAUSED 4
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACTIVE        5
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR       6
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_COOLDOWN      7
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK  8
+
+static inline const char *smoothaf_vlog_af_next_block_name(int reason)
+{
+    switch (reason)
+    {
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_MODE: return "MODE";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISABLED: return "DISABLED";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISARMED: return "DISARMED";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_SAFETY_PAUSED: return "SAFETY_PAUSED";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACTIVE: return "EPISODE_ACTIVE";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR: return "NO_CONFIRMED_BLUR";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_COOLDOWN: return "COOLDOWN";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK: return "BLUR_RECHECK";
+        default: return "NONE";
+    }
+}
+
 static inline const char *smoothaf_vlog_af_block_name(int reason)
 {
     switch (reason)
@@ -328,11 +356,37 @@ static inline int smoothaf_vlog_af_should_resume_continuous(
     const struct smoothaf_vlog_af *af, int monitor_state, int mode, int enabled,
     uint32_t now)
 {
-    return smoothaf_vlog_af_should_start_continuous(af, monitor_state, mode, enabled) &&
+    /* The recheck deadline is the explicit exception to the blur-clear latch:
+     * persistent blur may be retried after cooldown without requiring a
+     * transient STABLE sample.  All other start gates remain mandatory. */
+    return mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && enabled &&
+           af->continuous_armed && !af->armed && !af->safety_paused &&
+           monitor_state == SMOOTHAF_MONITOR_POSSIBLE_BLUR &&
            (!af->cooldown_next_episode ||
             (int32_t)(now - af->cooldown_until_ms) >= 0) &&
            (!af->wait_for_blur_clear ||
             (int32_t)(now - af->blur_recheck_until_ms) >= 0);
+}
+
+static inline int smoothaf_vlog_af_next_episode_block_reason(
+    const struct smoothaf_vlog_af *af, int monitor_state, int mode, int enabled,
+    uint32_t now)
+{
+    if (mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS)
+        return SMOOTHAF_VLOG_AF_NEXT_BLOCK_MODE;
+    if (!enabled) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISABLED;
+    if (!af->continuous_armed) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISARMED;
+    if (af->safety_paused) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_SAFETY_PAUSED;
+    if (af->armed) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACTIVE;
+    if (monitor_state != SMOOTHAF_MONITOR_POSSIBLE_BLUR)
+        return SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR;
+    if (af->cooldown_next_episode &&
+        (int32_t)(now - af->cooldown_until_ms) < 0)
+        return SMOOTHAF_VLOG_AF_NEXT_BLOCK_COOLDOWN;
+    if (af->wait_for_blur_clear &&
+        (int32_t)(now - af->blur_recheck_until_ms) < 0)
+        return SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK;
+    return SMOOTHAF_VLOG_AF_NEXT_BLOCK_NONE;
 }
 
 static inline void smoothaf_vlog_af_update_continuous_latch(

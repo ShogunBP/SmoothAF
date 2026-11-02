@@ -321,30 +321,65 @@ static void test_continuous_active(void)
                   SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(220 + episode * 3000)),
               "cooldown blocks an immediate retrigger");
-        CHECK(!smoothaf_vlog_af_should_resume_continuous(
+        CHECK(smoothaf_vlog_af_should_resume_continuous(
                   &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
                   SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(1720 + episode * 3000)),
-              "persistent blur is held during the controlled recheck");
+              "persistent blur recheck is eligible after its deadline");
+        CHECK(smoothaf_vlog_af_next_episode_block_reason(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
+                  (uint32_t)(719 + episode * 3000)) ==
+                  SMOOTHAF_VLOG_AF_NEXT_BLOCK_COOLDOWN,
+              "next-episode diagnostics identify an unexpired cooldown");
         CHECK(smoothaf_vlog_af_cooldown_remaining(
                   &af, (uint32_t)(1219 + episode * 3000)) == 1 &&
               smoothaf_vlog_af_cooldown_remaining(
                   &af, (uint32_t)(1220 + episode * 3000)) == 0,
               "continuous cooldown reports its exact expiry boundary");
+        af.cooldown_next_episode = 0;
+        CHECK(smoothaf_vlog_af_next_episode_block_reason(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
+                  (uint32_t)(719 + episode * 3000)) ==
+                  SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK,
+              "next-episode diagnostics identify an unexpired blur recheck");
         smoothaf_vlog_af_update_continuous_latch(
             &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
             (uint32_t)(1220 + episode * 3000));
-        CHECK(!smoothaf_vlog_af_should_resume_continuous(
+        CHECK(smoothaf_vlog_af_should_resume_continuous(
                   &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
                   SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
                   (uint32_t)(1220 + episode * 3000)),
-              "blur-clear latch blocks retrigger after cooldown");
+              "persistent blur recheck permits a gated retrigger after cooldown");
         smoothaf_vlog_af_update_continuous_latch(
             &af, SMOOTHAF_MONITOR_STABLE,
             (uint32_t)(1221 + episode * 3000));
     }
     CHECK(af.session_commands == 3,
           "continuous session telemetry accumulates across episodes");
+
+    /* Controlled-clock endurance: no terminal COMPLETE state may erase the
+     * durable authorization, even after a simulated run beyond two minutes. */
+    smoothaf_vlog_af_update_continuous_latch(&af, SMOOTHAF_MONITOR_STABLE, 120000);
+    for (episode = 0; episode < 3; episode++)
+    {
+        uint32_t now = 120000 + (uint32_t)episode * 3000;
+        af.cooldown_next_episode = 0;
+        af.wait_for_blur_clear = 0;
+        CHECK(smoothaf_vlog_af_should_resume_continuous(
+                  &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now),
+              "long controlled-clock run remains eligible for later episodes");
+        smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+        af.state = SMOOTHAF_VLOG_AF_PROBING;
+        smoothaf_vlog_af_record_command(&af, now);
+        smoothaf_vlog_af_record_result(&af, 1100, now + 120);
+        CHECK(af.continuous_armed && !af.armed,
+              "long controlled-clock episode completes without terminalizing session");
+    }
+    CHECK(af.episodes_completed >= 6 && af.continuous_armed,
+          "controlled-clock run beyond 120 seconds preserves continuous authorization");
     smoothaf_vlog_af_update_continuous_latch(&af, SMOOTHAF_MONITOR_STABLE, 10000);
     smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
     smoothaf_vlog_af_set_episode_limit(&af, 1);

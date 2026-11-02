@@ -48,6 +48,11 @@
 #define SMOOTHAF_STATUS_LENS_ERROR    8
 #define SMOOTHAF_STATUS_ERROR         9
 
+#define SMOOTHAF_MOVEMENT_IDLE        0
+#define SMOOTHAF_MOVEMENT_MOVING      1
+#define SMOOTHAF_MOVEMENT_COMPLETE    2
+#define SMOOTHAF_MOVEMENT_FAILED      3
+
 #define SMOOTHAF_BLOCK_NONE           0
 #define SMOOTHAF_BLOCK_DISABLED       1
 #define SMOOTHAF_BLOCK_CANCELLED      2
@@ -103,6 +108,9 @@ static volatile int smoothaf_last_lens_return;
 static volatile int smoothaf_last_measure_code;
 static volatile int smoothaf_last_mode = SMOOTHAF_HC_LEGACY;
 static volatile int smoothaf_last_phase;
+static volatile int smoothaf_last_algorithm_valid;
+static volatile int smoothaf_last_algorithm_status;
+static volatile int smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_IDLE;
 static volatile int smoothaf_af_move_attempts;
 static volatile int smoothaf_af_lens_calls;
 static volatile int smoothaf_af_move_successes;
@@ -149,9 +157,9 @@ static void smoothaf_measure_task(void);
 static void smoothaf_cancel_pending_measure(void);
 static int smoothaf_start_task(int task_id, int requires_enable);
 
-static const char *smoothaf_status_name(void)
+static const char *smoothaf_status_name_for(int status)
 {
-    switch (smoothaf_status)
+    switch (status)
     {
         case SMOOTHAF_STATUS_MEASURING: return "Measuring";
         case SMOOTHAF_STATUS_MOVING: return "Moving";
@@ -164,6 +172,11 @@ static const char *smoothaf_status_name(void)
         case SMOOTHAF_STATUS_ERROR: return "Error";
         default: return "Idle";
     }
+}
+
+static const char *smoothaf_status_name(void)
+{
+    return smoothaf_status_name_for(smoothaf_status);
 }
 
 static const char *smoothaf_block_name(int reason)
@@ -553,6 +566,7 @@ static int smoothaf_move(int direction)
     }
     if (smoothaf_af_move_attempts != INT32_MAX) smoothaf_af_move_attempts++;
     smoothaf_status = SMOOTHAF_STATUS_MOVING;
+    smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_MOVING;
     start = get_ms_clock();
     smoothaf_last_lens_called = 1;
     if (smoothaf_af_lens_calls != INT32_MAX) smoothaf_af_lens_calls++;
@@ -575,6 +589,8 @@ static int smoothaf_move(int direction)
     }
     result = lens_focus(direction, smoothaf_step, 1, 0);
     smoothaf_last_lens_return = result;
+    smoothaf_physical_movement_state = result ? SMOOTHAF_MOVEMENT_COMPLETE
+                                               : SMOOTHAF_MOVEMENT_FAILED;
     /* lens_focus() returning nonzero means the Canon call was accepted.  It
      * does not confirm that the image score improved; that is measured later. */
     smoothaf_af_last_result_valid = result ? 1 : 0;
@@ -590,6 +606,7 @@ static int smoothaf_move(int direction)
                               result ? 0 : SMOOTHAF_BLOCK_NONE);
     if (!result)
     {
+        smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_FAILED;
         reason = smoothaf_block_reason();
         if (reason) smoothaf_last_block = reason;
         smoothaf_last_error = 1;
@@ -794,18 +811,23 @@ static void smoothaf_monitor_task(void)
         if (smoothaf_vlog_af.armed && smoothaf_vlog_af_result_due(&smoothaf_vlog_af, completed))
         {
             if (smoothaf_vlog_af_timeout_due(&smoothaf_vlog_af, completed))
+            {
                 smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_TIMEOUT,
                                       SMOOTHAF_VLOG_AF_BLOCK_NONE);
+                smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_FAILED;
+            }
             else if (!sample.valid || !sample.confident || smoothaf_monitor.state == SMOOTHAF_MONITOR_UNCERTAIN)
             {
                 smoothaf_vlog_af.uncertain = 1;
                 smoothaf_af_post_move_valid = 0;
                 smoothaf_vlog_af_fail(SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN,
                                       SMOOTHAF_VLOG_AF_BLOCK_NONE);
+                smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_FAILED;
             }
             else
             {
                 smoothaf_vlog_af_record_result(&smoothaf_vlog_af, sample.score, completed);
+                smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_COMPLETE;
                 smoothaf_af_post_move_valid = 1;
                 smoothaf_af_episode_reason = smoothaf_vlog_af.episode_result;
                 smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
@@ -1158,12 +1180,20 @@ static void smoothaf_search_task(void)
         smoothaf_last_score = hc.current;
     }
     smoothaf_status = smoothaf_status_from_result(result);
+    smoothaf_last_algorithm_valid = 1;
+    smoothaf_last_algorithm_status = smoothaf_status;
+    smoothaf_physical_movement_state = result == SMOOTHAF_RESULT_LENS_ERROR
+                                    ? SMOOTHAF_MOVEMENT_FAILED
+                                    : SMOOTHAF_MOVEMENT_COMPLETE;
     if (result == SMOOTHAF_RESULT_LENS_ERROR ||
         result == SMOOTHAF_RESULT_MEASURE_ERROR ||
         result == SMOOTHAF_RESULT_TIMEOUT || result == SMOOTHAF_RESULT_ERROR)
         smoothaf_last_error = 1;
 done:
     smoothaf_last_time = (int)((uint32_t)get_ms_clock() - start);
+    if (result == SMOOTHAF_RESULT_LENS_ERROR || result == SMOOTHAF_RESULT_MEASURE_ERROR ||
+        result == SMOOTHAF_RESULT_ERROR)
+        smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_FAILED;
     smoothaf_log_event_extended(SMOOTHAF_LOG_TASK_END, result,
                                 smoothaf_last_best, smoothaf_last_focus_pos,
                                 smoothaf_last_commands, smoothaf_last_reversals);
@@ -1451,11 +1481,21 @@ static const char *smoothaf_vlog_af_state_name(void)
     return smoothaf_vlog_af_state_name_for(smoothaf_vlog_af.state);
 }
 
+static const char *smoothaf_vlog_af_session_state_name(void)
+{
+    if (smoothaf_vlog_af.continuous_armed)
+        return smoothaf_vlog_af.safety_paused ? "PAUSED" : "AUTHORIZED";
+    return smoothaf_vlog_af.armed ? "EPISODE ACTIVE" : "INACTIVE";
+}
+
 static MENU_UPDATE_FUNC(smoothaf_vlog_af_mode_update)
 { MENU_SET_VALUE("%s", smoothaf_vlog_af_mode_name()); }
 
 static MENU_UPDATE_FUNC(smoothaf_vlog_af_state_update)
 { MENU_SET_VALUE("%s", smoothaf_vlog_af_state_name()); }
+
+static MENU_UPDATE_FUNC(smoothaf_vlog_af_session_state_update)
+{ MENU_SET_VALUE("%s", smoothaf_vlog_af_session_state_name()); }
 
 static MENU_UPDATE_FUNC(smoothaf_vlog_af_result_update)
 { MENU_SET_VALUE("%s", smoothaf_vlog_af_result_name(smoothaf_af_episode_result)); }
@@ -1513,6 +1553,31 @@ static MENU_UPDATE_FUNC(smoothaf_af_current_position_update)
 
 static MENU_UPDATE_FUNC(smoothaf_af_last_direction_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_af_last_direction); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_continuous_update)
+{ MENU_SET_VALUE("%s", smoothaf_vlog_af.continuous_armed ? "YES" : "NO"); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_next_block_update)
+{
+    int reason = smoothaf_vlog_af_next_episode_block_reason(
+        &smoothaf_vlog_af, smoothaf_monitor.state, smoothaf_vlog_af_mode,
+        smoothaf_enabled, (uint32_t)get_ms_clock());
+    MENU_SET_VALUE("%s", smoothaf_vlog_af_next_block_name(reason));
+}
+
+static MENU_UPDATE_FUNC(smoothaf_af_recheck_update)
+{
+    uint32_t now = (uint32_t)get_ms_clock();
+    if (!smoothaf_vlog_af.wait_for_blur_clear)
+        MENU_SET_VALUE("CLEAR");
+    else if ((int32_t)(now - smoothaf_vlog_af.blur_recheck_until_ms) >= 0)
+        MENU_SET_VALUE("DUE");
+    else
+        MENU_SET_VALUE("%d ms", (int)(smoothaf_vlog_af.blur_recheck_until_ms - now));
+}
+
+static MENU_UPDATE_FUNC(smoothaf_af_movement_update)
+{ MENU_SET_VALUE("%s", smoothaf_movement_state_name()); }
 
 static int smoothaf_vlog_af_arm_block_reason(void)
 {
@@ -1759,6 +1824,7 @@ static const char *smoothaf_algorithm_name(void)
 
 static const char *smoothaf_algorithm_phase_name(void)
 {
+    if (!smoothaf_last_algorithm_valid) return "N/A";
     switch (smoothaf_last_phase)
     {
         case 1: return "ACQUISITION";
@@ -1766,6 +1832,17 @@ static const char *smoothaf_algorithm_phase_name(void)
         case 3: return "CONFIRM";
         case 4: return "RETURN";
         default: return "SEARCH";
+    }
+}
+
+static const char *smoothaf_movement_state_name(void)
+{
+    switch (smoothaf_physical_movement_state)
+    {
+        case SMOOTHAF_MOVEMENT_MOVING: return "MOVING";
+        case SMOOTHAF_MOVEMENT_COMPLETE: return "COMPLETE";
+        case SMOOTHAF_MOVEMENT_FAILED: return "FAILED";
+        default: return "IDLE";
     }
 }
 
@@ -1782,8 +1859,16 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_direction_step_update)
 { MENU_SET_VALUE("%d / %d", (int)smoothaf_direction_value(), smoothaf_step); }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_search_evolution_update)
-{ MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
-                  (int)smoothaf_last_best, (int)smoothaf_last_focus_pos); }
+{
+    if (!smoothaf_last_algorithm_valid)
+        MENU_SET_VALUE("N/A");
+    else
+        MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
+                       (int)smoothaf_last_best, (int)smoothaf_last_focus_pos);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_movement_update)
+{ MENU_SET_VALUE("%s", smoothaf_movement_state_name()); }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_reversals_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_last_reversals); }
@@ -1792,7 +1877,16 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_convergence_update)
 { MENU_SET_VALUE("%s", smoothaf_vlog_af_result_name(smoothaf_af_episode_result)); }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_evaluation_update)
-{ MENU_SET_VALUE("%s", smoothaf_status_name()); }
+{
+    MENU_SET_VALUE("%s", smoothaf_physical_movement_state == SMOOTHAF_MOVEMENT_MOVING
+                   ? "Moving" : "Idle");
+}
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_last_result_update)
+{
+    MENU_SET_VALUE("%s", smoothaf_last_algorithm_valid
+                   ? smoothaf_status_name_for(smoothaf_last_algorithm_status) : "N/A");
+}
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_time_update)
 { MENU_SET_VALUE("%d ms", (int)smoothaf_last_time); }
@@ -1884,7 +1978,11 @@ static struct menu_entry smoothaf_menu[] =
       .help = "Deterministic source/configuration identifier for this module." },
     { .name = "AF Performance", .select = menu_open_submenu,
       .children = (struct menu_entry[]){
-        { .name = "AF Session State", .update = smoothaf_vlog_af_state_update },
+        { .name = "AF Session State", .update = smoothaf_vlog_af_session_state_update },
+        { .name = "Continuous Armed", .update = smoothaf_af_continuous_update },
+        { .name = "Next Episode Block Reason", .update = smoothaf_af_next_block_update },
+        { .name = "Blur Recheck", .update = smoothaf_af_recheck_update },
+        { .name = "Physical Movement", .update = smoothaf_af_movement_update },
         { .name = "AF State", .update = smoothaf_vlog_af_state_update },
         { .name = "Episode Result/Reason", .update = smoothaf_vlog_af_result_update },
         { .name = "Episodes Completed", .update = smoothaf_af_episodes_completed_update },
@@ -1971,9 +2069,11 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Direction / Step", .update = smoothaf_algorithm_direction_step_update },
         { .name = "Best Score / Position", .update = smoothaf_algorithm_search_evolution_update },
         { .name = "Search Evolution", .update = smoothaf_algorithm_search_evolution_update },
+        { .name = "Physical Movement", .update = smoothaf_algorithm_movement_update },
         { .name = "Reversals", .update = smoothaf_algorithm_reversals_update },
         { .name = "Convergence Reason", .update = smoothaf_algorithm_convergence_update },
         { .name = "Evaluation Result", .update = smoothaf_algorithm_evaluation_update },
+        { .name = "Last Algorithm Result", .update = smoothaf_algorithm_last_result_update },
         { .name = "Evaluation Time", .update = smoothaf_algorithm_time_update },
         MENU_EOL,
     } },
@@ -2059,6 +2159,10 @@ static unsigned int smoothaf_init(void)
     smoothaf_task_stop_requested = 0;
     smoothaf_task_exited = 1;
     smoothaf_status = SMOOTHAF_STATUS_IDLE;
+    smoothaf_last_algorithm_valid = 0;
+    smoothaf_last_algorithm_status = SMOOTHAF_STATUS_IDLE;
+    smoothaf_physical_movement_state = SMOOTHAF_MOVEMENT_IDLE;
+    smoothaf_last_lens_position = 0;
     smoothaf_last_error = 0;
     smoothaf_last_block = SMOOTHAF_BLOCK_NONE;
     smoothaf_last_measure_code = SMOOTHAF_MEASURE_WAITING;
