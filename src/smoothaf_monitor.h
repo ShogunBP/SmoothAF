@@ -330,6 +330,12 @@ struct smoothaf_vlog_af
     int current_position;
     uint32_t started_ms;
     int uncertain;
+    uint32_t image_ms;
+    uint32_t wait_ms;
+    uint32_t movement_ms;
+    uint32_t stabilization_ms;
+    uint32_t lens_calls;
+    uint32_t last_result_ms;
 };
 
 /* The passive monitor only promotes an armed episode after it has confirmed
@@ -514,6 +520,12 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->last_direction = 1;
     af->started_ms = 0;
     af->uncertain = 0;
+    af->image_ms = 0;
+    af->wait_ms = 0;
+    af->movement_ms = 0;
+    af->stabilization_ms = 0;
+    af->lens_calls = 0;
+    af->last_result_ms = 0;
 }
 
 /* Reset operational authorization for a new monitor session without changing
@@ -565,6 +577,12 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->last_direction = af->direction;
     af->started_ms = 0;
     af->uncertain = 0;
+    af->image_ms = 0;
+    af->wait_ms = 0;
+    af->movement_ms = 0;
+    af->stabilization_ms = 0;
+    af->lens_calls = 0;
+    af->last_result_ms = 0;
 }
 
 static inline void smoothaf_vlog_af_arm_continuous(
@@ -651,6 +669,8 @@ static inline void smoothaf_vlog_af_record_command(
     }
     af->last_command_ms = now;
     af->awaiting_result = 1;
+    if (af->wait_ms <= UINT32_MAX - SMOOTHAF_VLOG_AF_SETTLE_MS)
+        af->wait_ms += SMOOTHAF_VLOG_AF_SETTLE_MS;
     af->state = SMOOTHAF_VLOG_AF_SETTLING;
     af->settle_until_ms = now + SMOOTHAF_VLOG_AF_SETTLE_MS;
     af->last_direction = af->direction;
@@ -803,6 +823,7 @@ static inline int smoothaf_vlog_af_record_result(
     int limit = af->episode_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
               ? af->episode_limit : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->post_move_score = score;
+    af->last_result_ms = now;
     af->score_delta = delta;
     af->awaiting_result = 0;
     af->consecutive_failures = 0;

@@ -46,15 +46,17 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 
 ## SmoothAF v0.8 validation record
 
-- Host tests: passed after the settle-deadline and cooldown corrections (`All SmoothAF core tests passed`; `SmoothAF monitor tests passed`).
+- Host tests: passed (`All SmoothAF core tests passed`; `SmoothAF monitor tests passed`; `SmoothAF diagnostics RAM tests passed`).
 - Comparative benchmark: passed; scenarios reported `invariants=PASS` and output remained `(SIMULATION)`.
 - Menu regression: passed (`SmoothAF menu regression tests passed`).
-- Movie recording policy host assertions were added, but the C host suite was not runnable in this environment because neither GCC nor the Docker daemon was available.
+- Episode telemetry host coverage includes bounded RAM event/summary records, timestamp wraparound, overflow accounting and retained terminal summaries. Physical lifecycle behavior remains pending.
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
-- ARM staging build: pending for the Movie Dry Run changes; the prior artifact was preserved before editing.
-- The pre-build v0.8 artifact was preserved in the existing untracked `artifacts/v0.8/smoothaf.mo.pre-*` backups; no artifact was overwritten by this change.
-- Previous v0.7 experimental artifact remains preserved under `artifacts/v0.7/`; no v0.7 artifact was replaced.
-- No physical v0.8 or Movie Dry Run validation or SD-card installation has been performed. Movie Dry Run must have zero physical lens commands; Movie ACTIVE is not enabled for recording.
+- ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
+- Build ID: `4479fda1f69c-600D.102`; output: `Will load on: 600D`; dependency count: `DEP=23`.
+- Final staged module: `artifacts/v0.8/smoothaf.mo`, 60640 bytes, SHA-256 `9fdf0615c2a00c92ec6d6de5755763cb1c0e80d83cde597b82c139f9f269dfa0`.
+- Module format: `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)`; undefined symbols were inspected from the module and are Legacy-resolved imports, including `lens_focus`, `get_ms_clock`, VRAM, task, menu and semaphore APIs. The Legacy build does not emit a separate `.elf`; the `.mo` is the inspected relocatable ELF.
+- The embedded Build ID was found in the module. The pre-build v0.8 artifacts remain preserved in the existing untracked `artifacts/v0.8/smoothaf.mo.pre-*` backups; no backup was deleted.
+- No physical v0.8 or Movie validation or SD-card installation has been performed. All camera results, including zero lens movement in Dry Run and optical focus/displacement, remain pending. Movie Dry Run must have zero physical lens commands; Movie ACTIVE is not enabled for recording.
 - FIO export and filesystem probes are intentionally not part of the normal v0.8 validation path. The normal menu performs no card writes; host validation covers only volatile RAM telemetry and history. Experimental FIO tests remain isolated for a future explicitly enabled build and must not be treated as production validation.
 
 ## SmoothAF v0.6 validation record

@@ -118,6 +118,18 @@ try {
     Write-Output "SIZE=$size"
     Write-Output "SHA256=$sha"
     Write-Output "BUILD_ID=$buildId"
+    $elf = Join-Path $integration 'smoothaf.elf'
+    if (Test-Path -LiteralPath $elf -PathType Leaf) {
+        $fileInfo = & docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', 'file /src/legacy/modules/smoothaf/smoothaf.elf')
+        Write-Output "ELF=$fileInfo"
+        $undefined = & docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', 'arm-none-eabi-nm -u /src/legacy/modules/smoothaf/smoothaf.elf')
+        Write-Output 'UNDEFINED_SYMBOLS_BEGIN'
+        $undefined | Write-Output
+        Write-Output 'UNDEFINED_SYMBOLS_END'
+    } else {
+        Write-Output 'ELF=NOT_EMITTED_BY_LEGACY_BUILD'
+        Write-Output 'UNDEFINED_SYMBOLS=NOT_AVAILABLE'
+    }
     $strings = & docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', "strings -a /src/legacy/modules/smoothaf/smoothaf.mo | grep -F '$buildId'")
     if ($LASTEXITCODE -ne 0 -or -not ($strings -match [regex]::Escape($buildId))) { throw 'Final module does not contain the expected Build ID.' }
     Write-Output 'DEP=23'

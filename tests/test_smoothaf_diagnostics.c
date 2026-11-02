@@ -12,7 +12,46 @@ int main(void)
     size_t seen = 0;
     size_t page;
     size_t i, n;
+    struct smoothaf_episode_log episodes;
+    struct smoothaf_episode_event events[SMOOTHAF_EPISODE_EVENT_CAPACITY];
+    struct smoothaf_episode_summary summaries[SMOOTHAF_EPISODE_SUMMARY_CAPACITY];
+    struct smoothaf_episode_summary summary;
     smoothaf_log_init(&log);
+    smoothaf_episode_log_init(&episodes);
+    CHECK(sizeof(struct smoothaf_episode_event) <= 56 &&
+          sizeof(struct smoothaf_episode_summary) <= 80,
+          "compact episode records");
+    CHECK(strcmp(smoothaf_episode_event_name(SMOOTHAF_EPISODE_EVENT_POST_MOVE),
+                 "POST_MOVE") == 0 &&
+          strcmp(smoothaf_episode_result_name(SMOOTHAF_EPISODE_RESULT_WORSE),
+                 "WORSE") == 0,
+          "episode record names");
+    CHECK(smoothaf_diag_elapsed(UINT32_MAX - 4, 3) == 8,
+          "timestamp subtraction wraps safely");
+    smoothaf_episode_log_event(&episodes, UINT32_MAX - 2, 7,
+                               SMOOTHAF_EPISODE_EVENT_BLUR, 0, 100, 100,
+                               1, 1, 2, 0, 0, 0, 0);
+    CHECK(smoothaf_episode_events_snapshot(&episodes, events,
+                                           SMOOTHAF_EPISODE_EVENT_CAPACITY) == 1 &&
+          events[0].episode_id == 7 && events[0].timestamp_ms == UINT32_MAX - 2,
+          "episode event snapshot preserves independent timestamps");
+    memset(&summary, 0, sizeof(summary));
+    summary.episode_id = 7;
+    summary.started_ms = UINT32_MAX - 10;
+    summary.ended_ms = 5;
+    summary.result = SMOOTHAF_EPISODE_RESULT_WORSE;
+    smoothaf_episode_log_summary(&episodes, &summary);
+    CHECK(smoothaf_episode_summaries_snapshot(&episodes, summaries,
+                                              SMOOTHAF_EPISODE_SUMMARY_CAPACITY) == 1 &&
+          summaries[0].episode_id == 7 && summaries[0].result == SMOOTHAF_EPISODE_RESULT_WORSE,
+          "episode summary is retained after completion");
+    for (i = 0; i < SMOOTHAF_EPISODE_EVENT_CAPACITY + 3; i++)
+        smoothaf_episode_log_event(&episodes, (uint32_t)i, 8,
+                                   SMOOTHAF_EPISODE_EVENT_GATE, 0, 0, 0,
+                                   0, 0, 0, 0, 0, 0, 0);
+    CHECK(episodes.event_count == SMOOTHAF_EPISODE_EVENT_CAPACITY &&
+          episodes.event_dropped == 4,
+          "episode event overflow is counted");
     n = smoothaf_log_snapshot(&log, out, SMOOTHAF_DIAG_CAPACITY);
     CHECK(n == 0 && smoothaf_log_total(&log) == 0, "empty buffer");
     smoothaf_log_write(&log, SMOOTHAF_LOG_MOVE, 1, 2, 3);
