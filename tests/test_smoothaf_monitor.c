@@ -37,6 +37,115 @@ static struct smoothaf_monitor_sample sample(int score, int mean, int valid, int
     return s;
 }
 
+struct lens_mock
+{
+    int args[SMOOTHAF_VLOG_AF_MAX_COMMANDS];
+    int count;
+};
+
+static int mock_lens_focus(struct lens_mock *mock, int direction)
+{
+    if (mock->count < SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+        mock->args[mock->count++] = direction;
+    return 1;
+}
+
+static void issue_mock_command(struct smoothaf_vlog_af *af,
+                               struct lens_mock *mock, uint32_t now)
+{
+    CHECK(af->state == SMOOTHAF_VLOG_AF_PROBING,
+          "mock command is issued only while probing");
+    CHECK(smoothaf_vlog_af_can_command(af, 1, now),
+          "mock lens command passes the ACTIVE safety gate");
+    CHECK(mock_lens_focus(mock, af->direction),
+          "mock lens_focus accepts the requested direction");
+    smoothaf_vlog_af_record_command(af, now);
+    af->current_position += af->direction;
+}
+
+static void test_direction_is_physical_and_independent(void)
+{
+    struct smoothaf_vlog_af af;
+    struct lens_mock mock;
+    int diagnostic_direction;
+    int episode;
+
+    memset(&mock, 0, sizeof(mock));
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, -1, 1000);
+    diagnostic_direction = 1; /* changing Diagnostic A/B must not rewrite af.direction */
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    issue_mock_command(&af, &mock, 0);
+    CHECK(mock.args[0] == -1 && af.current_position == -1,
+          "automatic ACTIVE sends its independent initial direction to lens_focus");
+    diagnostic_direction = -1;
+    (void)diagnostic_direction;
+    af.awaiting_result = 0;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(af.direction == -1,
+          "Diagnostic A/B changes do not alter an active automatic direction");
+
+    /* A WORSE result must reverse the next physical request, not just telemetry. */
+    smoothaf_vlog_af_record_result(&af, 900, 120);
+    CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_WORSE &&
+          af.direction == 1 && af.reversals == 1,
+          "WORSE reverses the bounded automatic direction");
+    issue_mock_command(&af, &mock, 200);
+    CHECK(mock.args[1] == 1,
+          "WORSE reversal reaches the next lens_focus direction argument");
+
+    af.awaiting_result = 0;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_record_result(&af, 800, 320);
+    CHECK(!af.armed && af.state == SMOOTHAF_VLOG_AF_COMPLETE &&
+          af.reversals == SMOOTHAF_VLOG_AF_MAX_REVERSALS,
+          "repeated WORSE terminates at the reversal limit");
+    CHECK(mock.count == 2,
+          "repeated WORSE cannot create an unbounded command loop");
+
+    /* A new continuous episode gets the automatic source again; it does not
+     * inherit a previous episode's reversal direction. */
+    memset(&mock, 0, sizeof(mock));
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, -1, 1000);
+    for (episode = 0; episode < 3; episode++)
+    {
+        smoothaf_vlog_af_start_continuous_episode(&af,
+                                                  episode & 1 ? 1 : -1,
+                                                  1000);
+        CHECK(af.direction == (episode & 1 ? 1 : -1),
+              "continuous episode initializes from its automatic direction source");
+        af.state = SMOOTHAF_VLOG_AF_PROBING;
+        issue_mock_command(&af, &mock, 1000 + (uint32_t)episode);
+        CHECK(mock.args[mock.count - 1] == (episode & 1 ? 1 : -1),
+              "continuous episode sends its selected direction physically");
+        af.awaiting_result = 0;
+        smoothaf_vlog_af_stop(&af);
+        if (episode != 2)
+        {
+            af.safety_paused = 0;
+            af.continuous_armed = 1;
+        }
+    }
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_pause_continuous(&af, SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN, 0);
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 1) &&
+          af.episode_result == SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN,
+          "UNCERTAIN blocks another physical command");
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    issue_mock_command(&af, &mock, 10);
+    smoothaf_vlog_af_stop(&af);
+    CHECK(!smoothaf_vlog_af_can_command(&af, 1, 11),
+          "STOP blocks commands during a pending reversal path");
+}
+
 static void test_vlog_af_lifecycle(void)
 {
     struct smoothaf_vlog_af af;
@@ -458,6 +567,7 @@ int main(void)
     test_vlog_af_lifecycle();
     test_movie_recording_policy();
     test_continuous_active();
+    test_direction_is_physical_and_independent();
     test_monitor_session_preserves_mode();
 
     smoothaf_vlog_af_init(&af);

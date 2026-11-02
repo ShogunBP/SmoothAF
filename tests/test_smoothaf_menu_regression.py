@@ -8,45 +8,42 @@ SOURCE = ROOT / "src" / "smoothaf.c"
 def test_menu_shape_and_lifecycle():
     source = SOURCE.read_text(encoding="utf-8")
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
-    menu = menu.split("/* ---------------------------------------------------------------- */", 1)[0]
+    menu = menu.split("static unsigned int smoothaf_init", 1)[0]
     assert "MENU_EOL" in menu
+    top_names = [
+        "Enable", "Vlog Monitor", "Diagnostic", "AF Performance",
+        "Monitor Performance", "Algorithm Performance", "Build Info",
+    ]
+    top_positions = [menu.index('{ .name = "' + name + '"') for name in top_names]
+    assert top_positions == sorted(top_positions)
+    assert top_names[0] == "Enable"
+    assert top_names[-1] == "Build Info"
+
+    vlog = menu.split('{ .name = "Vlog Monitor"', 1)[1].split("MENU_EOL", 1)[0]
+    assert '"Sample Int"' in vlog
+    assert vlog.index('"Vlog AF Mode"') < vlog.index('"Movie Active Experimental"')
+    assert vlog.index('"Sample Int"') < vlog.index('"Start/Stop Monitoring"')
+    assert vlog.index('"Stop"') < vlog.index('"PANIC / Emergency Stop"')
+    assert '"Sampling Interval"' not in menu
+
+    for name in (
+        '"AF CMDs This EP"', '"Next EP Block"', '"AF CD Remain"',
+        '"AF Session"', '"EP Result"', '"AF EPs Done"', '"AF Armed"',
+        '"Blur Recheck"', '"AF Last Dir"', '"SAD Score"', '"Lap Score"', '"Actual Int"', '"REC State"',
+        '"Algorithm"', '"Search Dir"', '"Converge Why"', '"EP Summary"',
+        '"Log Page"', '"Log Entry"', '"Focus Step"', '"PANIC / Emergency Stop"',
+    ):
+        assert name in menu
+
     assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
-    for name in (
-        '"Build Info"', '"AF Performance"', '"Vlog Monitor"', '"Start/Stop Monitoring"', '"Monitor Performance"', '"Algorithm Performance"',
-        '"Task State"', '"Configured Interval"', '"Actual Interval"',
-        '"Last Duration"', '"Average Duration"', '"Maximum Duration"',
-        '"Attempts"', '"Valid Samples"', '"Invalid Samples"',
-        '"Low Confidence"', '"Blocked"', '"Skipped"', '"Overruns"',
-        '"Last Error"',
-        '"Vlog AF Mode"', '"OFF"', '"DRY RUN"', '"ACTIVE"', '"ACTIVE CONTINUOUS"',
-        '"Movie Active Experimental"',
-        '"Vlog AF State"', '"Start New AF Episode"', '"AF Episode Result"',
-        '"AF Move Attempts"', '"Move Attempts"', '"AF Lens Calls"', '"Lens Calls"', '"AF Move Successes"', '"Move Successes"',
-        '"AF Last Block"', '"AF Command Block"', '"Last Block / Command Block"', '"AF Episode Reason"',
-        '"AF State Before Error"', '"AF Last Move Result"',
-        '"AF Post-Move Valid"', '"AF Last Result Valid"', '"AF Commands"', '"Commands This Episode"',
-        '"AF Commands Available"', '"Commands Available"', '"AF Episode Command Limit"',
-        '"AF Episodes Completed"', '"AF Consecutive Failures"',
-        '"AF Cooldown Remaining"',
-        '"AF Time Since Move"', '"Time Since Move"', '"AF Timeout Remaining"', '"AF Initial Score"', '"Initial Score"',
-        '"AF Post-Move Score"', '"Post-Move Score"', '"AF Best Score"', '"Best Score"', '"AF Score Delta"', '"Score Delta"',
-        '"AF Best Relative Position"', '"AF Current Relative Position"', '"Current/Best Relative Position"',
-        '"AF Last Direction"', '"Continuous Armed"', '"Next Episode Block Reason"', '"Blur Recheck"',
-        '"Physical Movement"', '"Last Algorithm Result"',
-        '"Log Page"', '"Log Entry"', '"Previous"', '"Next"', '"Clear History"',
-        '"SAD Score"', '"Laplacian Score"', '"Movie Dry Run Recording"',
-        '"Sampling Interval"',
-        '"Measure"', '"Measure Result"', '"Focus Step"', '"Focus Test"',
-        '"AF Mode"', '"Sharpness Metric"', '"Step Size"', '"Status"', '"Stop"',
-        '"PANIC / Emergency Stop"', '"Rearm Safe Mode"'):
-        assert name in menu
     for forbidden in (
-        '"Canon AF Assist"', '"Trigger Canon AF"',
-        '"lens_autofocus"', '"PTP_AF_START"', '"lens_setup_af"',
-        '"module_send_keypress"', '"Export AF Log"',
-        '"Test SD Write"', '"Test Root Create"', '"Test Root Edit"',
-        '"Test File Paths"', '"Path Entry"', '"Path Result"', 'FIO_'):
+        '"Canon AF Assist"', '"Trigger Canon AF"', '"lens_autofocus"',
+        '"PTP_AF_START"', '"lens_setup_af"', '"module_send_keypress"',
+        '"Export AF Log"', '"Test SD Write"', '"Test Root Create"',
+        '"Test Root Edit"', '"Test File Paths"', '"Path Entry"',
+        '"Path Result"', 'FIO_',
+    ):
         assert forbidden not in source
     assert 'smoothaf_af_assist' not in source
     assert 'SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS' not in source
@@ -91,9 +88,9 @@ def test_menu_shape_and_lifecycle():
     assert 'SMOOTHAF_LOG_ERROR' in source
     assert 'SMOOTHAF_LOG_ABORT' in source
     assert source.count('MENU_SET_HELP(') >= 8
-    assert 'smoothaf_vlog_af_reset_session' in source
-    assert 'SMOOTHAF_BUILD_ID' in source
-    assert 'smoothaf_movie_start_pending' in source
+    assert 'smoothaf_af_direction_value()' in source
+    assert 'smoothaf_direction_value()' in source
+    assert source.count('smoothaf_af_direction_value()') >= 4
     assert re.search(r"struct smoothaf_telemetry\s*\{", (ROOT / "src" / "smoothaf_diagnostics.h").read_text())
 
 
