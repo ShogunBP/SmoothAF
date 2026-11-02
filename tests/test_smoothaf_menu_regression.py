@@ -12,18 +12,24 @@ def test_menu_shape_and_lifecycle():
     assert "MENU_EOL" in menu
     top_names = [
         "Enable", "Vlog Monitor", "Diagnostic", "AF Performance",
-        "Monitor Performance", "Algorithm Performance", "Build Info",
+        "Monitor Performance", "Algorithm Performance", "Focus Test",
+        "AF Mode", "Sharpness Metric", "Step Size", "Status", "STOP",
+        "PANIC / Emergency Stop", "Rearm Safe Mode", "Build Info",
     ]
     top_positions = [menu.index('{ .name = "' + name + '"') for name in top_names]
     assert top_positions == sorted(top_positions)
     assert top_names[0] == "Enable"
-    assert top_names[-1] == "Build Info"
+    assert top_names[-4:] == ["STOP", "PANIC / Emergency Stop", "Rearm Safe Mode", "Build Info"]
 
     vlog = menu.split('{ .name = "Vlog Monitor"', 1)[1].split("MENU_EOL", 1)[0]
     assert '"Sample Int"' in vlog
-    assert vlog.index('"Vlog AF Mode"') < vlog.index('"Movie Active Experimental"')
-    assert vlog.index('"Sample Int"') < vlog.index('"Start/Stop Monitoring"')
-    assert vlog.index('"Stop"') < vlog.index('"PANIC / Emergency Stop"')
+    assert vlog.index('"Start/Stop Monitoring"') < vlog.index('"Start New AF Episode"')
+    assert vlog.index('"Start New AF Episode"') < vlog.index('"Vlog AF Mode"')
+    assert vlog.index('"Sample Int"') < vlog.index('"Session State"')
+    assert vlog.index('"Session State"') < vlog.index('"AF State"') < vlog.index('"Monitor Status"')
+    assert '"STOP"' not in vlog
+    assert '"PANIC / Emergency Stop"' not in vlog
+    assert '"Rearm Safe Mode"' not in vlog
     assert '"Sampling Interval"' not in menu
 
     for name in (
@@ -31,7 +37,7 @@ def test_menu_shape_and_lifecycle():
         '"AF Session"', '"EP Result"', '"AF EPs Done"', '"AF Armed"',
         '"Blur Recheck"', '"AF Last Dir"', '"SAD Score"', '"Lap Score"', '"Actual Int"', '"REC State"',
         '"Algorithm"', '"Search Dir"', '"Converge Why"', '"EP Summary"',
-        '"Log Page"', '"Log Entry"', '"Focus Step"', '"PANIC / Emergency Stop"',
+        '"Log Page"', '"Log Entry"', '"Focus Step"', '"STOP"', '"PANIC / Emergency Stop"',
     ):
         assert name in menu
 
