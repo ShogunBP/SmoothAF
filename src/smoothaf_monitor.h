@@ -71,6 +71,13 @@
 #define SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT 4
 #define SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT 1
 
+/* Initial acquisition is bounded per provisional epoch and per manual arm.
+ * A failed attempt may be retried only after cooldown/backoff, and the whole
+ * series remains capped so a flat or low-texture scene cannot hunt forever. */
+#define SMOOTHAF_VLOG_AF_MAX_ACQUISITION_ATTEMPTS 3
+#define SMOOTHAF_VLOG_AF_MAX_SESSION_ACQUISITIONS 8
+#define SMOOTHAF_VLOG_AF_ACQUIRE_BACKOFF_MS 2000
+
 #define SMOOTHAF_VLOG_AF_RESULT_NONE             0
 #define SMOOTHAF_VLOG_AF_RESULT_API_SUCCESS      1
 #define SMOOTHAF_VLOG_AF_RESULT_NO_MOVEMENT      2
@@ -115,6 +122,7 @@
 #define SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK  8
 #define SMOOTHAF_VLOG_AF_NEXT_BLOCK_REFERENCE     9
 #define SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT 10
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_EXHAUSTED 11
 
 static inline const char *smoothaf_vlog_af_next_block_name(int reason)
 {
@@ -130,6 +138,7 @@ static inline const char *smoothaf_vlog_af_next_block_name(int reason)
         case SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK: return "BLUR_RECHECK";
         case SMOOTHAF_VLOG_AF_NEXT_BLOCK_REFERENCE: return "REFERENCE";
         case SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT: return "ACQUIRE_LIMIT";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_EXHAUSTED: return "ACQUIRE_EXHAUSTED";
         default: return "NONE";
     }
 }
@@ -382,6 +391,13 @@ struct smoothaf_vlog_af
     int auto_probe_first_delta;
     int auto_probe_opposite_delta;
     int auto_probe_enabled;
+    /* Luminance range observed across the samples that selected the AUTO
+     * direction.  A range at or above the lighting threshold makes the score
+     * comparison unreliable and blocks reference qualification. */
+    int auto_probe_min_mean;
+    int auto_probe_max_mean;
+    int auto_probe_lighting_valid;
+    int auto_probe_lighting_observed;
     uint32_t algorithm_commands;
     uint32_t algorithm_command_limit;
     struct smoothaf_hc legacy_controller;
@@ -410,9 +426,13 @@ struct smoothaf_vlog_af
     int cooldown_next_episode;
     int command_started;
     int awaiting_result;
-    /* One bounded acquisition per provisional-reference epoch.  This is the
-     * explicit replacement for treating the first confident sample as focus. */
+    /* Bounded acquisition series per provisional-reference epoch.  The epoch
+     * identifies the scene, the attempt counter bounds retries, and the
+     * session counter bounds a whole manual arm. */
     int acquisition_epoch;
+    int acquisition_attempts;
+    int session_acquisitions;
+    int acquisition_attempt_active;
     int dry_run_requests;
     int episode_result;
     int initial_score;
@@ -454,6 +474,34 @@ static inline void smoothaf_vlog_af_set_auto_probe(
     struct smoothaf_vlog_af *af, int enabled)
 {
     af->auto_probe_enabled = enabled ? 1 : 0;
+}
+
+static inline void smoothaf_vlog_af_auto_begin_measurement(
+    struct smoothaf_vlog_af *af, int mean)
+{
+    af->auto_probe_min_mean = mean;
+    af->auto_probe_max_mean = mean;
+    af->auto_probe_lighting_valid = 1;
+    af->auto_probe_lighting_observed = 1;
+}
+
+static inline void smoothaf_vlog_af_auto_observe_mean(
+    struct smoothaf_vlog_af *af, int mean)
+{
+    int min_mean;
+    int max_mean;
+    if (af->auto_probe_min_mean == 0 && af->auto_probe_max_mean == 0)
+    {
+        smoothaf_vlog_af_auto_begin_measurement(af, mean);
+        return;
+    }
+    if (mean < af->auto_probe_min_mean) af->auto_probe_min_mean = mean;
+    if (mean > af->auto_probe_max_mean) af->auto_probe_max_mean = mean;
+    min_mean = af->auto_probe_min_mean;
+    max_mean = af->auto_probe_max_mean;
+    af->auto_probe_lighting_observed = 1;
+    if (max_mean - min_mean >= SMOOTHAF_MONITOR_LIGHT_DELTA)
+        af->auto_probe_lighting_valid = 0;
 }
 
 static inline uint32_t smoothaf_vlog_af_episode_command_limit(
@@ -583,8 +631,10 @@ static inline int smoothaf_vlog_af_auto_on_score(
     if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_OPPOSITE_RETURN)
     {
         int db = smoothaf_auto_deadband(af->initial_score);
-        if (af->auto_probe_first_delta <= db &&
-            af->auto_probe_opposite_delta <= db)
+        if ((af->auto_probe_lighting_observed &&
+             !af->auto_probe_lighting_valid) ||
+            (af->auto_probe_first_delta <= db &&
+             af->auto_probe_opposite_delta <= db))
             af->auto_probe_selected_direction = 0;
         else
             af->auto_probe_selected_direction =
@@ -642,12 +692,46 @@ static inline int smoothaf_vlog_af_should_acquire_continuous(
     if (!enabled || !af->continuous_armed) return 0;
     if (af->armed || af->safety_paused) return 0;
     if (reference_state != SMOOTHAF_MONITOR_REF_PROVISIONAL) return 0;
-    if (af->acquisition_epoch == reference_epoch) return 0;
+    if (af->session_acquisitions >= SMOOTHAF_VLOG_AF_MAX_SESSION_ACQUISITIONS)
+        return 0;
+    if (af->acquisition_epoch == reference_epoch &&
+        af->acquisition_attempts >= SMOOTHAF_VLOG_AF_MAX_ACQUISITION_ATTEMPTS)
+        return 0;
     if (af->cooldown_next_episode &&
         (int32_t)(now - af->cooldown_until_ms) < 0) return 0;
     if (af->wait_for_blur_clear &&
         (int32_t)(now - af->blur_recheck_until_ms) < 0) return 0;
     return 1;
+}
+
+static inline void smoothaf_vlog_af_begin_acquisition(
+    struct smoothaf_vlog_af *af, int reference_epoch)
+{
+    if (af->acquisition_epoch != reference_epoch)
+        af->acquisition_attempts = 0;
+    af->acquisition_epoch = reference_epoch;
+    if (af->acquisition_attempts != INT32_MAX) af->acquisition_attempts++;
+    if (af->session_acquisitions != INT32_MAX) af->session_acquisitions++;
+    af->acquisition_attempt_active = 1;
+}
+
+static inline void smoothaf_vlog_af_note_acquisition_failure(
+    struct smoothaf_vlog_af *af, uint32_t now)
+{
+    uint32_t retry_at = now + SMOOTHAF_VLOG_AF_ACQUIRE_BACKOFF_MS;
+    af->acquisition_attempt_active = 0;
+    if (af->cooldown_until_ms < retry_at) af->cooldown_until_ms = retry_at;
+    af->cooldown_next_episode = 1;
+    af->wait_for_blur_clear = 1;
+}
+
+static inline int smoothaf_vlog_af_acquisition_exhausted(
+    const struct smoothaf_vlog_af *af, int reference_state, int reference_epoch)
+{
+    return reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL &&
+           ((af->acquisition_epoch == reference_epoch &&
+             af->acquisition_attempts >= SMOOTHAF_VLOG_AF_MAX_ACQUISITION_ATTEMPTS) ||
+            af->session_acquisitions >= SMOOTHAF_VLOG_AF_MAX_SESSION_ACQUISITIONS);
 }
 
 /* Manual ACTIVE/DRY RUN arming is itself the authorization for one bounded
@@ -675,6 +759,9 @@ static inline int smoothaf_vlog_af_next_episode_block_reason_for(
     if (af->armed) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACTIVE;
     if (reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL)
     {
+        if (smoothaf_vlog_af_acquisition_exhausted(
+                af, reference_state, reference_epoch))
+            return SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_EXHAUSTED;
         if (af->acquisition_epoch == reference_epoch)
             return SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT;
     }
@@ -812,6 +899,10 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->auto_probe_first_delta = 0;
     af->auto_probe_opposite_delta = 0;
     af->auto_probe_enabled = 0;
+    af->auto_probe_min_mean = 0;
+    af->auto_probe_max_mean = 0;
+    af->auto_probe_lighting_valid = 0;
+    af->auto_probe_lighting_observed = 0;
     af->algorithm_commands = 0;
     af->state = SMOOTHAF_VLOG_AF_WAITING;
     af->armed = 0;
@@ -838,6 +929,9 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->command_started = 0;
     af->awaiting_result = 0;
     af->acquisition_epoch = -1;
+    af->acquisition_attempts = 0;
+    af->session_acquisitions = 0;
+    af->acquisition_attempt_active = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->initial_score = 0;
@@ -909,6 +1003,9 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->command_started = 0;
     af->awaiting_result = 0;
     af->acquisition_epoch = -1;
+    af->acquisition_attempts = 0;
+    af->session_acquisitions = 0;
+    af->acquisition_attempt_active = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->controller_initialized = 0;
@@ -927,6 +1024,10 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->auto_probe_first_delta = 0;
     af->auto_probe_opposite_delta = 0;
     af->auto_probe_enabled = 0;
+    af->auto_probe_min_mean = 0;
+    af->auto_probe_max_mean = 0;
+    af->auto_probe_lighting_valid = 0;
+    af->auto_probe_lighting_observed = 0;
     af->algorithm_commands = 0;
     af->initial_score = baseline;
     af->previous_score = baseline;
@@ -979,6 +1080,8 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     int safety_paused = af->safety_paused;
     int limit = af->episode_limit;
     int acquisition_epoch = af->acquisition_epoch;
+    int acquisition_attempts = af->acquisition_attempts;
+    int session_acquisitions = af->session_acquisitions;
     uint32_t algorithm_limit = af->algorithm_command_limit;
     smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
                                  direction, baseline);
@@ -987,6 +1090,9 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     af->consecutive_failures = failures;
     af->safety_paused = safety_paused;
     af->acquisition_epoch = acquisition_epoch;
+    af->acquisition_attempts = acquisition_attempts;
+    af->session_acquisitions = session_acquisitions;
+    af->acquisition_attempt_active = 0;
     af->auto_probe_enabled = auto_probe;
     af->algorithm_command_limit = algorithm_limit;
     af->episode_limit = limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT &&
@@ -1151,9 +1257,11 @@ static inline void smoothaf_vlog_af_pause_continuous(
     af->armed = 0;
     af->awaiting_result = 0;
     af->episode_result = result;
+    af->acquisition_attempt_active = 0;
     if (af->consecutive_failures != INT32_MAX) af->consecutive_failures++;
     af->state = SMOOTHAF_VLOG_AF_ERROR;
-    af->cooldown_until_ms = now + SMOOTHAF_VLOG_AF_COOLDOWN_MS;
+    if (af->cooldown_until_ms < now + SMOOTHAF_VLOG_AF_COOLDOWN_MS)
+        af->cooldown_until_ms = now + SMOOTHAF_VLOG_AF_COOLDOWN_MS;
     af->cooldown_next_episode = 1;
     af->wait_for_blur_clear = 1;
     if (af->consecutive_failures >= SMOOTHAF_VLOG_AF_MAX_CONSECUTIVE_FAILURES)
@@ -1178,18 +1286,34 @@ static inline void smoothaf_vlog_af_abort_environmental(
     smoothaf_recovery_init(&af->recovery);
 }
 
-/* Only a completed search that actually established a best position (or a
- * two-sided AUTO probe with no improvement) may promote a provisional
- * reference.  A raw score increase is deliberately insufficient. */
+/* Only a completed search whose final confident sample still represents the
+ * measured best may promote a provisional reference.  In particular,
+ * NO_IMPROVEMENT is not focus evidence by itself: AUTO must have selected a
+ * real side, the controller must have taken a post-probe measurement, and a
+ * meaningful improvement must have been observed. */
 static inline int smoothaf_vlog_af_result_qualifies_reference(
-    int result, int auto_probe_done, int commands)
+    int result, int auto_probe_done, int auto_probe_result,
+    int algorithm_commands, int best, int initial_score, int score,
+    int score_valid, int lighting_valid)
 {
-    if (result == SMOOTHAF_VLOG_AF_RESULT_CONVERGED ||
-        result == SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED)
-        return 1;
-    if (result == SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT &&
-        auto_probe_done && commands >= SMOOTHAF_AUTO_MAX_COMMANDS)
-        return 1;
+    int best_deadband = smoothaf_vlog_af_deadband(best);
+    int initial_deadband = smoothaf_vlog_af_deadband(initial_score);
+    int meaningful_best = best > initial_score + initial_deadband;
+    int final_represents_best = score + best_deadband >= best;
+
+    if (!score_valid || !lighting_valid || !final_represents_best)
+        return 0;
+    if (result == SMOOTHAF_VLOG_AF_RESULT_CONVERGED)
+        return meaningful_best;
+    if (result == SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED)
+        return meaningful_best && final_represents_best;
+    /* A flat terminal result is deliberately never reference evidence, even
+     * when AUTO selected a side and the controller took a post-probe sample.
+     * Only a controller-confirmed convergence or photometrically confirmed
+     * recovery can establish VALID. */
+    (void)auto_probe_done;
+    (void)auto_probe_result;
+    (void)algorithm_commands;
     return 0;
 }
 
@@ -1269,7 +1393,7 @@ static inline int smoothaf_vlog_af_record_result(
             if (smoothaf_vlog_af_algorithm_commands_used(af) >= (uint32_t)limit)
                 af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
             else
-                af->episode_result = SMOOTHAF_VLOG_AF_RESULT_CONVERGED;
+                af->episode_result = SMOOTHAF_VLOG_AF_RESULT_IMPROVED;
             smoothaf_vlog_af_complete_continuous_episode(af, now);
             return 1;
         }

@@ -344,9 +344,9 @@ static int smoothaf_episode_result_map(int result)
         case SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT:
             return SMOOTHAF_EPISODE_RESULT_SEARCH_LIMIT;
         case SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED:
-            return SMOOTHAF_EPISODE_RESULT_IMPROVED;
+            return SMOOTHAF_EPISODE_RESULT_BEST_RECOVERED;
         case SMOOTHAF_VLOG_AF_RESULT_BEST_NOT_RECOVERED:
-            return SMOOTHAF_EPISODE_RESULT_NO_IMPROVEMENT;
+            return SMOOTHAF_EPISODE_RESULT_BEST_NOT_RECOVERED;
         case SMOOTHAF_VLOG_AF_RESULT_DRY_RUN:
             return SMOOTHAF_EPISODE_RESULT_DRY_RUN;
         default:
@@ -1243,6 +1243,8 @@ static void smoothaf_vlog_af_fail(int result, int block)
     }
     if (continuous)
     {
+        if (smoothaf_vlog_af.acquisition_attempt_active)
+            smoothaf_vlog_af_note_acquisition_failure(&smoothaf_vlog_af, now);
         if (result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
             smoothaf_af_episode_cancel_reason = result;
         smoothaf_vlog_af_pause_continuous(&smoothaf_vlog_af, result, now);
@@ -1454,6 +1456,7 @@ static void smoothaf_monitor_task(void)
                 if (auto_probe_measurement)
                 {
                     smoothaf_vlog_adapter_prepare_score(sample.score, completed);
+                    smoothaf_vlog_af_auto_observe_mean(&smoothaf_vlog_af, sample.mean);
                     smoothaf_vlog_af_auto_commit_move(&smoothaf_vlog_af);
                     adapter_continue = smoothaf_vlog_af_auto_on_score(
                         &smoothaf_vlog_af, sample.score);
@@ -1616,14 +1619,27 @@ static void smoothaf_monitor_task(void)
             smoothaf_vlog_af_result_qualifies_reference(
                 smoothaf_vlog_af.episode_result,
                 smoothaf_vlog_af.auto_probe_done,
-                (int)smoothaf_vlog_af.commands) &&
+                smoothaf_vlog_af.auto_probe_result,
+                (int)smoothaf_vlog_af.algorithm_commands,
+                smoothaf_vlog_af.best,
+                smoothaf_vlog_af.initial_score,
+                sample.score,
+                sample.valid && sample.confident,
+                !smoothaf_vlog_direction_auto_selected() ||
+                smoothaf_vlog_af.auto_probe_lighting_valid) &&
             sample.valid && sample.confident)
         {
             smoothaf_monitor_qualify_reference(&smoothaf_monitor, sample.score,
                                                sample.mean, sample.metric,
                                                completed);
+            smoothaf_vlog_af.acquisition_attempt_active = 0;
             smoothaf_monitor_log_transitions();
         }
+        else if (result_processed && !post_move_lighting &&
+                 !smoothaf_vlog_af.armed &&
+                 smoothaf_vlog_af.acquisition_attempt_active)
+            smoothaf_vlog_af_note_acquisition_failure(
+                &smoothaf_vlog_af, completed);
         acquire_continuous = sample.valid && sample.confident &&
             smoothaf_monitor.state == SMOOTHAF_MONITOR_STABLE &&
             smoothaf_vlog_af_should_acquire_continuous(
@@ -1641,8 +1657,11 @@ static void smoothaf_monitor_task(void)
                 &smoothaf_vlog_af, smoothaf_vlog_direction_for_episode(),
                 sample.score);
             if (acquire_continuous)
-                smoothaf_vlog_af.acquisition_epoch =
-                    smoothaf_monitor.reference_epoch;
+                smoothaf_vlog_af_begin_acquisition(
+                    &smoothaf_vlog_af, smoothaf_monitor.reference_epoch);
+            if (smoothaf_vlog_direction_auto_selected())
+                smoothaf_vlog_af_auto_begin_measurement(
+                    &smoothaf_vlog_af, sample.mean);
             smoothaf_vlog_af.image_ms = 0;
             smoothaf_vlog_af.wait_ms = 0;
             smoothaf_vlog_af.movement_ms = 0;

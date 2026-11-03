@@ -72,6 +72,9 @@ struct smoothaf_recovery
     int target;
     int sequence;
     int commands;
+    int last_score;
+    int last_score_position;
+    int last_score_valid;
 };
 
 static inline void smoothaf_recovery_init(struct smoothaf_recovery *recovery)
@@ -89,6 +92,9 @@ static inline void smoothaf_recovery_init(struct smoothaf_recovery *recovery)
     recovery->target = 0;
     recovery->sequence = 0;
     recovery->commands = 0;
+    recovery->last_score = 0;
+    recovery->last_score_position = 0;
+    recovery->last_score_valid = 0;
 }
 
 static inline int smoothaf_recovery_should_start(int enabled, int score,
@@ -184,6 +190,9 @@ static inline int smoothaf_recovery_on_score(struct smoothaf_recovery *recovery,
                                              int score)
 {
     int db = smoothaf_deadband(recovery->best_score);
+    recovery->last_score = score;
+    recovery->last_score_position = recovery->position;
+    recovery->last_score_valid = 1;
     if (score > recovery->best_score + db)
     {
         recovery->best_score = score;
@@ -229,9 +238,16 @@ static inline int smoothaf_recovery_on_score(struct smoothaf_recovery *recovery,
             recovery->target = recovery->best_position;
             return 1;
         }
+        /* Position equality proves only that the commanded return reached the
+         * estimated best coordinate.  The score at that coordinate must also
+         * still be representative of the historical peak before recovery can
+         * be reported as successful. */
         recovery->phase = SMOOTHAF_RECOVERY_COMPLETE;
         recovery->result = recovery->best_score >
-                           recovery->initial_score + db
+                           recovery->initial_score + db &&
+                           recovery->last_score_valid &&
+                           recovery->last_score_position == recovery->best_position &&
+                           recovery->last_score + db >= recovery->best_score
                          ? SMOOTHAF_RECOVERY_BEST_RECOVERED
                          : SMOOTHAF_RECOVERY_BEST_NOT_RECOVERED;
         return 0;

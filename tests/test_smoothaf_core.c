@@ -76,6 +76,30 @@ static void test_algorithm_selection_and_recovery(void)
     CHECK(recovery.result == SMOOTHAF_RECOVERY_CANCELLED &&
           recovery.phase == SMOOTHAF_RECOVERY_ABORTED,
           "recovery cancellation is explicit");
+
+    smoothaf_recovery_begin(&recovery, 100, 1);
+    CHECK(smoothaf_recovery_next(&recovery, &direction, &step),
+          "recovery emits a move before photometric confirmation");
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 180);
+    while (smoothaf_recovery_next(&recovery, &direction, &step))
+    {
+        smoothaf_recovery_commit_move(&recovery);
+        smoothaf_recovery_on_score(&recovery,
+                                   recovery.phase == SMOOTHAF_RECOVERY_RETURN
+                                   ? 100 : 150);
+    }
+    CHECK(recovery.result == SMOOTHAF_RECOVERY_BEST_NOT_RECOVERED,
+          "recovery rejects a poor return measurement");
+
+    smoothaf_recovery_begin(&recovery, 100, 1);
+    while (smoothaf_recovery_next(&recovery, &direction, &step))
+    {
+        smoothaf_recovery_commit_move(&recovery);
+        smoothaf_recovery_on_score(&recovery, 180);
+    }
+    CHECK(recovery.result == SMOOTHAF_RECOVERY_BEST_RECOVERED,
+          "recovery requires and accepts a confirmed return measurement");
 }
 
 struct auto_mock

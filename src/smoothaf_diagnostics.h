@@ -77,6 +77,10 @@ typedef enum
     SMOOTHAF_EPISODE_RESULT_NO_MOVEMENT = 10,
     SMOOTHAF_EPISODE_RESULT_SEARCH_LIMIT = 11,
     SMOOTHAF_EPISODE_RESULT_DRY_RUN = 12,
+    /* Appended values preserve the numeric meaning of the existing log
+     * vocabulary while exposing recovery outcomes distinctly. */
+    SMOOTHAF_EPISODE_RESULT_BEST_RECOVERED = 13,
+    SMOOTHAF_EPISODE_RESULT_BEST_NOT_RECOVERED = 14,
 } smoothaf_episode_result_t;
 
 struct smoothaf_episode_event
@@ -376,6 +380,8 @@ static inline const char *smoothaf_episode_result_name(int result)
         case SMOOTHAF_EPISODE_RESULT_NO_MOVEMENT: return "NO_MOVEMENT";
         case SMOOTHAF_EPISODE_RESULT_SEARCH_LIMIT: return "SEARCH_LIMIT";
         case SMOOTHAF_EPISODE_RESULT_DRY_RUN: return "DRY_RUN";
+        case SMOOTHAF_EPISODE_RESULT_BEST_RECOVERED: return "BEST_RECOVERED";
+        case SMOOTHAF_EPISODE_RESULT_BEST_NOT_RECOVERED: return "BEST_NOT_RECOVERED";
         default: return "NONE";
     }
 }

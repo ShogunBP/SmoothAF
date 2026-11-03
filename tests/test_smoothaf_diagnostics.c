@@ -24,8 +24,12 @@ int main(void)
     CHECK(strcmp(smoothaf_episode_event_name(SMOOTHAF_EPISODE_EVENT_POST_MOVE),
                  "POST_MOVE") == 0 &&
           strcmp(smoothaf_episode_result_name(SMOOTHAF_EPISODE_RESULT_WORSE),
-                 "WORSE") == 0,
-          "episode record names");
+                 "WORSE") == 0 &&
+          strcmp(smoothaf_episode_result_name(SMOOTHAF_EPISODE_RESULT_BEST_RECOVERED),
+                 "BEST_RECOVERED") == 0 &&
+          strcmp(smoothaf_episode_result_name(SMOOTHAF_EPISODE_RESULT_BEST_NOT_RECOVERED),
+                 "BEST_NOT_RECOVERED") == 0,
+          "episode record names preserve distinct recovery outcomes");
     CHECK(smoothaf_diag_elapsed(UINT32_MAX - 4, 3) == 8,
           "timestamp subtraction wraps safely");
     smoothaf_episode_log_event(&episodes, UINT32_MAX - 2, 7,

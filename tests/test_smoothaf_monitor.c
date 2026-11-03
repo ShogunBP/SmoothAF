@@ -554,8 +554,8 @@ static void test_continuous_active(void)
         CHECK(af.episodes_completed == (uint32_t)(episode + 1) &&
               !af.armed && af.continuous_armed,
               "continuous episode completes without cancelling authorization");
-        CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_CONVERGED,
-              "partial improvement is not reported as convergence until the episode completes");
+        CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_IMPROVED,
+              "partial improvement remains distinct from convergence");
         CHECK(!smoothaf_vlog_af_should_resume_continuous(
                   &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
                   SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1,
@@ -909,10 +909,11 @@ static void test_initial_acquisition_policy(void)
               SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
           "a qualified reference does not trigger initial acquisition");
     af.acquisition_epoch = 1;
+    af.acquisition_attempts = SMOOTHAF_VLOG_AF_MAX_ACQUISITION_ATTEMPTS;
     CHECK(!smoothaf_vlog_af_should_acquire_continuous(
               &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
               SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
-          "the same provisional epoch cannot repeat acquisition");
+          "an exhausted provisional epoch cannot repeat acquisition");
     CHECK(smoothaf_vlog_af_should_acquire_continuous(
               &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 2,
               SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
@@ -920,8 +921,8 @@ static void test_initial_acquisition_policy(void)
     CHECK(smoothaf_vlog_af_next_episode_block_reason_for(
               &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_MONITOR_REF_PROVISIONAL,
               1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0) ==
-              SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT,
-          "next-episode diagnostics expose the acquisition budget");
+              SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_EXHAUSTED,
+          "next-episode diagnostics expose exhausted acquisition attempts");
     af.acquisition_epoch = -1;
     af.safety_paused = 1;
     CHECK(!smoothaf_vlog_af_should_acquire_continuous(
@@ -929,6 +930,7 @@ static void test_initial_acquisition_policy(void)
               SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
           "SAFETY_PAUSED blocks initial acquisition");
     af.safety_paused = 0;
+    af.acquisition_attempts = 0;
     af.cooldown_next_episode = 1;
     af.cooldown_until_ms = 1000;
     CHECK(!smoothaf_vlog_af_should_acquire_continuous(
@@ -938,7 +940,31 @@ static void test_initial_acquisition_policy(void)
               &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
               SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1000),
           "cooldown bounds initial acquisition timing");
+    smoothaf_vlog_af_begin_acquisition(&af, 1);
+    CHECK(af.acquisition_attempts == 1 && af.session_acquisitions == 1,
+          "initial acquisition records a bounded attempt");
+    smoothaf_vlog_af_note_acquisition_failure(&af, 1000);
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 2500),
+          "acquisition backoff blocks an immediate retry");
     af.cooldown_next_episode = 0;
+    af.wait_for_blur_clear = 0;
+    CHECK(smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 3000),
+          "a failed acquisition can retry after backoff");
+    af.acquisition_attempts = SMOOTHAF_VLOG_AF_MAX_ACQUISITION_ATTEMPTS;
+    CHECK(smoothaf_vlog_af_acquisition_exhausted(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1),
+          "acquisition attempts are explicitly exhausted");
+    CHECK(smoothaf_vlog_af_next_episode_block_reason_for(
+              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_MONITOR_REF_PROVISIONAL,
+              1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 3000) ==
+              SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_EXHAUSTED,
+          "telemetry distinguishes acquisition exhaustion");
+    af.cooldown_next_episode = 0;
+    af.acquisition_attempts = 0;
     CHECK(smoothaf_vlog_af_next_episode_block_reason_for(
               &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_MONITOR_REF_RECALIBRATE,
               1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0) ==
@@ -973,24 +999,59 @@ static void test_environmental_abort_is_not_af_failure(void)
 
 static void test_reference_qualification_criteria(void)
 {
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
     CHECK(smoothaf_vlog_af_result_qualifies_reference(
-              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, 0, 1),
-          "a converged bounded search qualifies a reference");
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, 0, SMOOTHAF_AUTO_INVALID,
+              2, 1300, 1000, 1300, 1, 1),
+          "a converged bounded search with a representative final score qualifies");
     CHECK(smoothaf_vlog_af_result_qualifies_reference(
-              SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED, 0, 3),
-          "a recovered best position qualifies a reference");
-    CHECK(smoothaf_vlog_af_result_qualifies_reference(
-              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
-              SMOOTHAF_AUTO_MAX_COMMANDS),
-          "a completed two-sided AUTO probe with no improvement qualifies");
+              SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED, 0, SMOOTHAF_AUTO_INVALID,
+              2, 1300, 1000, 1300, 1, 1),
+          "a photometrically recovered best position qualifies");
     CHECK(!smoothaf_vlog_af_result_qualifies_reference(
-              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 0,
-              SMOOTHAF_AUTO_MAX_COMMANDS),
-          "a one-sided no-improvement result is not enough");
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_UNCERTAIN, 1, 1000, 1000, 1000, 1, 1),
+          "AUTO uncertainty never qualifies a provisional reference");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1010, 1000, 1010, 1, 1),
+          "small improvement does not qualify a flat response");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1300, 1, 1),
+          "NO_IMPROVEMENT never substitutes for confirmed convergence");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1000, 1, 1),
+          "a final score far below the best does not qualify");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1300, 0, 1),
+          "an invalid post-move result does not qualify");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1300, 1, 0),
+          "environmentally unstable AUTO samples do not qualify");
     CHECK(!smoothaf_vlog_af_result_qualifies_reference(
               SMOOTHAF_VLOG_AF_RESULT_IMPROVED, 1,
-              SMOOTHAF_AUTO_MAX_COMMANDS),
+              SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1300, 1, 1),
           "partial improvement alone is not treated as focus confirmation");
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, 0, SMOOTHAF_AUTO_INVALID,
+              2, 1300, 1000, 1300, 1, 1),
+          "a confirmed convergence promotes a valid reference");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, 0, SMOOTHAF_AUTO_INVALID,
+              2, 1300, 1000, 1000, 1, 1),
+          "a converged result with a poor final score does not promote");
+    smoothaf_vlog_af_auto_begin_measurement(&af, 100);
+    smoothaf_vlog_af_auto_observe_mean(&af, 120);
+    smoothaf_vlog_af_auto_observe_mean(&af, 140);
+    CHECK(!af.auto_probe_lighting_valid &&
+          af.auto_probe_max_mean - af.auto_probe_min_mean >=
+          SMOOTHAF_MONITOR_LIGHT_DELTA,
+          "gradual AUTO lighting drift invalidates score comparison");
 }
 
 static void test_manual_provisional_probe_is_bounded(void)
