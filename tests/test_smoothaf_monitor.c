@@ -687,6 +687,338 @@ static void test_continuous_active(void)
           "DRY RUN episode remains dry instead of self-cancelling");
 }
 
+static void start_qualified_monitor(struct smoothaf_monitor *m, int score,
+                                    int mean)
+{
+    struct smoothaf_monitor_sample s = sample(score, mean, 1, 1);
+    smoothaf_monitor_init(m, SMOOTHAF_MONITOR_METRIC_SAD,
+                          SMOOTHAF_MONITOR_INTERVAL_500);
+    smoothaf_monitor_start(m, SMOOTHAF_MONITOR_METRIC_SAD, 0);
+    smoothaf_monitor_accept(m, &s, 10);
+    smoothaf_monitor_qualify_reference(m, score, mean,
+                                       SMOOTHAF_MONITOR_METRIC_SAD, 20);
+}
+
+static void test_reference_provisional_blocks_blur(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s = sample(1000, 120, 1, 1);
+    smoothaf_monitor_init(&m, SMOOTHAF_MONITOR_METRIC_SAD,
+                          SMOOTHAF_MONITOR_INTERVAL_500);
+    smoothaf_monitor_start(&m, SMOOTHAF_MONITOR_METRIC_SAD, 0);
+    smoothaf_monitor_accept(&m, &s, 10);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL &&
+          m.have_reference && !m.possible_blur,
+          "initialization creates a provisional reference");
+    s = sample(100, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 100);
+    smoothaf_monitor_accept(&m, &s, 200);
+    CHECK(!m.possible_blur && m.state != SMOOTHAF_MONITOR_POSSIBLE_BLUR &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL,
+          "an unqualified initial scene cannot declare blur");
+}
+
+static void test_recalibration_requires_af_evidence(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s;
+    start_qualified_monitor(&m, 1000, 120);
+    s = sample(1000, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 100);
+    smoothaf_monitor_accept(&m, &s, 200);
+    smoothaf_monitor_accept(&m, &s, 300);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE &&
+          !m.have_reference,
+          "confirmed lighting change invalidates the old reference");
+    s = sample(100, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 400);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL &&
+          m.reference == 100 && !m.possible_blur,
+          "the first post-recalibration sample is provisional, not focus evidence");
+    s = sample(60, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 500);
+    smoothaf_monitor_accept(&m, &s, 600);
+    CHECK(!m.possible_blur &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL,
+          "a defocused new scene is not promoted to a qualified reference");
+    smoothaf_monitor_qualify_reference(&m, 900, 200,
+                                       SMOOTHAF_MONITOR_METRIC_SAD, 700);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID && m.reference == 900,
+          "bounded AF evidence promotes the recalibrated scene");
+}
+
+static void test_lighting_change_suppresses_defocus_decision(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s;
+    start_qualified_monitor(&m, 1000, 120);
+    /* Exposure and apparent sharpness change together: this is a new scene,
+     * not proof that the old subject went out of focus. */
+    s = sample(100, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 100);
+    smoothaf_monitor_accept(&m, &s, 200);
+    smoothaf_monitor_accept(&m, &s, 300);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE &&
+          !m.have_reference && !m.possible_blur,
+          "a combined scene and exposure change recalibrates without declaring blur");
+    s = sample(80, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 400);
+    smoothaf_monitor_accept(&m, &s, 500);
+    smoothaf_monitor_accept(&m, &s, 600);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL &&
+          !m.possible_blur,
+          "the new scene stays provisional until AF provides evidence");
+}
+
+static void test_blur_confirmation_is_consecutive(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s;
+    start_qualified_monitor(&m, 1000, 120);
+    s = sample(100, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 100);
+    smoothaf_monitor_accept(&m, &s, 200);
+    CHECK(!m.possible_blur && m.blur_bad_count == 1,
+          "first blurred sample is not enough");
+    s = sample(1300, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 300);
+    CHECK(!m.possible_blur && m.blur_bad_count == 0,
+          "middle-band sample breaks blur consecutiveness");
+    s = sample(100, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 400);
+    CHECK(!m.possible_blur && m.blur_bad_count == 1,
+          "low / middle / low does not confirm blur");
+    smoothaf_monitor_accept(&m, &s, 500);
+    CHECK(m.possible_blur && m.state == SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+          "two genuinely consecutive low samples still confirm blur");
+}
+
+static void test_single_lighting_oscillation_preserves_reference(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s;
+    int epoch;
+    int i;
+    start_qualified_monitor(&m, 1000, 120);
+    epoch = m.reference_epoch;
+    s = sample(1000, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 100);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
+          m.lighting_count == 1 && !m.possible_blur,
+          "one lighting excursion does not invalidate the reference");
+    s = sample(1000, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 200);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
+          m.lighting_count == 0 && m.state == SMOOTHAF_MONITOR_STABLE,
+          "returning to the original exposure restores decisions without churn");
+
+    for (i = 0; i < 8; i++)
+    {
+        s = sample(1000, (i & 1) ? 120 : 200, 1, 1);
+        smoothaf_monitor_accept(&m, &s, (uint32_t)(300 + i * 100));
+        CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
+              "periodic flicker never invalidates a qualified reference");
+    }
+    CHECK(m.reference_epoch == epoch && m.have_reference &&
+          !m.possible_blur,
+          "flicker does not create new reference epochs or false blur");
+}
+
+static void test_low_texture_does_not_touch_reference(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s;
+    start_qualified_monitor(&m, 1000, 120);
+    s = sample(20, 120, 1, 0);
+    smoothaf_monitor_accept(&m, &s, 100);
+    CHECK(m.state == SMOOTHAF_MONITOR_UNCERTAIN && !m.possible_blur &&
+          m.reference == 1000 &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
+          "a textureless sample neither changes the reference nor declares blur");
+    smoothaf_monitor_accept(&m, &s, 200);
+    smoothaf_monitor_accept(&m, &s, 300);
+    CHECK(!m.possible_blur && m.reference == 1000 &&
+          m.metrics.low_confidence == 3,
+          "persistent low texture stays uncertain instead of forcing blur");
+    s = sample(1000, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 400);
+    smoothaf_monitor_accept(&m, &s, 500);
+    CHECK(m.state == SMOOTHAF_MONITOR_STABLE &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
+          "confidence returning restores decisions on the same reference");
+}
+
+static void test_low_confidence_breaks_blur_consecutiveness(void)
+{
+    struct smoothaf_monitor m;
+    struct smoothaf_monitor_sample s;
+    start_qualified_monitor(&m, 1000, 120);
+    s = sample(100, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 100);
+    smoothaf_monitor_accept(&m, &s, 200);
+    CHECK(m.blur_bad_count == 1 && !m.possible_blur,
+          "confident blurred samples start a run");
+    s = sample(100, 120, 1, 0);
+    smoothaf_monitor_accept(&m, &s, 300);
+    CHECK(m.blur_bad_count == 0 && !m.possible_blur,
+          "an unconfident sample breaks the blur run");
+    s = sample(100, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 400);
+    CHECK(m.blur_bad_count == 1 && !m.possible_blur,
+          "the next low sample starts a fresh run instead of completing one");
+    smoothaf_monitor_accept(&m, &s, 500);
+    CHECK(m.possible_blur,
+          "two genuinely adjacent confident low samples still confirm blur");
+}
+
+static void test_post_move_lighting_is_observable(void)
+{
+    struct smoothaf_monitor m;
+    int reference;
+    int reference_mean;
+    start_qualified_monitor(&m, 1000, 120);
+    reference = m.reference;
+    reference_mean = m.reference_mean;
+    CHECK(!smoothaf_monitor_lighting_changed(&m, 140),
+          "small exposure noise is not a lighting change");
+    CHECK(smoothaf_monitor_lighting_changed(&m, 152),
+          "a post-move lighting change is detectable without moving the lens");
+    CHECK(m.reference == reference && m.reference_mean == reference_mean,
+          "observing post-move lighting does not mutate the reference");
+}
+
+static void test_initial_acquisition_policy(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    CHECK(smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
+          "a provisional reference authorizes one bounded acquisition");
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 0, 0),
+          "Enable OFF blocks initial acquisition");
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE, 1, 0),
+          "initial acquisition is specific to ACTIVE CONTINUOUS");
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_VALID, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
+          "a qualified reference does not trigger initial acquisition");
+    af.acquisition_epoch = 1;
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
+          "the same provisional epoch cannot repeat acquisition");
+    CHECK(smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 2,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
+          "a new scene epoch authorizes a new bounded acquisition");
+    CHECK(smoothaf_vlog_af_next_episode_block_reason_for(
+              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_MONITOR_REF_PROVISIONAL,
+              1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0) ==
+              SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT,
+          "next-episode diagnostics expose the acquisition budget");
+    af.acquisition_epoch = -1;
+    af.safety_paused = 1;
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0),
+          "SAFETY_PAUSED blocks initial acquisition");
+    af.safety_paused = 0;
+    af.cooldown_next_episode = 1;
+    af.cooldown_until_ms = 1000;
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 500) &&
+          smoothaf_vlog_af_should_acquire_continuous(
+              &af, SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1000),
+          "cooldown bounds initial acquisition timing");
+    af.cooldown_next_episode = 0;
+    CHECK(smoothaf_vlog_af_next_episode_block_reason_for(
+              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_MONITOR_REF_RECALIBRATE,
+              1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0) ==
+              SMOOTHAF_VLOG_AF_NEXT_BLOCK_REFERENCE,
+          "a missing reference is reported distinctly");
+    CHECK(smoothaf_vlog_af_next_episode_block_reason_for(
+              &af, SMOOTHAF_MONITOR_STABLE, SMOOTHAF_MONITOR_REF_VALID,
+              1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 0) ==
+              SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR,
+          "a qualified reference still needs confirmed blur");
+}
+
+static void test_environmental_abort_is_not_af_failure(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    af.armed = 1;
+    af.awaiting_result = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    af.commands = 2;
+    smoothaf_vlog_af_abort_environmental(&af, 1000);
+    CHECK(!af.armed && af.continuous_armed &&
+          af.episode_result == SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN,
+          "environmental abort finishes the episode without disarming continuous");
+    CHECK(af.consecutive_failures == 0 && !af.safety_paused,
+          "a lighting change is not counted as an AF failure");
+    CHECK(af.cooldown_next_episode && af.wait_for_blur_clear &&
+          af.commands == 2,
+          "environmental abort preserves command accounting and safety timing");
+}
+
+static void test_reference_qualification_criteria(void)
+{
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, 0, 1),
+          "a converged bounded search qualifies a reference");
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED, 0, 3),
+          "a recovered best position qualifies a reference");
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
+              SMOOTHAF_AUTO_MAX_COMMANDS),
+          "a completed two-sided AUTO probe with no improvement qualifies");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 0,
+              SMOOTHAF_AUTO_MAX_COMMANDS),
+          "a one-sided no-improvement result is not enough");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_IMPROVED, 1,
+              SMOOTHAF_AUTO_MAX_COMMANDS),
+          "partial improvement alone is not treated as focus confirmation");
+}
+
+static void test_manual_provisional_probe_is_bounded(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    CHECK(smoothaf_vlog_af_should_probe_reference(
+              &af, SMOOTHAF_MONITOR_STABLE,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, SMOOTHAF_VLOG_AF_ACTIVE),
+          "manual arming authorizes one provisional acquisition");
+    CHECK(smoothaf_vlog_af_should_probe_reference(
+              &af, SMOOTHAF_MONITOR_POSSIBLE_BLUR,
+              SMOOTHAF_MONITOR_REF_VALID, SMOOTHAF_VLOG_AF_ACTIVE),
+          "confirmed blur still promotes a manual episode");
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    CHECK(!smoothaf_vlog_af_should_probe_reference(
+              &af, SMOOTHAF_MONITOR_STABLE,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, SMOOTHAF_VLOG_AF_ACTIVE),
+          "a probing episode is not restarted by the acquisition gate");
+    af.state = SMOOTHAF_VLOG_AF_WAITING;
+    af.armed = 0;
+    CHECK(!smoothaf_vlog_af_should_probe_reference(
+              &af, SMOOTHAF_MONITOR_STABLE,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, SMOOTHAF_VLOG_AF_ACTIVE),
+          "a disarmed episode cannot acquire");
+}
+
 int main(void)
 {
     struct smoothaf_monitor m;
@@ -703,6 +1035,18 @@ int main(void)
     test_vlog_auto_probe_reserves_algorithm_budget();
     test_direction_is_physical_and_independent();
     test_monitor_session_preserves_mode();
+    test_reference_provisional_blocks_blur();
+    test_recalibration_requires_af_evidence();
+    test_lighting_change_suppresses_defocus_decision();
+    test_blur_confirmation_is_consecutive();
+    test_low_texture_does_not_touch_reference();
+    test_low_confidence_breaks_blur_consecutiveness();
+    test_single_lighting_oscillation_preserves_reference();
+    test_post_move_lighting_is_observable();
+    test_initial_acquisition_policy();
+    test_environmental_abort_is_not_af_failure();
+    test_reference_qualification_criteria();
+    test_manual_provisional_probe_is_bounded();
 
     smoothaf_vlog_af_init(&af);
     CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
@@ -833,7 +1177,9 @@ int main(void)
 
     s = sample(1000, 120, 1, 1);
     smoothaf_monitor_accept(&m, &s, 110);
-    CHECK(m.have_reference && m.reference == 1000, "first sample initializes reference");
+    CHECK(m.have_reference && m.reference == 1000 &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL,
+          "first confident sample creates a provisional reference, not focus evidence");
     CHECK(m.metrics.valid == 1, "valid sample counted");
     CHECK(m.metrics.duration_last == 12 && m.metrics.duration_max == 12,
           "sample duration tracked");
@@ -845,17 +1191,25 @@ int main(void)
     s = sample(100, 120, 1, 1);
     smoothaf_monitor_accept(&m, &s, 600);
     smoothaf_monitor_accept(&m, &s, 1100);
+    CHECK(m.state != SMOOTHAF_MONITOR_POSSIBLE_BLUR &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL,
+          "a provisional reference never declares blur on its own");
+    smoothaf_monitor_qualify_reference(&m, 1000, 120,
+                                       SMOOTHAF_MONITOR_METRIC_SAD, 115);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
+          "only bounded AF evidence promotes the reference to VALID");
+    s = sample(100, 120, 1, 1);
     smoothaf_monitor_accept(&m, &s, 1600);
+    smoothaf_monitor_accept(&m, &s, 2100);
+    smoothaf_monitor_accept(&m, &s, 2600);
     CHECK(m.state == SMOOTHAF_MONITOR_POSSIBLE_BLUR,
-          "persistent loss enters possible blur");
+          "persistent loss enters possible blur after qualification");
     CHECK(m.reference == 1000, "blur does not lower reference");
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_DRY_RUN, 1, m.score);
     CHECK(smoothaf_vlog_af_should_probe(&af, m.state, SMOOTHAF_VLOG_AF_DRY_RUN),
           "episode arms from the monitor's real blur state");
 
     s = sample(1000, 120, 1, 1);
-    smoothaf_monitor_accept(&m, &s, 2100);
-    smoothaf_monitor_accept(&m, &s, 2600);
     smoothaf_monitor_accept(&m, &s, 3100);
     smoothaf_monitor_accept(&m, &s, 3600);
     smoothaf_monitor_accept(&m, &s, 4100);
@@ -871,35 +1225,44 @@ int main(void)
     s = sample(1000, 200, 1, 1);
     smoothaf_monitor_accept(&m, &s, 8100);
     CHECK(m.state == SMOOTHAF_MONITOR_UNCERTAIN &&
-          m.reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE,
-          "lighting change suspends decisions and marks the reference obsolete");
+          m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
+          m.lighting_count == 1,
+          "one lighting excursion pauses decisions without invalidating the reference");
     smoothaf_monitor_accept(&m, &s, 8200);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE &&
+          m.lighting_count == 2,
+          "a confirmed lighting change marks the reference obsolete");
     smoothaf_monitor_accept(&m, &s, 8300);
     CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE &&
-          !m.have_reference && !m.possible_blur,
+          !m.have_reference && !m.possible_blur && m.lighting_count == 0,
           "persistent environment change enters safe recalibration without declaring focus");
     s = sample(900, 200, 1, 1);
     smoothaf_monitor_accept(&m, &s, 8400);
     CHECK(m.have_reference && m.reference == 900 &&
-          m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
-          "next confident sample establishes a new reference conservatively");
+          m.reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL,
+          "a new scene starts provisional instead of declaring a focused reference");
+    smoothaf_monitor_qualify_reference(&m, 900, 200,
+                                       SMOOTHAF_MONITOR_METRIC_SAD, 8450);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
+          "AF evidence qualifies the recalibrated reference");
 
-    /* A separated excursion must not inherit the previous lighting count. */
+    /* A separated excursion must not inherit the previous lighting count and
+     * a single oscillation must not force another recalibration. */
     s = sample(1000, 120, 1, 1);
     smoothaf_monitor_accept(&m, &s, 8500);
-    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE &&
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
           m.lighting_count == 1,
           "a separated lighting excursion starts a fresh consecutive count");
     s = sample(900, 200, 1, 1);
     smoothaf_monitor_accept(&m, &s, 8600);
-    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE &&
-          !m.have_reference && m.lighting_count == 0,
-          "returning from an excursion invalidates the stale reference safely");
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
+          m.have_reference && m.lighting_count == 0,
+          "returning from an excursion preserves the reference without churn");
     s = sample(900, 200, 1, 1);
     smoothaf_monitor_accept(&m, &s, 8700);
     CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
           m.have_reference,
-          "recalibration accepts the next confident sample");
+          "the qualified reference remains usable after flicker");
 
     s = sample(-1, 0, 0, 0);
     smoothaf_monitor_accept(&m, &s, 8800);

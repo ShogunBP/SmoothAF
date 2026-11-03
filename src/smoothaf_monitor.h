@@ -29,11 +29,23 @@
 #define SMOOTHAF_MONITOR_BLUR_DEN       4
 #define SMOOTHAF_MONITOR_CONFIRM_SAMPLES 2
 #define SMOOTHAF_MONITOR_LIGHT_DELTA 32
+#define SMOOTHAF_MONITOR_LIGHT_EXIT_DELTA 24
 #define SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES 3
 
+/* A reference is not focus evidence just because the first confident sample
+ * arrived.  PROVISIONAL keeps a baseline for telemetry and one bounded AF
+ * acquisition, but it can never authorize blur detection by itself. */
 #define SMOOTHAF_MONITOR_REF_VALID       0
 #define SMOOTHAF_MONITOR_REF_OBSOLETE    1
 #define SMOOTHAF_MONITOR_REF_RECALIBRATE 2
+#define SMOOTHAF_MONITOR_REF_PROVISIONAL 3
+
+#define SMOOTHAF_MONITOR_REASON_INITIAL          1
+#define SMOOTHAF_MONITOR_REASON_METRIC           2
+#define SMOOTHAF_MONITOR_REASON_LIGHT            3
+#define SMOOTHAF_MONITOR_REASON_RECALIBRATE      4
+#define SMOOTHAF_MONITOR_REASON_AF_RESULT        5
+#define SMOOTHAF_MONITOR_REASON_PROVISIONAL_RECAL 6
 
 #define SMOOTHAF_VLOG_AF_OFF              0
 #define SMOOTHAF_VLOG_AF_DRY_RUN          1
@@ -101,6 +113,8 @@
 #define SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR       6
 #define SMOOTHAF_VLOG_AF_NEXT_BLOCK_COOLDOWN      7
 #define SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK  8
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_REFERENCE     9
+#define SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT 10
 
 static inline const char *smoothaf_vlog_af_next_block_name(int reason)
 {
@@ -114,6 +128,8 @@ static inline const char *smoothaf_vlog_af_next_block_name(int reason)
         case SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR: return "NO_CONFIRMED_BLUR";
         case SMOOTHAF_VLOG_AF_NEXT_BLOCK_COOLDOWN: return "COOLDOWN";
         case SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK: return "BLUR_RECHECK";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_REFERENCE: return "REFERENCE";
+        case SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT: return "ACQUIRE_LIMIT";
         default: return "NONE";
     }
 }
@@ -262,6 +278,32 @@ static inline const char *smoothaf_monitor_state_name(int state)
     }
 }
 
+static inline const char *smoothaf_monitor_reference_state_name(int state)
+{
+    switch (state)
+    {
+        case SMOOTHAF_MONITOR_REF_VALID:        return "VALID";
+        case SMOOTHAF_MONITOR_REF_OBSOLETE:     return "OBSOLETE";
+        case SMOOTHAF_MONITOR_REF_RECALIBRATE:  return "RECALIBRATE";
+        case SMOOTHAF_MONITOR_REF_PROVISIONAL:  return "PROVISIONAL";
+        default:                                return "RECALIBRATE";
+    }
+}
+
+static inline const char *smoothaf_monitor_reference_reason_name(int reason)
+{
+    switch (reason)
+    {
+        case SMOOTHAF_MONITOR_REASON_INITIAL:          return "INIT";
+        case SMOOTHAF_MONITOR_REASON_METRIC:           return "METRIC";
+        case SMOOTHAF_MONITOR_REASON_LIGHT:            return "LIGHT";
+        case SMOOTHAF_MONITOR_REASON_RECALIBRATE:      return "RECAL";
+        case SMOOTHAF_MONITOR_REASON_AF_RESULT:        return "AF";
+        case SMOOTHAF_MONITOR_REASON_PROVISIONAL_RECAL: return "RECAL_PROV";
+        default:                                       return "NONE";
+    }
+}
+
 /* Menu-facing task state is deliberately derived from the task lifecycle,
  * not from the last SET action.  Transitional and failed states must never
  * look like a running monitor. */
@@ -368,6 +410,9 @@ struct smoothaf_vlog_af
     int cooldown_next_episode;
     int command_started;
     int awaiting_result;
+    /* One bounded acquisition per provisional-reference epoch.  This is the
+     * explicit replacement for treating the first confident sample as focus. */
+    int acquisition_epoch;
     int dry_run_requests;
     int episode_result;
     int initial_score;
@@ -586,9 +631,41 @@ static inline int smoothaf_vlog_af_should_resume_continuous(
             (int32_t)(now - af->blur_recheck_until_ms) >= 0);
 }
 
-static inline int smoothaf_vlog_af_next_episode_block_reason(
-    const struct smoothaf_vlog_af *af, int monitor_state, int mode, int enabled,
-    uint32_t now)
+/* Initial acquisition is a separate, explicitly bounded authorization.  It is
+ * consumed once per provisional-reference epoch, so the same unfocused scene
+ * cannot generate an unlimited sequence of lens commands. */
+static inline int smoothaf_vlog_af_should_acquire_continuous(
+    const struct smoothaf_vlog_af *af, int reference_state, int reference_epoch,
+    int mode, int enabled, uint32_t now)
+{
+    if (mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS) return 0;
+    if (!enabled || !af->continuous_armed) return 0;
+    if (af->armed || af->safety_paused) return 0;
+    if (reference_state != SMOOTHAF_MONITOR_REF_PROVISIONAL) return 0;
+    if (af->acquisition_epoch == reference_epoch) return 0;
+    if (af->cooldown_next_episode &&
+        (int32_t)(now - af->cooldown_until_ms) < 0) return 0;
+    if (af->wait_for_blur_clear &&
+        (int32_t)(now - af->blur_recheck_until_ms) < 0) return 0;
+    return 1;
+}
+
+/* Manual ACTIVE/DRY RUN arming is itself the authorization for one bounded
+ * acquisition; the normal command budget still limits every physical move. */
+static inline int smoothaf_vlog_af_should_probe_reference(
+    const struct smoothaf_vlog_af *af, int monitor_state, int reference_state,
+    int mode)
+{
+    if (mode == SMOOTHAF_VLOG_AF_OFF || !af->armed ||
+        af->state != SMOOTHAF_VLOG_AF_WAITING)
+        return 0;
+    if (monitor_state == SMOOTHAF_MONITOR_POSSIBLE_BLUR) return 1;
+    return reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL;
+}
+
+static inline int smoothaf_vlog_af_next_episode_block_reason_for(
+    const struct smoothaf_vlog_af *af, int monitor_state, int reference_state,
+    int reference_epoch, int mode, int enabled, uint32_t now)
 {
     if (mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS)
         return SMOOTHAF_VLOG_AF_NEXT_BLOCK_MODE;
@@ -596,7 +673,14 @@ static inline int smoothaf_vlog_af_next_episode_block_reason(
     if (!af->continuous_armed) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_DISARMED;
     if (af->safety_paused) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_SAFETY_PAUSED;
     if (af->armed) return SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACTIVE;
-    if (monitor_state != SMOOTHAF_MONITOR_POSSIBLE_BLUR)
+    if (reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL)
+    {
+        if (af->acquisition_epoch == reference_epoch)
+            return SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_LIMIT;
+    }
+    else if (reference_state != SMOOTHAF_MONITOR_REF_VALID)
+        return SMOOTHAF_VLOG_AF_NEXT_BLOCK_REFERENCE;
+    else if (monitor_state != SMOOTHAF_MONITOR_POSSIBLE_BLUR)
         return SMOOTHAF_VLOG_AF_NEXT_BLOCK_MONITOR;
     if (af->cooldown_next_episode &&
         (int32_t)(now - af->cooldown_until_ms) < 0)
@@ -605,6 +689,14 @@ static inline int smoothaf_vlog_af_next_episode_block_reason(
         (int32_t)(now - af->blur_recheck_until_ms) < 0)
         return SMOOTHAF_VLOG_AF_NEXT_BLOCK_BLUR_RECHECK;
     return SMOOTHAF_VLOG_AF_NEXT_BLOCK_NONE;
+}
+
+static inline int smoothaf_vlog_af_next_episode_block_reason(
+    const struct smoothaf_vlog_af *af, int monitor_state, int mode, int enabled,
+    uint32_t now)
+{
+    return smoothaf_vlog_af_next_episode_block_reason_for(
+        af, monitor_state, SMOOTHAF_MONITOR_REF_VALID, 0, mode, enabled, now);
 }
 
 static inline void smoothaf_vlog_af_update_continuous_latch(
@@ -691,6 +783,7 @@ struct smoothaf_monitor
     int have_reference;
     int reference_state;
     int reference_reason;
+    int reference_epoch;
     int transition_pending;
     int previous_state;
     int transition_state;
@@ -744,6 +837,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->cooldown_next_episode = 0;
     af->command_started = 0;
     af->awaiting_result = 0;
+    af->acquisition_epoch = -1;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->initial_score = 0;
@@ -814,6 +908,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->cooldown_next_episode = 0;
     af->command_started = 0;
     af->awaiting_result = 0;
+    af->acquisition_epoch = -1;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->controller_initialized = 0;
@@ -883,6 +978,7 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     int failures = af->consecutive_failures;
     int safety_paused = af->safety_paused;
     int limit = af->episode_limit;
+    int acquisition_epoch = af->acquisition_epoch;
     uint32_t algorithm_limit = af->algorithm_command_limit;
     smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
                                  direction, baseline);
@@ -890,6 +986,7 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     af->episodes_completed = completed;
     af->consecutive_failures = failures;
     af->safety_paused = safety_paused;
+    af->acquisition_epoch = acquisition_epoch;
     af->auto_probe_enabled = auto_probe;
     af->algorithm_command_limit = algorithm_limit;
     af->episode_limit = limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT &&
@@ -1061,6 +1158,39 @@ static inline void smoothaf_vlog_af_pause_continuous(
     af->wait_for_blur_clear = 1;
     if (af->consecutive_failures >= SMOOTHAF_VLOG_AF_MAX_CONSECUTIVE_FAILURES)
         af->safety_paused = 1;
+}
+
+/* A lighting change during the post-move measurement is an environmental
+ * event, not evidence that the STM command failed.  Finish the episode without
+ * increasing AF Fail Streak or latching SAFETY_PAUSED. */
+static inline void smoothaf_vlog_af_abort_environmental(
+    struct smoothaf_vlog_af *af, uint32_t now)
+{
+    af->armed = 0;
+    af->awaiting_result = 0;
+    af->episode_result = SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN;
+    af->state = SMOOTHAF_VLOG_AF_COMPLETE;
+    af->cooldown_until_ms = now + SMOOTHAF_VLOG_AF_COOLDOWN_MS;
+    af->blur_recheck_until_ms = now + SMOOTHAF_VLOG_AF_BLUR_RECHECK_MS;
+    af->cooldown_next_episode = 1;
+    af->wait_for_blur_clear = 1;
+    if (af->episodes_completed != UINT32_MAX) af->episodes_completed++;
+    smoothaf_recovery_init(&af->recovery);
+}
+
+/* Only a completed search that actually established a best position (or a
+ * two-sided AUTO probe with no improvement) may promote a provisional
+ * reference.  A raw score increase is deliberately insufficient. */
+static inline int smoothaf_vlog_af_result_qualifies_reference(
+    int result, int auto_probe_done, int commands)
+{
+    if (result == SMOOTHAF_VLOG_AF_RESULT_CONVERGED ||
+        result == SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED)
+        return 1;
+    if (result == SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT &&
+        auto_probe_done && commands >= SMOOTHAF_AUTO_MAX_COMMANDS)
+        return 1;
+    return 0;
 }
 
 static inline uint32_t smoothaf_vlog_af_timeout_remaining(
@@ -1246,6 +1376,7 @@ static inline void smoothaf_monitor_init(struct smoothaf_monitor *m, int metric,
     m->have_reference = 0;
     m->reference_state = SMOOTHAF_MONITOR_REF_RECALIBRATE;
     m->reference_reason = 0;
+    m->reference_epoch = 0;
     m->transition_pending = 0;
     m->previous_state = SMOOTHAF_MONITOR_IDLE;
     m->transition_state = SMOOTHAF_MONITOR_IDLE;
@@ -1376,12 +1507,77 @@ static inline void smoothaf_monitor_schedule_after(struct smoothaf_monitor *m,
                              smoothaf_monitor_interval_ms(m->interval_index);
 }
 
+static inline int smoothaf_monitor_lighting_changed(
+    const struct smoothaf_monitor *m, int mean)
+{
+    int delta;
+    if (!m->have_reference) return 0;
+    delta = mean - m->reference_mean;
+    if (delta < 0) delta = -delta;
+    return delta >= SMOOTHAF_MONITOR_LIGHT_DELTA;
+}
+
+static inline void smoothaf_monitor_invalidate_reference(
+    struct smoothaf_monitor *m)
+{
+    m->reference_state = SMOOTHAF_MONITOR_REF_RECALIBRATE;
+    m->reference_reason = SMOOTHAF_MONITOR_REASON_RECALIBRATE;
+    m->have_reference = 0;
+    m->possible_blur = 0;
+    m->blur_bad_count = 0;
+    m->recovery_count = 0;
+    m->lighting_count = 0;
+}
+
+static inline void smoothaf_monitor_set_reference(
+    struct smoothaf_monitor *m, const struct smoothaf_monitor_sample *s,
+    int state, int reason, uint32_t now)
+{
+    m->metric = s->metric;
+    m->reference = s->score;
+    m->reference_mean = s->mean;
+    m->smoothed = s->score;
+    m->have_reference = 1;
+    m->reference_state = state;
+    m->reference_reason = reason;
+    m->blur_bad_count = 0;
+    m->recovery_count = 0;
+    m->lighting_count = 0;
+    m->possible_blur = 0;
+    if (state == SMOOTHAF_MONITOR_REF_PROVISIONAL &&
+        m->reference_epoch != INT32_MAX)
+        m->reference_epoch++;
+    smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_STABLE);
+    smoothaf_monitor_schedule_after(m, now);
+}
+
+/* A completed, bounded AF search is the explicit evidence that promotes a
+ * provisional baseline to a reference eligible for blur decisions. */
+static inline void smoothaf_monitor_qualify_reference(
+    struct smoothaf_monitor *m, int score, int mean, int metric, uint32_t now)
+{
+    m->metric = metric;
+    m->reference = score;
+    m->reference_mean = mean;
+    m->smoothed = score;
+    m->have_reference = 1;
+    m->reference_state = SMOOTHAF_MONITOR_REF_VALID;
+    m->reference_reason = SMOOTHAF_MONITOR_REASON_AF_RESULT;
+    m->blur_bad_count = 0;
+    m->recovery_count = 0;
+    m->lighting_count = 0;
+    m->possible_blur = 0;
+    smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_STABLE);
+    smoothaf_monitor_schedule_after(m, now);
+}
+
 static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
                                            const struct smoothaf_monitor_sample *s,
                                            uint32_t now)
 {
     int lighting;
     int low;
+    int transient_lighting = 0;
     smoothaf_monitor_record_duration(m, s->duration_ms);
     if (!s->valid)
     {
@@ -1401,6 +1597,11 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
         m->metrics.low_confidence++;
     if (low)
     {
+        /* An unconfident sample is not evidence in either direction.  It must
+         * not extend a blur or recovery run, otherwise low / uncertain / low
+         * would count as two genuinely consecutive samples. */
+        m->blur_bad_count = 0;
+        m->recovery_count = 0;
         smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_UNCERTAIN);
         smoothaf_monitor_schedule_after(m, now);
         return;
@@ -1408,36 +1609,72 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
 
     if (!m->have_reference || m->metric != s->metric)
     {
-        int had_reference = m->have_reference;
-        m->metric = s->metric;
-        m->reference = s->score;
-        m->reference_mean = s->mean;
-        m->smoothed = s->score;
-        m->have_reference = 1;
-        m->blur_bad_count = 0;
-        m->recovery_count = 0;
-        m->lighting_count = 0;
-        m->reference_state = SMOOTHAF_MONITOR_REF_VALID;
-        m->reference_reason = had_reference ? 2 : 1;
-        smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_STABLE);
-        smoothaf_monitor_schedule_after(m, now);
+        int reason = m->have_reference
+                   ? SMOOTHAF_MONITOR_REASON_METRIC
+                   : SMOOTHAF_MONITOR_REASON_INITIAL;
+        smoothaf_monitor_set_reference(m, s, SMOOTHAF_MONITOR_REF_PROVISIONAL,
+                                       reason, now);
         return;
     }
 
     lighting = s->mean - m->reference_mean;
     if (lighting < 0) lighting = -lighting;
+
+    if (m->reference_state == SMOOTHAF_MONITOR_REF_PROVISIONAL)
+    {
+        /* A provisional baseline is a placeholder, not focus evidence.  A
+         * sustained exposure change opens a new acquisition epoch; a single
+         * flicker sample does not. */
+        if (lighting >= SMOOTHAF_MONITOR_LIGHT_DELTA)
+        {
+            m->lighting_count++;
+            if (m->lighting_count >= SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES)
+            {
+                m->reference = s->score;
+                m->reference_mean = s->mean;
+                m->smoothed = s->score;
+                m->reference_reason = SMOOTHAF_MONITOR_REASON_LIGHT;
+                m->lighting_count = 0;
+                if (m->reference_epoch != INT32_MAX) m->reference_epoch++;
+            }
+            m->possible_blur = 0;
+            m->blur_bad_count = 0;
+            m->recovery_count = 0;
+            smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_UNCERTAIN);
+        }
+        else
+        {
+            m->smoothed = (m->smoothed * 3 + s->score) / 4;
+            m->lighting_count = 0;
+            m->possible_blur = 0;
+            m->blur_bad_count = 0;
+            m->recovery_count = 0;
+            smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_STABLE);
+        }
+        smoothaf_monitor_schedule_after(m, now);
+        return;
+    }
+
+    if (m->reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE)
+    {
+        smoothaf_monitor_set_reference(m, s, SMOOTHAF_MONITOR_REF_PROVISIONAL,
+                                       SMOOTHAF_MONITOR_REASON_PROVISIONAL_RECAL,
+                                       now);
+        return;
+    }
+
     if (lighting >= SMOOTHAF_MONITOR_LIGHT_DELTA)
     {
         m->lighting_count++;
-        m->reference_state = m->lighting_count >=
-                              SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES
-                            ? SMOOTHAF_MONITOR_REF_RECALIBRATE
-                            : SMOOTHAF_MONITOR_REF_OBSOLETE;
-        m->reference_reason = m->reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE
-                            ? 4 : 3;
-        if (m->reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE)
+        if (m->reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE ||
+            m->lighting_count >= SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES)
         {
-            m->have_reference = 0;
+            smoothaf_monitor_invalidate_reference(m);
+        }
+        else if (m->lighting_count >= SMOOTHAF_MONITOR_CONFIRM_SAMPLES)
+        {
+            m->reference_state = SMOOTHAF_MONITOR_REF_OBSOLETE;
+            m->reference_reason = SMOOTHAF_MONITOR_REASON_LIGHT;
             m->possible_blur = 0;
             m->blur_bad_count = 0;
             m->recovery_count = 0;
@@ -1447,24 +1684,39 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
         return;
     }
 
-    if (m->reference_state != SMOOTHAF_MONITOR_REF_VALID)
+    if (m->reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE)
     {
-        /* A normal sample ends a transient excursion, but never makes the
-         * stale reference eligible for blur detection.  Count only adjacent
-         * lighting excursions and force a fresh reference after recovery. */
-        if (m->reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE)
+        if (lighting > SMOOTHAF_MONITOR_LIGHT_EXIT_DELTA)
         {
-            m->lighting_count = 0;
-            m->reference_state = SMOOTHAF_MONITOR_REF_RECALIBRATE;
-            m->reference_reason = 4;
-            m->have_reference = 0;
-            m->possible_blur = 0;
-            m->blur_bad_count = 0;
-            m->recovery_count = 0;
+            m->lighting_count++;
+            if (m->lighting_count >= SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES)
+                smoothaf_monitor_invalidate_reference(m);
+            smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_UNCERTAIN);
+            smoothaf_monitor_schedule_after(m, now);
+            return;
         }
+        /* A short excursion that returns to the original exposure does not
+         * invalidate the reference or force a recalibration. */
+        m->reference_state = SMOOTHAF_MONITOR_REF_VALID;
+        m->lighting_count = 0;
+        m->possible_blur = 0;
+        m->blur_bad_count = 0;
+        m->recovery_count = 0;
+        transient_lighting = 1;
+    }
+    else if (lighting > SMOOTHAF_MONITOR_LIGHT_EXIT_DELTA)
+    {
+        m->lighting_count++;
+        if (m->lighting_count >= SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES)
+            smoothaf_monitor_invalidate_reference(m);
         smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_UNCERTAIN);
         smoothaf_monitor_schedule_after(m, now);
         return;
+    }
+    else
+    {
+        if (m->lighting_count) transient_lighting = 1;
+        m->lighting_count = 0;
     }
 
     m->smoothed = (m->smoothed * 3 + s->score) / 4;
@@ -1492,8 +1744,14 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
     }
     else
     {
+        /* The middle band breaks consecutiveness: low / middle / low must not
+         * accumulate two blur confirmations. */
         m->recovery_count = 0;
+        m->blur_bad_count = 0;
     }
+
+    if (transient_lighting && !m->possible_blur)
+        smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_STABLE);
 
     if (!m->possible_blur && m->state == SMOOTHAF_MONITOR_STABLE &&
         s->score >= m->reference)

@@ -97,7 +97,9 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_vlog_af_command_block_reason' in source
     assert 'smoothaf_vlog_af_commands_available' in source
     assert 'SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT' in source
-    assert 'smoothaf_vlog_af_should_probe(' in source
+    assert 'smoothaf_vlog_af_should_probe_reference(' in source
+    assert 'smoothaf_vlog_af_should_acquire_continuous(' in source
+    assert 'SMOOTHAF_MONITOR_REF_PROVISIONAL' in source
     assert 'smoothaf_vlog_af_advance_cooldown(' in source
     assert 'smoothaf_vlog_af_timeout_due(' in source
     assert 'smoothaf_vlog_af_should_cancel(' in source

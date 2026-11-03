@@ -59,6 +59,7 @@ typedef enum
     SMOOTHAF_EPISODE_EVENT_REVERSAL = 8,
     SMOOTHAF_EPISODE_EVENT_GATE = 9,
     SMOOTHAF_EPISODE_EVENT_COMPLETE = 10,
+    SMOOTHAF_EPISODE_EVENT_ACQUIRE = 11,
 } smoothaf_episode_event_type_t;
 
 typedef enum
@@ -354,6 +355,7 @@ static inline const char *smoothaf_episode_event_name(int type)
         case SMOOTHAF_EPISODE_EVENT_REVERSAL: return "REVERSAL";
         case SMOOTHAF_EPISODE_EVENT_GATE: return "GATE";
         case SMOOTHAF_EPISODE_EVENT_COMPLETE: return "COMPLETE";
+        case SMOOTHAF_EPISODE_EVENT_ACQUIRE: return "ACQUIRE";
         default: return "NONE";
     }
 }
