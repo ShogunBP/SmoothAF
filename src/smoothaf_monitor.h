@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "smoothaf_core.h"
 #include "smoothaf_algorithm.h"
+#include "smoothaf_direction.h"
 #include "smoothaf_recovery.h"
 
 #define SMOOTHAF_MONITOR_INTERVAL_1000 0
@@ -306,6 +307,17 @@ struct smoothaf_vlog_af
     int controller_action;
     int controller_pending;
     int controller_measure_only;
+    int auto_probe_done;
+    int auto_probe_result;
+    int auto_probe_commands;
+    int auto_probe_reversals;
+    int auto_probe_phase;
+    int auto_probe_first_direction;
+    int auto_probe_selected_direction;
+    int auto_probe_first_score;
+    int auto_probe_opposite_score;
+    int auto_probe_first_delta;
+    int auto_probe_opposite_delta;
     struct smoothaf_hc legacy_controller;
     struct smoothaf_adaptive_hc adaptive_controller;
     struct smoothaf_normal_af normal_controller;
@@ -360,6 +372,109 @@ static inline int smoothaf_vlog_af_should_probe(
     return mode != SMOOTHAF_VLOG_AF_OFF && af->armed &&
            af->state == SMOOTHAF_VLOG_AF_WAITING &&
            monitor_state == SMOOTHAF_MONITOR_POSSIBLE_BLUR;
+}
+
+static inline int smoothaf_vlog_af_auto_selected(
+    const struct smoothaf_vlog_af *af, int direction_setting)
+{
+    return af->algorithm >= SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
+           smoothaf_vlog_direction_is_auto(direction_setting);
+}
+
+static inline int smoothaf_vlog_af_auto_needs_move(
+    struct smoothaf_vlog_af *af, int direction_setting, int probe_step,
+    int *direction, int *step)
+{
+    if (!smoothaf_vlog_af_auto_selected(af, direction_setting) ||
+        af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_DONE ||
+        af->auto_probe_commands >= SMOOTHAF_AUTO_MAX_COMMANDS)
+        return 0;
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_IDLE)
+    {
+        af->auto_probe_phase = SMOOTHAF_VLOG_AUTO_FIRST_MOVE;
+        af->auto_probe_first_direction =
+            (af->generation & 1) ? 1 : -1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_FIRST_MOVE)
+    {
+        if (direction) *direction = af->auto_probe_first_direction;
+        if (step) *step = probe_step;
+        return 1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_FIRST_RETURN)
+    {
+        if (direction) *direction = -af->auto_probe_first_direction;
+        if (step) *step = probe_step;
+        return 1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_OPPOSITE_MOVE)
+    {
+        if (direction) *direction = -af->auto_probe_first_direction;
+        if (step) *step = probe_step;
+        return 1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_OPPOSITE_RETURN)
+    {
+        if (direction) *direction = af->auto_probe_first_direction;
+        if (step) *step = probe_step;
+        return 1;
+    }
+    return 0;
+}
+
+static inline void smoothaf_vlog_af_auto_commit_move(
+    struct smoothaf_vlog_af *af)
+{
+    if (af->auto_probe_commands != INT32_MAX)
+        af->auto_probe_commands++;
+}
+
+static inline int smoothaf_vlog_af_auto_on_score(
+    struct smoothaf_vlog_af *af, int score)
+{
+    int delta = score - af->initial_score;
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_FIRST_MOVE)
+    {
+        af->auto_probe_first_score = score;
+        af->auto_probe_first_delta = delta;
+        af->auto_probe_phase = SMOOTHAF_VLOG_AUTO_FIRST_RETURN;
+        return 1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_FIRST_RETURN)
+    {
+        af->auto_probe_phase = SMOOTHAF_VLOG_AUTO_OPPOSITE_MOVE;
+        return 1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_OPPOSITE_MOVE)
+    {
+        af->auto_probe_opposite_score = score;
+        af->auto_probe_opposite_delta = delta;
+        af->auto_probe_phase = SMOOTHAF_VLOG_AUTO_OPPOSITE_RETURN;
+        return 1;
+    }
+    if (af->auto_probe_phase == SMOOTHAF_VLOG_AUTO_OPPOSITE_RETURN)
+    {
+        int db = smoothaf_auto_deadband(af->initial_score);
+        if (af->auto_probe_first_delta <= db &&
+            af->auto_probe_opposite_delta <= db)
+            af->auto_probe_selected_direction = 0;
+        else
+            af->auto_probe_selected_direction =
+                af->auto_probe_opposite_delta > af->auto_probe_first_delta
+              ? -af->auto_probe_first_direction : af->auto_probe_first_direction;
+        af->direction = af->auto_probe_selected_direction
+                      ? af->auto_probe_selected_direction
+                      : af->auto_probe_first_direction;
+        af->auto_probe_result = af->auto_probe_selected_direction
+                              ? (af->auto_probe_selected_direction == af->auto_probe_first_direction
+                                 ? SMOOTHAF_AUTO_FIRST_IMPROVED
+                                 : SMOOTHAF_AUTO_OPPOSITE_IMPROVED)
+                              : SMOOTHAF_AUTO_UNCERTAIN;
+        af->auto_probe_phase = SMOOTHAF_VLOG_AUTO_DONE;
+        af->auto_probe_done = 1;
+        return 0;
+    }
+    return 0;
 }
 
 static inline int smoothaf_vlog_af_should_start_continuous(
@@ -507,6 +622,17 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->controller_action = 0;
     af->controller_pending = 0;
     af->controller_measure_only = 0;
+    af->auto_probe_done = 0;
+    af->auto_probe_result = SMOOTHAF_AUTO_INVALID;
+    af->auto_probe_commands = 0;
+    af->auto_probe_reversals = 0;
+    af->auto_probe_phase = 0;
+    af->auto_probe_first_direction = -1;
+    af->auto_probe_selected_direction = 0;
+    af->auto_probe_first_score = 0;
+    af->auto_probe_opposite_score = 0;
+    af->auto_probe_first_delta = 0;
+    af->auto_probe_opposite_delta = 0;
     af->state = SMOOTHAF_VLOG_AF_WAITING;
     af->armed = 0;
     af->direction = 1;
@@ -605,6 +731,17 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->controller_pending = 0;
     af->controller_step = 1;
     af->command_step = 1;
+    af->auto_probe_done = 0;
+    af->auto_probe_result = SMOOTHAF_AUTO_INVALID;
+    af->auto_probe_commands = 0;
+    af->auto_probe_reversals = 0;
+    af->auto_probe_phase = 0;
+    af->auto_probe_first_direction = -1;
+    af->auto_probe_selected_direction = 0;
+    af->auto_probe_first_score = 0;
+    af->auto_probe_opposite_score = 0;
+    af->auto_probe_first_delta = 0;
+    af->auto_probe_opposite_delta = 0;
     af->initial_score = baseline;
     af->previous_score = baseline;
     af->post_move_score = 0;

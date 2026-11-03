@@ -31,6 +31,32 @@ enum smoothaf_recovery_result
     SMOOTHAF_RECOVERY_CANCELLED,
 };
 
+static inline const char *smoothaf_recovery_phase_name(int phase)
+{
+    switch (phase)
+    {
+        case SMOOTHAF_RECOVERY_COARSE: return "COARSE";
+        case SMOOTHAF_RECOVERY_BRACKET: return "BRACKET";
+        case SMOOTHAF_RECOVERY_FINE: return "FINE";
+        case SMOOTHAF_RECOVERY_RETURN: return "RETURN";
+        case SMOOTHAF_RECOVERY_COMPLETE: return "COMPLETE";
+        case SMOOTHAF_RECOVERY_ABORTED: return "ABORTED";
+        default: return "IDLE";
+    }
+}
+
+static inline const char *smoothaf_recovery_result_name(int result)
+{
+    switch (result)
+    {
+        case SMOOTHAF_RECOVERY_BEST_RECOVERED: return "RECOVERED";
+        case SMOOTHAF_RECOVERY_BEST_NOT_RECOVERED: return "NOT_RECOVERED";
+        case SMOOTHAF_RECOVERY_LIMIT: return "LIMIT";
+        case SMOOTHAF_RECOVERY_CANCELLED: return "CANCELLED";
+        default: return "NONE";
+    }
+}
+
 struct smoothaf_recovery
 {
     int phase;

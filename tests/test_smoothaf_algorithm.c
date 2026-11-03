@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "../src/smoothaf_algorithm.h"
+#include "../src/smoothaf_direction.h"
 #include "../src/smoothaf_recovery.h"
 
 static int failures;
@@ -19,6 +20,27 @@ int main(void)
           "Focus Test must not advertise Current Vlog");
     CHECK(smoothaf_algorithm_focus_test_supported(SMOOTHAF_ALGORITHM_LEGACY_HC),
           "Focus Test must retain Legacy HC");
+    CHECK(smoothaf_vlog_direction_normalize(-1) == SMOOTHAF_VLOG_DIRECTION_AUTO &&
+          smoothaf_vlog_direction_normalize(3) == SMOOTHAF_VLOG_DIRECTION_AUTO,
+          "invalid Vlog directions must normalize to AUTO");
+    CHECK(smoothaf_vlog_direction_migrate(
+              SMOOTHAF_VLOG_DIRECTION_AUTO, 0, 0, 0) == SMOOTHAF_VLOG_DIRECTION_AUTO,
+          "new Vlog configurations default to AUTO");
+    CHECK(smoothaf_vlog_direction_migrate(
+              SMOOTHAF_VLOG_DIRECTION_AUTO, 0, 1, 1) == SMOOTHAF_VLOG_DIRECTION_B,
+          "explicit legacy B direction is migrated only when Vlog direction is untouched");
+    CHECK(smoothaf_vlog_direction_migrate(
+              SMOOTHAF_VLOG_DIRECTION_AUTO, 1, 1, 1) == SMOOTHAF_VLOG_DIRECTION_AUTO,
+          "explicit AUTO is not overwritten by legacy direction");
+    CHECK(smoothaf_vlog_direction_migrate(
+              -1, 0, 1, 1) == SMOOTHAF_VLOG_DIRECTION_B,
+          "untouched migration sentinel accepts the legacy B direction");
+    CHECK(smoothaf_vlog_direction_migrate(
+              SMOOTHAF_VLOG_DIRECTION_AUTO, 1, 1, 1) == SMOOTHAF_VLOG_DIRECTION_AUTO,
+          "explicit saved AUTO remains authoritative during migration");
+    CHECK(smoothaf_vlog_direction_forced_sign(SMOOTHAF_VLOG_DIRECTION_A) == -1 &&
+          smoothaf_vlog_direction_forced_sign(SMOOTHAF_VLOG_DIRECTION_B) == 1,
+          "A and B retain independently forced initial signs");
 
     CHECK(!smoothaf_recovery_should_start(1, 0, 1, 0) &&
           smoothaf_recovery_should_start(1, 0, 1, 1),

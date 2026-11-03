@@ -26,7 +26,14 @@ def test_menu_shape_and_lifecycle():
     assert '"Vlog Metric"' in vlog
     assert '"Vlog Step"' in vlog
     assert '"AF Algorithm"' in vlog
+    assert '"AF Direction"' in vlog
+    assert 'CHOICES("AUTO", "A", "B")' in vlog
+    assert '"Movie Active Exp"' in vlog
+    assert '"Movie Active Experimental"' not in vlog
+    assert 'static CONFIG_INT("smoothaf.movie_active_experimental"' in source
     assert '"Far Focus Recovery"' in vlog
+    assert '.priv = &smoothaf_far_focus_recovery' in vlog
+    assert 'MENU_SET_VALUE("%s", smoothaf_far_focus_recovery ? "ON" : "OFF")' in source
     assert vlog.index('"Start/Stop Monitoring"') < vlog.index('"Start New AF Episode"')
     assert vlog.index('"Start New AF Episode"') < vlog.index('"Vlog AF Mode"')
     assert vlog.index('"Sample Int"') < vlog.index('"Session State"')
@@ -113,8 +120,19 @@ def test_menu_shape_and_lifecycle():
     assert 'SMOOTHAF_LOG_ABORT' in source
     assert source.count('MENU_SET_HELP(') >= 8
     assert 'smoothaf_af_direction_value()' in source
+    assert 'smoothaf_vlog_direction_for_episode()' in source
     assert 'smoothaf_direction_value()' in source
-    assert source.count('smoothaf_af_direction_value()') >= 4
+    assert source.count('smoothaf_af_direction_value()') >= 1
+    assert 'smoothaf_vlog_direction_migrate(' in source
+    assert 'SMOOTHAF_VLOG_DIRECTION_AUTO' in source
+    assert 'static CONFIG_INT("smoothaf.vlog_direction", smoothaf_vlog_direction, -1);' in source
+    assert 'smoothaf_vlog_af_auto_needs_move(' in source
+    assert 'smoothaf_vlog_af_auto_on_score(' in source
+    assert 'config_var_was_changed(&smoothaf_step)' in source
+    assert 'smoothaf_test_step = config_var_was_changed(&smoothaf_step)' in source
+    assert 'smoothaf_vlog_step = config_var_was_changed(&smoothaf_step)' in source
+    assert 'MENU_SET_VALUE("%s", smoothaf_far_focus_recovery ? "ON" : "OFF")' in source
+    assert 'MENU_SET_HELP("phase=%s result=%s cmd=%d best=%d pos=%d moves=%d"' in source
     assert 'smoothaf_measure_with_metric(smoothaf_test_metric' in source
     assert 'smoothaf_measure_with_metric(smoothaf_vlog_metric' in source
     assert 'smoothaf_move_with_step(dir, smoothaf_test_step)' in source

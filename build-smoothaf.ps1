@@ -88,6 +88,7 @@ try {
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf.c') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_core.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_algorithm.h') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_direction.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_recovery.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_build_id.h') $integration -Force
     $commit = (& git -C $ProjectRoot rev-parse --short=12 HEAD).Trim()

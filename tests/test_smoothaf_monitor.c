@@ -63,6 +63,74 @@ static void issue_mock_command(struct smoothaf_vlog_af *af,
     af->current_position += af->direction;
 }
 
+static void test_vlog_auto_probe_and_forced_directions(void)
+{
+    struct smoothaf_vlog_af af;
+    int direction;
+    int step;
+    int algorithm;
+
+    for (algorithm = SMOOTHAF_ALGORITHM_CURRENT_VLOG;
+         algorithm <= SMOOTHAF_ALGORITHM_NORMAL_AF; algorithm++)
+    {
+        smoothaf_vlog_af_init(&af);
+        af.algorithm = algorithm;
+        smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE,
+                                     -1, 1000);
+        CHECK(smoothaf_vlog_af_auto_needs_move(
+                  &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step) &&
+              step == 3,
+              "Vlog AUTO is available for every Vlog algorithm");
+    }
+
+    smoothaf_vlog_af_init(&af);
+    af.algorithm = SMOOTHAF_ALGORITHM_CURRENT_VLOG;
+    af.generation = -1; /* deterministic A-side first probe for this seam test */
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE,
+                                 -1, 1000);
+    CHECK(smoothaf_vlog_af_auto_needs_move(
+              &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step) &&
+          direction == -1 && step == 3,
+          "Vlog AUTO probes the first side with the configured step");
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1100);
+    CHECK(smoothaf_vlog_af_auto_needs_move(
+              &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step) &&
+          direction == 1,
+          "Vlog AUTO returns to origin after the first probe");
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+    CHECK(smoothaf_vlog_af_auto_needs_move(
+              &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step) &&
+          direction == 1,
+          "Vlog AUTO probes the opposite side");
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1200);
+    CHECK(smoothaf_vlog_af_auto_needs_move(
+              &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step) &&
+          direction == -1,
+          "Vlog AUTO returns after the opposite probe");
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+    CHECK(af.auto_probe_done && af.direction == 1 &&
+          af.auto_probe_result == SMOOTHAF_AUTO_OPPOSITE_IMPROVED &&
+          !smoothaf_vlog_af_auto_needs_move(
+              &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step),
+          "Vlog AUTO selects the better side without a fixed direction");
+
+    smoothaf_vlog_af_init(&af);
+    af.algorithm = SMOOTHAF_ALGORITHM_NORMAL_AF;
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE,
+                                 -1, 1000);
+    CHECK(!smoothaf_vlog_af_auto_needs_move(
+              &af, SMOOTHAF_VLOG_DIRECTION_A, 3, &direction, &step),
+          "forced A bypasses Vlog AUTO probing");
+    af.direction = smoothaf_vlog_direction_forced_sign(
+        SMOOTHAF_VLOG_DIRECTION_A);
+    CHECK(af.direction == -1,
+          "forced A remains the initial Vlog direction");
+}
+
 static void test_direction_is_physical_and_independent(void)
 {
     struct smoothaf_vlog_af af;
@@ -567,6 +635,7 @@ int main(void)
     test_vlog_af_lifecycle();
     test_movie_recording_policy();
     test_continuous_active();
+    test_vlog_auto_probe_and_forced_directions();
     test_direction_is_physical_and_independent();
     test_monitor_session_preserves_mode();
 

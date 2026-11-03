@@ -19,6 +19,7 @@
 #include "smoothaf_core.h"
 #include "smoothaf_monitor.h"
 #include "smoothaf_algorithm.h"
+#include "smoothaf_direction.h"
 #include "smoothaf_recovery.h"
 #include "smoothaf_diagnostics.h"
 #include "smoothaf_build_id.h"
@@ -79,14 +80,17 @@
 static CONFIG_INT("smoothaf.metric", smoothaf_metric, SMOOTHAF_METRIC_SAD);
 static CONFIG_INT("smoothaf.test_metric", smoothaf_test_metric, SMOOTHAF_METRIC_SAD);
 static CONFIG_INT("smoothaf.vlog_metric", smoothaf_vlog_metric, SMOOTHAF_METRIC_SAD);
-static CONFIG_INT("smoothaf.step", smoothaf_step, 1);
-static CONFIG_INT("smoothaf.test_step", smoothaf_test_step, 1);
-static CONFIG_INT("smoothaf.vlog_step", smoothaf_vlog_step, 1);
+static CONFIG_INT("smoothaf.step", smoothaf_step, 3);
+static CONFIG_INT("smoothaf.test_step", smoothaf_test_step, 3);
+static CONFIG_INT("smoothaf.vlog_step", smoothaf_vlog_step, 3);
 /* Diagnostic Direction is reserved for explicit diagnostic movement.  Vlog AF
  * has its own persisted initial direction so changing the diagnostic control
  * cannot bias an already armed or newly automatic episode. */
 static CONFIG_INT("smoothaf.dir", smoothaf_direction_choice, 0);
 static CONFIG_INT("smoothaf.af_dir", smoothaf_af_direction_choice, 0);
+/* -1 distinguishes an untouched pre-migration key from an explicitly saved
+ * AUTO value, so legacy AF Direction cannot overwrite the latter. */
+static CONFIG_INT("smoothaf.vlog_direction", smoothaf_vlog_direction, -1);
 static CONFIG_INT("smoothaf.test_direction", smoothaf_test_direction,
                   SMOOTHAF_TEST_DIRECTION_AUTO);
 static CONFIG_INT("smoothaf.hc_mode", smoothaf_hc_mode, SMOOTHAF_HC_LEGACY);
@@ -99,6 +103,7 @@ static CONFIG_INT("smoothaf.monitor_interval", smoothaf_monitor_interval,
                  SMOOTHAF_MONITOR_INTERVAL_DEFAULT);
 static CONFIG_INT("smoothaf.vlog_episode_limit", smoothaf_vlog_episode_limit,
                  SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT);
+static CONFIG_INT("smoothaf.far_focus_recovery", smoothaf_far_focus_recovery, 0);
 
 /* Deliberately volatile and default-off: authorization never arms an episode. */
 static CONFIG_INT("smoothaf.movie_active_experimental",
@@ -490,6 +495,28 @@ static int smoothaf_af_direction_value(void)
     return smoothaf_af_direction_choice ? 1 : -1;
 }
 
+static int smoothaf_vlog_direction_value(void)
+{
+    return smoothaf_vlog_direction_forced_sign(smoothaf_vlog_direction);
+}
+
+static int smoothaf_vlog_direction_auto_selected(void)
+{
+    return smoothaf_vlog_direction_is_auto(smoothaf_vlog_direction);
+}
+
+static int smoothaf_vlog_direction_for_episode(void)
+{
+    return smoothaf_vlog_direction_auto_selected()
+         ? -1 : smoothaf_vlog_direction_value();
+}
+
+static int smoothaf_vlog_probe_step(void)
+{
+    return smoothaf_vlog_step >= 1 && smoothaf_vlog_step <= 3
+         ? smoothaf_vlog_step : 3;
+}
+
 static int smoothaf_test_direction_value(void)
 {
     return smoothaf_test_direction == SMOOTHAF_TEST_DIRECTION_B ? 1 : -1;
@@ -660,7 +687,7 @@ static void smoothaf_movie_start_automatic(void)
     smoothaf_cancel = 0;
     smoothaf_vlog_af_reset_session(&smoothaf_vlog_af, smoothaf_vlog_af_mode);
     smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
-                                    smoothaf_af_direction_value(),
+                                    smoothaf_vlog_direction_for_episode(),
                                     smoothaf_monitor.score);
     smoothaf_episode_begin(SMOOTHAF_EPISODE_EVENT_ARM);
     smoothaf_movie_automatic_session = 1;
@@ -1004,6 +1031,12 @@ static void smoothaf_vlog_controller_init(void)
 static int smoothaf_vlog_controller_next(int *direction, int *step)
 {
     int algorithm = smoothaf_vlog_af.algorithm;
+    if (!smoothaf_vlog_af.auto_probe_done &&
+        smoothaf_vlog_af_auto_needs_move(&smoothaf_vlog_af,
+                                         smoothaf_vlog_direction,
+                                         smoothaf_vlog_probe_step(),
+                                         direction, step))
+        return 1;
     smoothaf_vlog_controller_init();
     if (algorithm == SMOOTHAF_ALGORITHM_LEGACY_HC)
     {
@@ -1242,6 +1275,7 @@ static void smoothaf_monitor_task(void)
     int recovery_direction;
     int recovery_step;
     int recovery_active;
+    int auto_probe_measurement;
     struct smoothaf_monitor_sample sample;
     while (smoothaf_monitor.enabled && !smoothaf_cancel &&
            !smoothaf_monitor_deinit && !smoothaf_task_stop_requested)
@@ -1344,6 +1378,10 @@ static void smoothaf_monitor_task(void)
                                   smoothaf_monitor.state, valid ? 0 : 1,
                                   valid ? 0 : SMOOTHAF_BLOCK_FRAME);
         result_processed = 0;
+        auto_probe_measurement = smoothaf_vlog_af.armed &&
+                                 !smoothaf_vlog_af.auto_probe_done &&
+                                 smoothaf_vlog_direction_auto_selected() &&
+                                 smoothaf_vlog_af_result_due(&smoothaf_vlog_af, completed);
         if (smoothaf_vlog_af.armed && smoothaf_vlog_af_result_due(&smoothaf_vlog_af, completed))
         {
             if (smoothaf_vlog_af_timeout_due(&smoothaf_vlog_af, completed))
@@ -1363,8 +1401,20 @@ static void smoothaf_monitor_task(void)
             else
             {
                 smoothaf_af_confidence = sample.confident;
-                if (smoothaf_vlog_af.algorithm == SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
-                    !recovery_active && !smoothaf_vlog_af.controller_measure_only)
+                if (auto_probe_measurement)
+                {
+                    smoothaf_vlog_adapter_prepare_score(sample.score, completed);
+                    smoothaf_vlog_af_auto_commit_move(&smoothaf_vlog_af);
+                    adapter_continue = smoothaf_vlog_af_auto_on_score(
+                        &smoothaf_vlog_af, sample.score);
+                    (void)adapter_continue;
+                    smoothaf_vlog_af.episode_result =
+                        SMOOTHAF_VLOG_AF_RESULT_IMPROVED;
+                    smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_PROBING;
+                    adapter_continue = 1;
+                }
+                else if (smoothaf_vlog_af.algorithm == SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
+                         !recovery_active && !smoothaf_vlog_af.controller_measure_only)
                     smoothaf_vlog_af_record_result(&smoothaf_vlog_af, sample.score, completed);
                 else
                     smoothaf_vlog_adapter_prepare_score(sample.score, completed);
@@ -1407,7 +1457,7 @@ static void smoothaf_monitor_task(void)
                         }
                     }
                 }
-                if (smoothaf_vlog_af.controller_measure_only)
+                if (!auto_probe_measurement && smoothaf_vlog_af.controller_measure_only)
                 {
                     smoothaf_vlog_af.controller_measure_only = 0;
                     adapter_continue = smoothaf_vlog_controller_on_score(sample.score);
@@ -1432,7 +1482,8 @@ static void smoothaf_monitor_task(void)
                           : SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
                     }
                 }
-                else if (smoothaf_vlog_af.algorithm != SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
+                else if (!auto_probe_measurement &&
+                         smoothaf_vlog_af.algorithm != SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
                          !recovery_active)
                 {
                     adapter_continue = smoothaf_vlog_controller_on_score(sample.score);
@@ -1508,7 +1559,7 @@ static void smoothaf_monitor_task(void)
         {
                 smoothaf_vlog_algorithm_start_episode();
             smoothaf_vlog_af_start_continuous_episode(
-                &smoothaf_vlog_af, smoothaf_af_direction_value(),
+                &smoothaf_vlog_af, smoothaf_vlog_direction_for_episode(),
                 sample.score);
             smoothaf_vlog_af.image_ms = 0;
             smoothaf_vlog_af.wait_ms = 0;
@@ -1533,6 +1584,9 @@ static void smoothaf_monitor_task(void)
             smoothaf_vlog_af.algorithm == SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
             smoothaf_vlog_af.recovery.phase == SMOOTHAF_RECOVERY_IDLE &&
             sample.valid && sample.confident &&
+            (!smoothaf_vlog_direction_auto_selected() ||
+             smoothaf_vlog_af.auto_probe_done) &&
+            smoothaf_far_focus_recovery &&
             smoothaf_recovery_should_start(smoothaf_enabled, sample.score,
                                            smoothaf_movie_recording.active,
                                            smoothaf_movie_active_experimental))
@@ -2284,12 +2338,14 @@ static MENU_UPDATE_FUNC(smoothaf_vlog_algorithm_update)
 
 static MENU_UPDATE_FUNC(smoothaf_vlog_recovery_update)
 {
-    MENU_SET_VALUE("%s cmd=%d best=%d pos=%d",
-                   smoothaf_vlog_af.recovery.phase == SMOOTHAF_RECOVERY_IDLE
-                   ? "OFF" : "ACTIVE",
-                   smoothaf_vlog_af.recovery.commands,
-                   smoothaf_vlog_af.recovery.best_score,
-                   smoothaf_vlog_af.recovery.best_position);
+    MENU_SET_VALUE("%s", smoothaf_far_focus_recovery ? "ON" : "OFF");
+    MENU_SET_HELP("phase=%s result=%s cmd=%d best=%d pos=%d moves=%d",
+                  smoothaf_recovery_phase_name(smoothaf_vlog_af.recovery.phase),
+                  smoothaf_recovery_result_name(smoothaf_vlog_af.recovery.result),
+                  smoothaf_vlog_af.recovery.commands,
+                  smoothaf_vlog_af.recovery.best_score,
+                  smoothaf_vlog_af.recovery.position,
+                  smoothaf_vlog_af.recovery.commands);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_vlog_af_state_update)
@@ -2438,14 +2494,14 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
     if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS)
     {
         smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
-                                        smoothaf_af_direction_value(),
+                                        smoothaf_vlog_direction_for_episode(),
                                         smoothaf_monitor.score);
         smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af,
                                            smoothaf_vlog_episode_limit);
     }
     else
         smoothaf_vlog_af_new_episode(&smoothaf_vlog_af, smoothaf_vlog_af_mode,
-                                     smoothaf_af_direction_value(),
+                                     smoothaf_vlog_direction_for_episode(),
                                      smoothaf_monitor.score);
     smoothaf_episode_begin(SMOOTHAF_EPISODE_EVENT_ARM);
     smoothaf_af_commands_episode = 0;
@@ -2891,20 +2947,22 @@ static struct menu_entry smoothaf_menu[] =
           .choices = CHOICES("Current Vlog", "Legacy HC", "Adaptive HC", "Normal AF"),
           .update = smoothaf_vlog_algorithm_update,
           .help = "Selects the real Vlog episode adapter; changes apply at a safe episode boundary." },
-        { .name = "AF Direction", .priv = &smoothaf_af_direction_choice,
-          .min = 0, .max = 1, .choices = CHOICES("Direction A", "Direction B"),
-          .help = "Automatic Vlog AF initial direction; independent of Diagnostic Direction." },
-        { .name = "Movie Active Experimental", .priv = &smoothaf_movie_active_experimental,
+        { .name = "AF Direction", .priv = &smoothaf_vlog_direction,
+          .min = SMOOTHAF_VLOG_DIRECTION_AUTO, .max = SMOOTHAF_VLOG_DIRECTION_B,
+          .choices = CHOICES("AUTO", "A", "B"),
+          .help = "AUTO probes both sides once; A/B force the initial direction. Focus Test is independent." },
+        { .name = "Movie Active Exp", .priv = &smoothaf_movie_active_experimental,
           .max = 1,
           .help = "Authorize physical lens_focus only for normal H.264 Movie; default OFF." },
-        { .name = "Far Focus Recovery", .update = smoothaf_vlog_recovery_update,
-          .help = "Experimental bounded coarse/bracket/fine recovery; disabled in Movie by default." },
+        { .name = "Far Focus Recovery", .priv = &smoothaf_far_focus_recovery,
+          .max = 1, .update = smoothaf_vlog_recovery_update,
+          .help = "Experimental bounded coarse/bracket/fine recovery; physical movement is Movie-gated." },
         { .name = "Vlog Metric", .priv = &smoothaf_vlog_metric,
           .min = SMOOTHAF_METRIC_SAD, .max = SMOOTHAF_METRIC_LAPLACIAN,
           .choices = CHOICES("SAD", "Laplacian"),
           .help = "Sharpness metric used by Vlog monitoring and AF." },
         { .name = "Vlog Step", .priv = &smoothaf_vlog_step, .min = 1, .max = 3,
-          .unit = UNIT_DEC, .help = "Physical step used by Vlog AF." },
+          .unit = UNIT_DEC, .help = "Physical step used by Vlog AF; default is 3." },
         { .name = "Sample Int", .priv = &smoothaf_monitor_interval,
           .min = SMOOTHAF_MONITOR_INTERVAL_1000, .max = SMOOTHAF_MONITOR_INTERVAL_100,
           .choices = CHOICES("1000 ms", "500 ms", "250 ms", "100 ms"),
@@ -3042,7 +3100,7 @@ static struct menu_entry smoothaf_menu[] =
           .choices = CHOICES("SAD", "Laplacian"),
           .help = "Sharpness metric used only by Focus Test." },
         { .name = "Test Step", .priv = &smoothaf_test_step, .min = 1, .max = 3,
-          .unit = UNIT_DEC, .help = "Physical step used only by Focus Test." },
+          .unit = UNIT_DEC, .help = "Physical step used only by Focus Test; default is 3." },
         { .name = "Test Direction", .priv = &smoothaf_test_direction,
           .min = SMOOTHAF_TEST_DIRECTION_AUTO, .max = SMOOTHAF_TEST_DIRECTION_B,
           .choices = CHOICES("AUTO", "A", "B"),
@@ -3137,6 +3195,7 @@ static unsigned int smoothaf_init(void)
     smoothaf_vlog_algorithm_active = smoothaf_vlog_algorithm;
     smoothaf_vlog_algorithm_pending_flag = 0;
     smoothaf_vlog_algorithm_episode = smoothaf_vlog_algorithm;
+    smoothaf_far_focus_recovery = smoothaf_far_focus_recovery ? 1 : 0;
     smoothaf_movie_automatic_session = 0;
     smoothaf_movie_start_pending = 0;
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
@@ -3152,9 +3211,13 @@ static unsigned int smoothaf_init(void)
     if (smoothaf_vlog_metric < SMOOTHAF_METRIC_SAD ||
         smoothaf_vlog_metric > SMOOTHAF_METRIC_LAPLACIAN) smoothaf_vlog_metric = smoothaf_metric;
     smoothaf_metric = smoothaf_vlog_metric;
-    if (smoothaf_step < 1 || smoothaf_step > 3) smoothaf_step = 1;
-    if (smoothaf_test_step < 1 || smoothaf_test_step > 3) smoothaf_test_step = smoothaf_step;
-    if (smoothaf_vlog_step < 1 || smoothaf_vlog_step > 3) smoothaf_vlog_step = smoothaf_step;
+    if (smoothaf_step < 1 || smoothaf_step > 3) smoothaf_step = 3;
+    if (smoothaf_test_step < 1 || smoothaf_test_step > 3)
+        smoothaf_test_step = config_var_was_changed(&smoothaf_step)
+                           ? smoothaf_step : 3;
+    if (smoothaf_vlog_step < 1 || smoothaf_vlog_step > 3)
+        smoothaf_vlog_step = config_var_was_changed(&smoothaf_step)
+                          ? smoothaf_step : 3;
     if (smoothaf_test_direction < SMOOTHAF_TEST_DIRECTION_AUTO ||
         smoothaf_test_direction > SMOOTHAF_TEST_DIRECTION_B)
         smoothaf_test_direction = SMOOTHAF_TEST_DIRECTION_AUTO;
@@ -3162,6 +3225,11 @@ static unsigned int smoothaf_init(void)
         smoothaf_direction_choice = 0;
     if (smoothaf_af_direction_choice < 0 || smoothaf_af_direction_choice > 1)
         smoothaf_af_direction_choice = 0;
+    smoothaf_vlog_direction = smoothaf_vlog_direction_migrate(
+        smoothaf_vlog_direction,
+        config_var_was_changed(&smoothaf_vlog_direction),
+        smoothaf_af_direction_choice,
+        config_var_was_changed(&smoothaf_af_direction_choice));
     if (smoothaf_hc_mode < SMOOTHAF_HC_LEGACY ||
         smoothaf_hc_mode > SMOOTHAF_HC_ADAPTIVE) smoothaf_hc_mode = SMOOTHAF_HC_LEGACY;
     if (smoothaf_af_mode < SMOOTHAF_HC_LEGACY ||
@@ -3224,6 +3292,7 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_vlog_step)
     MODULE_CONFIG(smoothaf_direction_choice)
     MODULE_CONFIG(smoothaf_af_direction_choice)
+    MODULE_CONFIG(smoothaf_vlog_direction)
     MODULE_CONFIG(smoothaf_test_direction)
     MODULE_CONFIG(smoothaf_hc_mode)
     MODULE_CONFIG(smoothaf_af_mode)
@@ -3231,5 +3300,6 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_vlog_algorithm_pending)
     MODULE_CONFIG(smoothaf_monitor_interval)
     MODULE_CONFIG(smoothaf_vlog_episode_limit)
+    MODULE_CONFIG(smoothaf_far_focus_recovery)
     MODULE_CONFIG(smoothaf_movie_active_experimental)
 MODULE_CONFIGS_END()
