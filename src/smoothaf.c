@@ -689,6 +689,8 @@ static void smoothaf_movie_start_automatic(void)
     smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
                                     smoothaf_vlog_direction_for_episode(),
                                     smoothaf_monitor.score);
+    smoothaf_vlog_af_set_auto_probe(&smoothaf_vlog_af,
+                                    smoothaf_vlog_direction_auto_selected());
     smoothaf_episode_begin(SMOOTHAF_EPISODE_EVENT_ARM);
     smoothaf_movie_automatic_session = 1;
     smoothaf_movie_start_pending = 0;
@@ -2212,9 +2214,14 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
 
 static const char *smoothaf_monitor_task_state_name(void)
 {
-    if (smoothaf_task_running)
-        return smoothaf_task_stop_requested ? "STOPPING" : "RUNNING";
-    return smoothaf_task_exited ? "EXITED" : "STOPPED";
+    return smoothaf_monitor_task_state_name_for(
+        smoothaf_task_running, smoothaf_task_stop_requested,
+        smoothaf_task_exited, smoothaf_monitor.state == SMOOTHAF_MONITOR_ERROR);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_monitor_toggle_update)
+{
+    MENU_SET_VALUE("%s", smoothaf_monitor_task_state_name());
 }
 
 static MENU_UPDATE_FUNC(smoothaf_monitor_task_state_update)
@@ -2274,7 +2281,14 @@ static MENU_UPDATE_FUNC(smoothaf_monitor_samples_update)
 static MENU_UPDATE_FUNC(smoothaf_monitor_smoothed_update)
 { MENU_SET_VALUE("%d", smoothaf_monitor.smoothed); }
 static MENU_UPDATE_FUNC(smoothaf_monitor_reference_update)
-{ MENU_SET_VALUE("%d", smoothaf_monitor.reference); }
+{
+    MENU_SET_VALUE("%d", smoothaf_monitor.reference);
+    MENU_SET_HELP("state=%s reason=%d", smoothaf_monitor.reference_state ==
+                  SMOOTHAF_MONITOR_REF_VALID ? "VALID" :
+                  smoothaf_monitor.reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE
+                  ? "OBSOLETE" : "RECALIBRATE",
+                  smoothaf_monitor.reference_reason);
+}
 static MENU_UPDATE_FUNC(smoothaf_monitor_blur_update)
 { MENU_SET_VALUE("%s", smoothaf_monitor.possible_blur ? "YES" : "NO"); }
 
@@ -2390,6 +2404,12 @@ static MENU_UPDATE_FUNC(smoothaf_af_last_result_valid_update)
 static MENU_UPDATE_FUNC(smoothaf_af_commands_episode_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_af_commands_episode); }
 
+static MENU_UPDATE_FUNC(smoothaf_af_auto_probe_commands_update)
+{ MENU_SET_VALUE("%d", smoothaf_vlog_af.auto_probe_commands); }
+
+static MENU_UPDATE_FUNC(smoothaf_af_algorithm_commands_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_vlog_af.algorithm_commands); }
+
 static MENU_UPDATE_FUNC(smoothaf_af_initial_score_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_af_initial_score); }
 
@@ -2473,7 +2493,9 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
                                   smoothaf_vlog_af.armed))
         return;
     if (smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE &&
-        smoothaf_vlog_af.session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+        smoothaf_vlog_af.session_commands >=
+            smoothaf_vlog_af_session_command_limit_for(
+                &smoothaf_vlog_af, smoothaf_vlog_direction_auto_selected()))
     {
         smoothaf_af_command_block = SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT;
         smoothaf_af_episode_reason = SMOOTHAF_VLOG_AF_RESULT_BLOCKED;
@@ -2496,13 +2518,21 @@ static MENU_SELECT_FUNC(smoothaf_vlog_af_episode_select)
         smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
                                         smoothaf_vlog_direction_for_episode(),
                                         smoothaf_monitor.score);
+        smoothaf_vlog_af_set_auto_probe(&smoothaf_vlog_af,
+                                        smoothaf_vlog_direction_auto_selected());
         smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af,
                                            smoothaf_vlog_episode_limit);
     }
     else
+    {
         smoothaf_vlog_af_new_episode(&smoothaf_vlog_af, smoothaf_vlog_af_mode,
                                      smoothaf_vlog_direction_for_episode(),
                                      smoothaf_monitor.score);
+        smoothaf_vlog_af_set_auto_probe(&smoothaf_vlog_af,
+                                        smoothaf_vlog_direction_auto_selected());
+        smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af,
+                                           smoothaf_vlog_episode_limit);
+    }
     smoothaf_episode_begin(SMOOTHAF_EPISODE_EVENT_ARM);
     smoothaf_af_commands_episode = 0;
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_ARMED;
@@ -2738,7 +2768,9 @@ static const char *smoothaf_algorithm_name(void)
 
 static const char *smoothaf_algorithm_phase_name(void)
 {
-    if (!smoothaf_last_algorithm_valid) return "N/A";
+    if (!smoothaf_test_session && smoothaf_vlog_af.armed)
+        return smoothaf_vlog_af_state_name();
+    if (!smoothaf_test_session || !smoothaf_last_algorithm_valid) return "N/A";
     switch (smoothaf_last_phase)
     {
         case 1: return "ACQUISITION";
@@ -2779,23 +2811,55 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_phase_update)
 static MENU_UPDATE_FUNC(smoothaf_algorithm_direction_step_update)
 { MENU_SET_VALUE("%d / %d", (int)smoothaf_search_direction, smoothaf_test_step); }
 
+static MENU_UPDATE_FUNC(smoothaf_algorithm_best_score_update)
+{
+    if (smoothaf_test_session)
+        MENU_SET_VALUE("%d", (int)smoothaf_last_best);
+    else
+        MENU_SET_VALUE("%d", (int)smoothaf_vlog_af.best);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_algorithm_best_position_update)
+{
+    if (smoothaf_test_session)
+        MENU_SET_VALUE("%d", (int)smoothaf_last_algorithm_focus_pos);
+    else
+        MENU_SET_VALUE("%d", (int)smoothaf_vlog_af.best_position);
+}
+
 static MENU_UPDATE_FUNC(smoothaf_algorithm_search_evolution_update)
 {
     if (smoothaf_test_session)
-        MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
-                       (int)smoothaf_last_best, (int)smoothaf_last_algorithm_focus_pos);
-    else if (!smoothaf_last_algorithm_valid)
-        MENU_SET_VALUE("N/A");
+        MENU_SET_VALUE("cmd=%d", (int)smoothaf_last_commands);
     else
-        MENU_SET_VALUE("cmd=%d best=%d pos=%d", (int)smoothaf_last_commands,
-                       (int)smoothaf_last_best, (int)smoothaf_last_algorithm_focus_pos);
+        MENU_SET_VALUE("cmd=%d", (int)smoothaf_vlog_af.algorithm_commands);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_test_commands_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_last_commands);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_test_best_score_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_last_best);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_test_best_position_update)
+{
+    MENU_SET_VALUE("%d", (int)smoothaf_last_algorithm_focus_pos);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_movement_update)
 { MENU_SET_VALUE("%s", smoothaf_movement_state_name()); }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_reversals_update)
-{ MENU_SET_VALUE("%d", (int)smoothaf_last_reversals); }
+{
+    int reversals = smoothaf_test_session
+                   ? (int)smoothaf_last_reversals
+                   : (int)smoothaf_vlog_af.reversals;
+    MENU_SET_VALUE("%d", reversals);
+}
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_convergence_update)
 { MENU_SET_VALUE("%s", smoothaf_vlog_af_result_name(smoothaf_af_episode_result)); }
@@ -2808,8 +2872,9 @@ static MENU_UPDATE_FUNC(smoothaf_algorithm_evaluation_update)
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_last_result_update)
 {
-    MENU_SET_VALUE("%s", smoothaf_last_algorithm_valid
-                   ? smoothaf_status_name_for(smoothaf_last_algorithm_status) : "N/A");
+    MENU_SET_VALUE("%s", smoothaf_test_session && smoothaf_last_algorithm_valid
+                   ? smoothaf_status_name_for(smoothaf_last_algorithm_status)
+                   : smoothaf_vlog_af_result_name(smoothaf_vlog_af.episode_result));
 }
 
 static MENU_UPDATE_FUNC(smoothaf_algorithm_time_update)
@@ -2932,7 +2997,8 @@ static struct menu_entry smoothaf_menu[] =
       .help = "Enable lens movement for explicit focus actions." },
     { .name = "Vlog Monitor", .select = menu_open_submenu,
       .children = (struct menu_entry[]){
-        { .name = "Start/Stop Monitoring", .select = smoothaf_monitor_toggle_select,
+        { .name = "Monitoring", .select = smoothaf_monitor_toggle_select,
+          .update = smoothaf_monitor_toggle_update,
           .help = "Toggle periodic read-only monitoring; no automatic lens movement." },
         { .name = "Start New AF Episode", .select = smoothaf_vlog_af_episode_select,
           .help = "Manual LiveView arm; Movie H.264 REC START arms continuous mode automatically." },
@@ -3017,6 +3083,8 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Lens Calls", .update = smoothaf_af_lens_calls_update },
         { .name = "Move Success", .update = smoothaf_af_move_successes_update },
         { .name = "AF CMDs This EP", .update = smoothaf_af_commands_episode_update },
+        { .name = "AUTO Probe CMDs", .update = smoothaf_af_auto_probe_commands_update },
+        { .name = "Algorithm CMDs", .update = smoothaf_af_algorithm_commands_update },
         { .name = "AF CMD Limit", .priv = &smoothaf_vlog_episode_limit,
           .min = SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT, .max = SMOOTHAF_VLOG_AF_MAX_COMMANDS },
         { .name = "AF CMDs Left", .update = smoothaf_vlog_af_available_update },
@@ -3075,8 +3143,8 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Search Phase", .update = smoothaf_algorithm_phase_update },
         { .name = "Search Dir", .update = smoothaf_algorithm_direction_step_update },
         { .name = "Search Step", .update = smoothaf_algorithm_direction_step_update },
-        { .name = "Best Score", .update = smoothaf_algorithm_search_evolution_update },
-        { .name = "Best Pos", .update = smoothaf_algorithm_search_evolution_update },
+        { .name = "Best Score", .update = smoothaf_algorithm_best_score_update },
+        { .name = "Best Pos", .update = smoothaf_algorithm_best_position_update },
         { .name = "Search Evol", .update = smoothaf_algorithm_search_evolution_update },
         { .name = "Reversals", .update = smoothaf_algorithm_reversals_update },
         { .name = "Converge Why", .update = smoothaf_algorithm_convergence_update },
@@ -3113,8 +3181,9 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "AUTO Scores", .update = smoothaf_test_auto_scores_update },
         { .name = "AUTO Deltas", .update = smoothaf_test_auto_deltas_update },
         { .name = "Test Duration", .update = smoothaf_algorithm_time_update },
-        { .name = "Test CMDs", .update = smoothaf_algorithm_search_evolution_update },
-        { .name = "Best Score", .update = smoothaf_algorithm_search_evolution_update },
+        { .name = "Test CMDs", .update = smoothaf_test_commands_update },
+        { .name = "Best Score", .update = smoothaf_test_best_score_update },
+        { .name = "Best Pos", .update = smoothaf_test_best_position_update },
         MENU_EOL,
     } },
     { .name = "Status", .update = smoothaf_status_update },

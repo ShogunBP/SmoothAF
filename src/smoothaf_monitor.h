@@ -29,6 +29,11 @@
 #define SMOOTHAF_MONITOR_BLUR_DEN       4
 #define SMOOTHAF_MONITOR_CONFIRM_SAMPLES 2
 #define SMOOTHAF_MONITOR_LIGHT_DELTA 32
+#define SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES 3
+
+#define SMOOTHAF_MONITOR_REF_VALID       0
+#define SMOOTHAF_MONITOR_REF_OBSOLETE    1
+#define SMOOTHAF_MONITOR_REF_RECALIBRATE 2
 
 #define SMOOTHAF_VLOG_AF_OFF              0
 #define SMOOTHAF_VLOG_AF_DRY_RUN          1
@@ -42,7 +47,11 @@
 #define SMOOTHAF_VLOG_AF_COMPLETE  4
 #define SMOOTHAF_VLOG_AF_ERROR     5
 
+/* The menu limit applies to the selected algorithm.  AUTO is a bounded
+ * pre-search and has its own allowance; the sum remains capped absolutely. */
 #define SMOOTHAF_VLOG_AF_MAX_COMMANDS   4
+#define SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS \
+    (SMOOTHAF_VLOG_AF_MAX_COMMANDS + SMOOTHAF_AUTO_MAX_COMMANDS)
 #define SMOOTHAF_VLOG_AF_MAX_REVERSALS  1
 #define SMOOTHAF_VLOG_AF_COOLDOWN_MS    1000
 #define SMOOTHAF_VLOG_AF_TIMEOUT_MS     5000
@@ -253,6 +262,18 @@ static inline const char *smoothaf_monitor_state_name(int state)
     }
 }
 
+/* Menu-facing task state is deliberately derived from the task lifecycle,
+ * not from the last SET action.  Transitional and failed states must never
+ * look like a running monitor. */
+static inline const char *smoothaf_monitor_task_state_name_for(
+    int task_running, int stop_requested, int task_exited, int monitor_error)
+{
+    if (task_running) return stop_requested ? "STOPPING" : "RUNNING";
+    if (monitor_error) return "ERROR";
+    if (!task_exited) return "STARTING";
+    return "STOPPED";
+}
+
 static inline const char *smoothaf_vlog_af_result_name(int result)
 {
     switch (result)
@@ -318,6 +339,9 @@ struct smoothaf_vlog_af
     int auto_probe_opposite_score;
     int auto_probe_first_delta;
     int auto_probe_opposite_delta;
+    int auto_probe_enabled;
+    uint32_t algorithm_commands;
+    uint32_t algorithm_command_limit;
     struct smoothaf_hc legacy_controller;
     struct smoothaf_adaptive_hc adaptive_controller;
     struct smoothaf_normal_af normal_controller;
@@ -379,6 +403,65 @@ static inline int smoothaf_vlog_af_auto_selected(
 {
     return af->algorithm >= SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
            smoothaf_vlog_direction_is_auto(direction_setting);
+}
+
+static inline void smoothaf_vlog_af_set_auto_probe(
+    struct smoothaf_vlog_af *af, int enabled)
+{
+    af->auto_probe_enabled = enabled ? 1 : 0;
+}
+
+static inline uint32_t smoothaf_vlog_af_episode_command_limit(
+    const struct smoothaf_vlog_af *af)
+{
+    uint32_t algorithm = af->algorithm_command_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
+                       ? af->algorithm_command_limit
+                       : (af->episode_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
+                          ? (uint32_t)af->episode_limit
+                          : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT);
+    uint32_t probe = af->auto_probe_enabled ? SMOOTHAF_AUTO_MAX_COMMANDS : 0;
+    uint32_t total = algorithm + probe;
+    return total <= SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS
+         ? total : SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS;
+}
+
+static inline uint32_t smoothaf_vlog_af_algorithm_commands_used(
+    const struct smoothaf_vlog_af *af)
+{
+    return af->auto_probe_enabled ? af->algorithm_commands : af->commands;
+}
+
+static inline uint32_t smoothaf_vlog_af_session_command_limit_for(
+    const struct smoothaf_vlog_af *af, int auto_probe_enabled)
+{
+    (void)af;
+    return auto_probe_enabled ? SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS
+                              : SMOOTHAF_VLOG_AF_MAX_COMMANDS;
+}
+
+static inline uint32_t smoothaf_vlog_af_session_command_limit(
+    const struct smoothaf_vlog_af *af)
+{
+    return smoothaf_vlog_af_session_command_limit_for(af,
+                                                       af->auto_probe_enabled);
+}
+
+static inline uint32_t smoothaf_vlog_af_algorithm_command_limit(
+    const struct smoothaf_vlog_af *af)
+{
+    return af->algorithm_command_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
+         ? af->algorithm_command_limit
+         : (af->episode_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
+            ? (uint32_t)af->episode_limit
+            : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT);
+}
+
+static inline uint32_t smoothaf_vlog_af_algorithm_commands_available(
+    const struct smoothaf_vlog_af *af)
+{
+    uint32_t limit = smoothaf_vlog_af_algorithm_command_limit(af);
+    uint32_t used = smoothaf_vlog_af_algorithm_commands_used(af);
+    return used < limit ? limit - used : 0;
 }
 
 static inline int smoothaf_vlog_af_auto_needs_move(
@@ -606,6 +689,8 @@ struct smoothaf_monitor
     int recovery_count;
     int lighting_count;
     int have_reference;
+    int reference_state;
+    int reference_reason;
     int transition_pending;
     int previous_state;
     int transition_state;
@@ -633,6 +718,8 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->auto_probe_opposite_score = 0;
     af->auto_probe_first_delta = 0;
     af->auto_probe_opposite_delta = 0;
+    af->auto_probe_enabled = 0;
+    af->algorithm_commands = 0;
     af->state = SMOOTHAF_VLOG_AF_WAITING;
     af->armed = 0;
     af->direction = 1;
@@ -648,6 +735,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->blur_recheck_until_ms = 0;
     af->last_command_ms = 0;
     af->episode_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
+    af->algorithm_command_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->consecutive_failures = 0;
     af->safety_paused = 0;
     af->continuous_armed = 0;
@@ -718,6 +806,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->blur_recheck_until_ms = 0;
     af->last_command_ms = 0;
     af->episode_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
+    af->algorithm_command_limit = SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->consecutive_failures = 0;
     af->safety_paused = 0;
     af->episodes_completed = completed;
@@ -742,6 +831,8 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->auto_probe_opposite_score = 0;
     af->auto_probe_first_delta = 0;
     af->auto_probe_opposite_delta = 0;
+    af->auto_probe_enabled = 0;
+    af->algorithm_commands = 0;
     af->initial_score = baseline;
     af->previous_score = baseline;
     af->post_move_score = 0;
@@ -779,6 +870,7 @@ static inline void smoothaf_vlog_af_set_episode_limit(
     af->episode_limit = limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT &&
                         limit <= SMOOTHAF_VLOG_AF_MAX_COMMANDS
                       ? limit : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
+    af->algorithm_command_limit = (uint32_t)af->episode_limit;
 }
 
 static inline void smoothaf_vlog_af_start_continuous_episode(
@@ -787,16 +879,22 @@ static inline void smoothaf_vlog_af_start_continuous_episode(
     uint32_t completed = af->episodes_completed;
     int continuous = af->continuous_armed;
     int algorithm = af->algorithm;
+    int auto_probe = af->auto_probe_enabled;
     int failures = af->consecutive_failures;
     int safety_paused = af->safety_paused;
     int limit = af->episode_limit;
+    uint32_t algorithm_limit = af->algorithm_command_limit;
     smoothaf_vlog_af_new_episode(af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS,
                                  direction, baseline);
     af->continuous_armed = continuous;
     af->episodes_completed = completed;
     af->consecutive_failures = failures;
     af->safety_paused = safety_paused;
-    smoothaf_vlog_af_set_episode_limit(af, limit);
+    af->auto_probe_enabled = auto_probe;
+    af->algorithm_command_limit = algorithm_limit;
+    af->episode_limit = limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT &&
+                        limit <= SMOOTHAF_VLOG_AF_MAX_COMMANDS
+                      ? limit : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
     af->algorithm = smoothaf_algorithm_normalize(algorithm);
 }
 
@@ -856,6 +954,9 @@ static inline void smoothaf_vlog_af_record_command(
         af->command_started = 1;
     }
     af->last_command_ms = now;
+    if ((!af->auto_probe_enabled || af->auto_probe_done) &&
+        af->algorithm_commands != UINT32_MAX)
+        af->algorithm_commands++;
     af->awaiting_result = 1;
     if (af->wait_ms <= UINT32_MAX - SMOOTHAF_VLOG_AF_SETTLE_MS)
         af->wait_ms += SMOOTHAF_VLOG_AF_SETTLE_MS;
@@ -891,12 +992,13 @@ static inline int smoothaf_vlog_af_command_block_reason_for(
         return SMOOTHAF_VLOG_AF_BLOCK_DISABLED;
     if (af->awaiting_result) return SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT;
     if (af->state != SMOOTHAF_VLOG_AF_PROBING) return SMOOTHAF_VLOG_AF_BLOCK_STATE;
-    if (af->commands >= (uint32_t)(af->episode_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
-                                   ? af->episode_limit
-                                   : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT))
+    if (af->commands >= smoothaf_vlog_af_episode_command_limit(af))
+        return SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT;
+    if (af->auto_probe_done &&
+        smoothaf_vlog_af_algorithm_commands_available(af) == 0)
         return SMOOTHAF_VLOG_AF_BLOCK_EPISODE_LIMIT;
     if (!(af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed) &&
-        af->session_commands >= SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+        af->session_commands >= smoothaf_vlog_af_session_command_limit(af))
         return SMOOTHAF_VLOG_AF_BLOCK_SESSION_LIMIT;
     if ((af->cooldown_next_episode || af->cooldown_until_ms) &&
         (int32_t)(now - af->cooldown_until_ms) < 0)
@@ -920,16 +1022,20 @@ static inline int smoothaf_vlog_af_can_command(
 static inline uint32_t smoothaf_vlog_af_commands_available(
     const struct smoothaf_vlog_af *af)
 {
-    uint32_t limit = af->episode_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
-                   ? (uint32_t)af->episode_limit
-                   : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
-    uint32_t episode = limit - (af->commands < limit ? af->commands : limit);
+    uint32_t limit = smoothaf_vlog_af_algorithm_commands_available(af);
+    uint32_t probe_limit = smoothaf_vlog_af_episode_command_limit(af);
+    uint32_t episode = af->commands < probe_limit
+                     ? probe_limit - af->commands : 0;
+    if (af->auto_probe_enabled && af->auto_probe_done) episode = limit;
     uint32_t session;
     if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed)
         return episode;
-    session = SMOOTHAF_VLOG_AF_MAX_COMMANDS -
-              (af->session_commands < SMOOTHAF_VLOG_AF_MAX_COMMANDS
-               ? af->session_commands : SMOOTHAF_VLOG_AF_MAX_COMMANDS);
+    {
+        uint32_t session_limit = smoothaf_vlog_af_session_command_limit(af);
+        session = session_limit -
+                  (af->session_commands < session_limit
+                   ? af->session_commands : session_limit);
+    }
     return episode < session ? episode : session;
 }
 
@@ -1008,8 +1114,7 @@ static inline int smoothaf_vlog_af_record_result(
 {
     int delta = score - af->previous_score;
     int deadband = smoothaf_vlog_af_deadband(af->best);
-    int limit = af->episode_limit >= SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT
-              ? af->episode_limit : SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT;
+    int limit = (int)smoothaf_vlog_af_algorithm_command_limit(af);
     af->post_move_score = score;
     af->last_result_ms = now;
     af->score_delta = delta;
@@ -1031,14 +1136,14 @@ static inline int smoothaf_vlog_af_record_result(
             /* Improvement is not convergence.  Keep the continuous consent
              * alive, but finish this bounded episode and wait for fresh blur
              * evidence before starting another one. */
-            if (af->commands >= (uint32_t)limit)
+            if (smoothaf_vlog_af_algorithm_commands_used(af) >= (uint32_t)limit)
                 af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
             else
                 af->episode_result = SMOOTHAF_VLOG_AF_RESULT_CONVERGED;
             smoothaf_vlog_af_complete_continuous_episode(af, now);
             return 1;
         }
-        if (af->commands >= (uint32_t)limit)
+        if (smoothaf_vlog_af_algorithm_commands_used(af) >= (uint32_t)limit)
         {
             af->armed = 0;
             af->state = SMOOTHAF_VLOG_AF_COMPLETE;
@@ -1051,7 +1156,7 @@ static inline int smoothaf_vlog_af_record_result(
     if (delta < -deadband)
     {
         af->episode_result = SMOOTHAF_VLOG_AF_RESULT_WORSE;
-        if (af->commands >= (uint32_t)limit)
+        if (smoothaf_vlog_af_algorithm_commands_used(af) >= (uint32_t)limit)
         {
             af->episode_result = SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
             if (af->mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS && af->continuous_armed)
@@ -1139,6 +1244,8 @@ static inline void smoothaf_monitor_init(struct smoothaf_monitor *m, int metric,
     m->recovery_count = 0;
     m->lighting_count = 0;
     m->have_reference = 0;
+    m->reference_state = SMOOTHAF_MONITOR_REF_RECALIBRATE;
+    m->reference_reason = 0;
     m->transition_pending = 0;
     m->previous_state = SMOOTHAF_MONITOR_IDLE;
     m->transition_state = SMOOTHAF_MONITOR_IDLE;
@@ -1301,6 +1408,7 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
 
     if (!m->have_reference || m->metric != s->metric)
     {
+        int had_reference = m->have_reference;
         m->metric = s->metric;
         m->reference = s->score;
         m->reference_mean = s->mean;
@@ -1309,6 +1417,8 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
         m->blur_bad_count = 0;
         m->recovery_count = 0;
         m->lighting_count = 0;
+        m->reference_state = SMOOTHAF_MONITOR_REF_VALID;
+        m->reference_reason = had_reference ? 2 : 1;
         smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_STABLE);
         smoothaf_monitor_schedule_after(m, now);
         return;
@@ -1319,6 +1429,39 @@ static inline void smoothaf_monitor_accept(struct smoothaf_monitor *m,
     if (lighting >= SMOOTHAF_MONITOR_LIGHT_DELTA)
     {
         m->lighting_count++;
+        m->reference_state = m->lighting_count >=
+                              SMOOTHAF_MONITOR_REF_RECALIBRATE_SAMPLES
+                            ? SMOOTHAF_MONITOR_REF_RECALIBRATE
+                            : SMOOTHAF_MONITOR_REF_OBSOLETE;
+        m->reference_reason = m->reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE
+                            ? 4 : 3;
+        if (m->reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE)
+        {
+            m->have_reference = 0;
+            m->possible_blur = 0;
+            m->blur_bad_count = 0;
+            m->recovery_count = 0;
+        }
+        smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_UNCERTAIN);
+        smoothaf_monitor_schedule_after(m, now);
+        return;
+    }
+
+    if (m->reference_state != SMOOTHAF_MONITOR_REF_VALID)
+    {
+        /* A normal sample ends a transient excursion, but never makes the
+         * stale reference eligible for blur detection.  Count only adjacent
+         * lighting excursions and force a fresh reference after recovery. */
+        if (m->reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE)
+        {
+            m->lighting_count = 0;
+            m->reference_state = SMOOTHAF_MONITOR_REF_RECALIBRATE;
+            m->reference_reason = 4;
+            m->have_reference = 0;
+            m->possible_blur = 0;
+            m->blur_bad_count = 0;
+            m->recovery_count = 0;
+        }
         smoothaf_monitor_transition(m, SMOOTHAF_MONITOR_UNCERTAIN);
         smoothaf_monitor_schedule_after(m, now);
         return;

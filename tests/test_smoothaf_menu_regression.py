@@ -34,8 +34,12 @@ def test_menu_shape_and_lifecycle():
     assert '"Far Focus Recovery"' in vlog
     assert '.priv = &smoothaf_far_focus_recovery' in vlog
     assert 'MENU_SET_VALUE("%s", smoothaf_far_focus_recovery ? "ON" : "OFF")' in source
-    assert vlog.index('"Start/Stop Monitoring"') < vlog.index('"Start New AF Episode"')
+    assert '"Monitoring"' in vlog
+    assert '"Start/Stop Monitoring"' not in vlog
+    assert vlog.index('"Monitoring"') < vlog.index('"Start New AF Episode"')
     assert vlog.index('"Start New AF Episode"') < vlog.index('"Vlog AF Mode"')
+    assert 'smoothaf_monitor_toggle_update' in source
+    assert 'smoothaf_monitor_task_state_name_for(' in source
     assert vlog.index('"Sample Int"') < vlog.index('"Session State"')
     assert vlog.index('"Session State"') < vlog.index('"AF State"') < vlog.index('"Monitor Status"')
     assert '"STOP"' not in vlog
@@ -56,7 +60,8 @@ def test_menu_shape_and_lifecycle():
     assert '"Step Size"' not in focus_test
 
     for name in (
-        '"AF CMDs This EP"', '"Next EP Block"', '"AF CD Remain"',
+        '"AF CMDs This EP"', '"AUTO Probe CMDs"', '"Algorithm CMDs"',
+        '"Next EP Block"', '"AF CD Remain"',
         '"AF Session"', '"EP Result"', '"AF EPs Done"', '"AF Armed"',
         '"Blur Recheck"', '"AF Last Dir"', '"SAD Score"', '"Lap Score"',
         '"Actual Int"', '"REC State"', '"Algorithm"', '"Search Dir"',
@@ -128,6 +133,8 @@ def test_menu_shape_and_lifecycle():
     assert 'static CONFIG_INT("smoothaf.vlog_direction", smoothaf_vlog_direction, -1);' in source
     assert 'smoothaf_vlog_af_auto_needs_move(' in source
     assert 'smoothaf_vlog_af_auto_on_score(' in source
+    assert 'smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af' in source
+    assert 'smoothaf_vlog_af_session_command_limit_for(' in source
     assert 'config_var_was_changed(&smoothaf_step)' in source
     assert 'smoothaf_test_step = config_var_was_changed(&smoothaf_step)' in source
     assert 'smoothaf_vlog_step = config_var_was_changed(&smoothaf_step)' in source

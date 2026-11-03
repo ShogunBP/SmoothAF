@@ -5,6 +5,20 @@
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
+static void test_monitor_task_state_tracks_lifecycle(void)
+{
+    CHECK(strcmp(smoothaf_monitor_task_state_name_for(0, 0, 1, 0), "STOPPED") == 0,
+          "monitor menu reports STOPPED after task exit");
+    CHECK(strcmp(smoothaf_monitor_task_state_name_for(1, 0, 0, 0), "RUNNING") == 0,
+          "monitor menu reports RUNNING only while task is running");
+    CHECK(strcmp(smoothaf_monitor_task_state_name_for(1, 1, 0, 0), "STOPPING") == 0,
+          "monitor menu reports STOPPING during task shutdown");
+    CHECK(strcmp(smoothaf_monitor_task_state_name_for(0, 0, 0, 0), "STARTING") == 0,
+          "monitor menu reports STARTING during a task handoff");
+    CHECK(strcmp(smoothaf_monitor_task_state_name_for(0, 0, 0, 1), "ERROR") == 0,
+          "monitor menu reports ERROR when startup or task state fails");
+}
+
 static void test_monitor_session_preserves_mode(void)
 {
     struct smoothaf_vlog_af af;
@@ -129,6 +143,55 @@ static void test_vlog_auto_probe_and_forced_directions(void)
         SMOOTHAF_VLOG_DIRECTION_A);
     CHECK(af.direction == -1,
           "forced A remains the initial Vlog direction");
+}
+
+static void test_vlog_auto_probe_reserves_algorithm_budget(void)
+{
+    struct smoothaf_vlog_af af;
+    int direction = -1;
+    int step = 3;
+    int probe;
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, -1, 1000);
+    smoothaf_vlog_af_set_auto_probe(&af, 1);
+    smoothaf_vlog_af_set_episode_limit(&af, 1);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* Reproduce the monitor adapter: AUTO commands are real episode commands,
+     * but they must not consume the Legacy HC command allowance. */
+    for (probe = 0; probe < 4; probe++)
+    {
+        CHECK(smoothaf_vlog_af_auto_needs_move(
+                  &af, SMOOTHAF_VLOG_DIRECTION_AUTO, 3, &direction, &step),
+              "integrated AUTO probe requests each bounded move");
+        CHECK(smoothaf_vlog_af_can_command(&af, 1, (uint32_t)probe),
+              "AUTO probe move passes the physical safety gate");
+        smoothaf_vlog_af_record_command(&af, (uint32_t)probe);
+        af.current_position += direction * step;
+        smoothaf_vlog_af_auto_commit_move(&af);
+        af.awaiting_result = 0;
+        af.state = SMOOTHAF_VLOG_AF_PROBING;
+        smoothaf_vlog_af_auto_on_score(&af, 1000);
+    }
+
+    CHECK(af.auto_probe_done && af.commands == 4 &&
+          af.current_position == 0,
+          "AUTO probe returns to origin without losing its command trace");
+    CHECK(smoothaf_vlog_af_can_command(&af, 1, 4),
+          "Legacy HC remains eligible after the four-command AUTO probe");
+    CHECK(smoothaf_vlog_af_commands_available(&af) >= 1,
+          "algorithm budget remains after AUTO probing");
+    smoothaf_vlog_af_record_command(&af, 4);
+    af.current_position += direction * step;
+    {
+        int result = smoothaf_vlog_af_record_result(&af, 1100, 124);
+        CHECK(result, "first algorithm result is accepted after AUTO");
+        CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT,
+              "configured one-command algorithm limit is enforced after AUTO");
+        CHECK(af.algorithm_commands == 1,
+              "first algorithm command is counted separately from AUTO");
+    }
 }
 
 static void test_direction_is_physical_and_independent(void)
@@ -632,10 +695,12 @@ int main(void)
     int to;
     struct smoothaf_vlog_af af;
 
+    test_monitor_task_state_tracks_lifecycle();
     test_vlog_af_lifecycle();
     test_movie_recording_policy();
     test_continuous_active();
     test_vlog_auto_probe_and_forced_directions();
+    test_vlog_auto_probe_reserves_algorithm_budget();
     test_direction_is_physical_and_independent();
     test_monitor_session_preserves_mode();
 
@@ -805,13 +870,41 @@ int main(void)
 
     s = sample(1000, 200, 1, 1);
     smoothaf_monitor_accept(&m, &s, 8100);
-    CHECK(m.state == SMOOTHAF_MONITOR_UNCERTAIN,
-          "lighting change suspends decisions");
+    CHECK(m.state == SMOOTHAF_MONITOR_UNCERTAIN &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE,
+          "lighting change suspends decisions and marks the reference obsolete");
+    smoothaf_monitor_accept(&m, &s, 8200);
+    smoothaf_monitor_accept(&m, &s, 8300);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE &&
+          !m.have_reference && !m.possible_blur,
+          "persistent environment change enters safe recalibration without declaring focus");
+    s = sample(900, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 8400);
+    CHECK(m.have_reference && m.reference == 900 &&
+          m.reference_state == SMOOTHAF_MONITOR_REF_VALID,
+          "next confident sample establishes a new reference conservatively");
+
+    /* A separated excursion must not inherit the previous lighting count. */
+    s = sample(1000, 120, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 8500);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_OBSOLETE &&
+          m.lighting_count == 1,
+          "a separated lighting excursion starts a fresh consecutive count");
+    s = sample(900, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 8600);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_RECALIBRATE &&
+          !m.have_reference && m.lighting_count == 0,
+          "returning from an excursion invalidates the stale reference safely");
+    s = sample(900, 200, 1, 1);
+    smoothaf_monitor_accept(&m, &s, 8700);
+    CHECK(m.reference_state == SMOOTHAF_MONITOR_REF_VALID &&
+          m.have_reference,
+          "recalibration accepts the next confident sample");
 
     s = sample(-1, 0, 0, 0);
-    smoothaf_monitor_accept(&m, &s, 8600);
+    smoothaf_monitor_accept(&m, &s, 8800);
     CHECK(m.metrics.invalid == 1, "invalid sample counted separately");
-    CHECK(m.reference == 1000, "invalid sample does not alter reference");
+    CHECK(m.reference == 900, "invalid sample does not alter reference");
 
     smoothaf_monitor_stop(&m);
     CHECK(!m.enabled && m.state == SMOOTHAF_MONITOR_IDLE, "stop freezes session");
