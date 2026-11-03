@@ -1307,13 +1307,21 @@ static inline int smoothaf_vlog_af_result_qualifies_reference(
         return meaningful_best;
     if (result == SMOOTHAF_VLOG_AF_RESULT_BEST_RECOVERED)
         return meaningful_best && final_represents_best;
-    /* A flat terminal result is deliberately never reference evidence, even
-     * when AUTO selected a side and the controller took a post-probe sample.
-     * Only a controller-confirmed convergence or photometrically confirmed
-     * recovery can establish VALID. */
-    (void)auto_probe_done;
-    (void)auto_probe_result;
-    (void)algorithm_commands;
+    /* NO_IMPROVEMENT requires: AUTO completed with a definitive direction
+     * (not UNCERTAIN), at least one algorithm command executed (post-probe
+     * measurement), meaningful best score, and the final sample represents
+     * the best. A flat terminal result is deliberately never reference
+     * evidence. */
+    if (result == SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT)
+    {
+        if (!auto_probe_done)
+            return 0;
+        if (auto_probe_result == SMOOTHAF_AUTO_UNCERTAIN)
+            return 0;
+        if (algorithm_commands < 1)
+            return 0;
+        return meaningful_best && final_represents_best;
+    }
     return 0;
 }
 

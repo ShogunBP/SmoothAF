@@ -1525,14 +1525,19 @@ static void smoothaf_monitor_task(void)
                     {
                         smoothaf_vlog_af.armed = 0;
                         smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_COMPLETE;
-                        smoothaf_vlog_af.episode_result =
+                        int controller_locked =
                             smoothaf_vlog_af.controller_action == SMOOTHAF_ADAPTIVE_LOCKED ||
-                            smoothaf_vlog_af.controller_action == SMOOTHAF_NORMAL_LOCKED
-                          ? SMOOTHAF_VLOG_AF_RESULT_CONVERGED
-                          : smoothaf_vlog_af.controller_action == SMOOTHAF_ADAPTIVE_NO_CONFIDENCE ||
-                            smoothaf_vlog_af.controller_action == SMOOTHAF_NORMAL_NO_CONFIDENCE
-                          ? SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN
-                          : SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
+                            smoothaf_vlog_af.controller_action == SMOOTHAF_NORMAL_LOCKED;
+                        int continuous_mode =
+                            smoothaf_vlog_af.mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
+                        smoothaf_vlog_af.episode_result =
+                            controller_locked
+                              ? (continuous_mode ? SMOOTHAF_VLOG_AF_RESULT_IMPROVED
+                                                 : SMOOTHAF_VLOG_AF_RESULT_CONVERGED)
+                              : smoothaf_vlog_af.controller_action == SMOOTHAF_ADAPTIVE_NO_CONFIDENCE ||
+                                smoothaf_vlog_af.controller_action == SMOOTHAF_NORMAL_NO_CONFIDENCE
+                            ? SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN
+                            : SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT;
                     }
                 }
                 else if (!auto_probe_measurement &&
@@ -1552,10 +1557,16 @@ static void smoothaf_monitor_task(void)
                     {
                         smoothaf_vlog_af.armed = 0;
                         smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_COMPLETE;
-                        if (smoothaf_vlog_af.controller_action == SMOOTHAF_ADAPTIVE_LOCKED ||
+                        int controller_locked =
+                            smoothaf_vlog_af.controller_action == SMOOTHAF_ADAPTIVE_LOCKED ||
                             smoothaf_vlog_af.controller_action == SMOOTHAF_NORMAL_LOCKED ||
-                            smoothaf_vlog_af.controller_action == SMOOTHAF_HC_LOCKED)
-                            smoothaf_vlog_af.episode_result = SMOOTHAF_VLOG_AF_RESULT_CONVERGED;
+                            smoothaf_vlog_af.controller_action == SMOOTHAF_HC_LOCKED;
+                        int continuous_mode =
+                            smoothaf_vlog_af.mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS;
+                        if (controller_locked)
+                            smoothaf_vlog_af.episode_result = continuous_mode
+                                ? SMOOTHAF_VLOG_AF_RESULT_IMPROVED
+                                : SMOOTHAF_VLOG_AF_RESULT_CONVERGED;
                         else if (smoothaf_vlog_af.controller_action == SMOOTHAF_ADAPTIVE_NO_CONFIDENCE ||
                                  smoothaf_vlog_af.controller_action == SMOOTHAF_NORMAL_NO_CONFIDENCE ||
                                  smoothaf_vlog_af.controller_action == SMOOTHAF_HC_NO_CONFIDENCE)

@@ -1017,10 +1017,10 @@ static void test_reference_qualification_criteria(void)
               SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
               SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1010, 1000, 1010, 1, 1),
           "small improvement does not qualify a flat response");
-    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
               SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
               SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1300, 1, 1),
-          "NO_IMPROVEMENT never substitutes for confirmed convergence");
+          "NO_IMPROVEMENT with full AUTO, meaningful best, and valid post-move qualifies");
     CHECK(!smoothaf_vlog_af_result_qualifies_reference(
               SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, 1,
               SMOOTHAF_AUTO_FIRST_IMPROVED, 1, 1300, 1000, 1000, 1, 1),
@@ -1080,6 +1080,570 @@ static void test_manual_provisional_probe_is_bounded(void)
           "a disarmed episode cannot acquire");
 }
 
+/* Helper to run a complete AUTO probe sequence */
+static void run_auto_probe(struct smoothaf_vlog_af *af, int first_move_score,
+                           int first_return_score, int opposite_move_score,
+                           int opposite_return_score, int mean_base)
+{
+    int dir, step;
+    /* Start probe - get first move direction */
+    smoothaf_vlog_af_auto_needs_move(af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(af, mean_base);
+    smoothaf_vlog_af_auto_commit_move(af);
+    smoothaf_vlog_af_auto_on_score(af, first_move_score);
+
+    /* First return */
+    smoothaf_vlog_af_auto_needs_move(af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(af, mean_base);
+    smoothaf_vlog_af_auto_commit_move(af);
+    smoothaf_vlog_af_auto_on_score(af, first_return_score);
+
+    /* Opposite move */
+    smoothaf_vlog_af_auto_needs_move(af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(af, mean_base);
+    smoothaf_vlog_af_auto_commit_move(af);
+    smoothaf_vlog_af_auto_on_score(af, opposite_move_score);
+
+    /* Opposite return */
+    smoothaf_vlog_af_auto_needs_move(af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(af, mean_base);
+    smoothaf_vlog_af_auto_commit_move(af);
+    smoothaf_vlog_af_auto_on_score(af, opposite_return_score);
+}
+
+/* 1. AUTO UNCERTAIN with flat curve */
+static void test_auto_uncertain_flat_curve(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* Simulate AUTO probe with flat response (both sides within deadband) */
+    run_auto_probe(&af, 1010, 1000, 1010, 1000, 100);
+
+    CHECK(af.auto_probe_done && af.auto_probe_result == SMOOTHAF_AUTO_UNCERTAIN,
+          "AUTO returns UNCERTAIN for flat curve");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 1, 1010, 1000, 1010, 1, 1),
+          "AUTO UNCERTAIN never qualifies provisional reference");
+}
+
+/* 2. AUTO without significant improvement */
+static void test_auto_no_significant_improvement(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* Small improvement within deadband */
+    run_auto_probe(&af, 1015, 1000, 1010, 1000, 100);
+
+    CHECK(af.auto_probe_done && af.auto_probe_result == SMOOTHAF_AUTO_UNCERTAIN,
+          "AUTO returns UNCERTAIN for sub-deadband improvement");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 1, 1015, 1000, 1015, 1, 1),
+          "sub-deadband best does not qualify");
+}
+
+/* 3. AUTO finds real improvement */
+static void test_auto_finds_real_improvement(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* Clear improvement on first side */
+    run_auto_probe(&af, 1300, 1000, 1100, 1000, 100);
+
+    CHECK(af.auto_probe_done && af.auto_probe_result == SMOOTHAF_AUTO_FIRST_IMPROVED,
+          "AUTO selects first side for clear improvement");
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 1, 1300, 1000, 1300, 1, 1),
+          "AUTO with real improvement and controller commands qualifies");
+}
+
+/* 4. NO_IMPROVEMENT after complete AUTO probe */
+static void test_no_improvement_after_complete_auto(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* AUTO completes, controller runs but finds no further improvement */
+    run_auto_probe(&af, 1300, 1000, 1100, 1000, 100);
+
+    /* Controller makes one move but final score == best (NO_IMPROVEMENT) */
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 1, 1300, 1000, 1300, 1, 1),
+          "NO_IMPROVEMENT with full AUTO, meaningful best, valid post-move qualifies");
+
+    /* But without controller commands, it should not qualify */
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 0, 1300, 1000, 1300, 1, 1),
+          "NO_IMPROVEMENT without algorithm commands does not qualify");
+}
+
+/* 5. High best score but low final score */
+static void test_high_best_low_final_score(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    run_auto_probe(&af, 1300, 1000, 1100, 1000, 100);
+
+    /* Best is 1300 but final score is 1000 (far below best) */
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 1, 1300, 1000, 1000, 1, 1),
+          "final score far below best does not qualify");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, 0, SMOOTHAF_AUTO_INVALID,
+              2, 1300, 1000, 1000, 1, 1),
+          "CONVERGED with poor final score does not promote");
+}
+
+/* 6. BEST_RECOVERED with photometrically bad return */
+static void test_best_recovered_bad_return(void)
+{
+    struct smoothaf_recovery recovery;
+    smoothaf_recovery_init(&recovery);
+    smoothaf_recovery_begin(&recovery, 100, 1);
+
+    /* COARSE: move to +3, but best stays at initial position (score 500) */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 50);  /* low score at +3, best remains at 0 */
+
+    /* BRACKET 1: move to 0 (initial position has best score) */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 500);  /* best = 500 at position 0 */
+
+    /* BRACKET 2: move to -2 */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 400);
+
+    /* FINE: move toward best_position (0) */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 400);
+
+    /* RETURN: move to best_position (0) */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 400);  /* last_score = 400 at best_position */
+
+    /* RETURN: complete evaluation */
+    smoothaf_recovery_next(&recovery, NULL, NULL);  /* returns 0, completes */
+
+    CHECK(recovery.phase == SMOOTHAF_RECOVERY_COMPLETE,
+          "recovery completes");
+    CHECK(recovery.result == SMOOTHAF_RECOVERY_BEST_NOT_RECOVERED,
+          "photometrically bad return yields BEST_NOT_RECOVERED");
+}
+
+/* 7. BEST_RECOVERED with confirmed return */
+static void test_best_recovered_confirmed_return(void)
+{
+    struct smoothaf_recovery recovery;
+    smoothaf_recovery_init(&recovery);
+    smoothaf_recovery_begin(&recovery, 100, 1);
+
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 50);
+
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 500);
+
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 400);
+
+    /* FINE: move toward best_position (0) */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 400);
+
+    /* RETURN: move to best_position with good return score */
+    smoothaf_recovery_next(&recovery, NULL, NULL);
+    smoothaf_recovery_commit_move(&recovery);
+    smoothaf_recovery_on_score(&recovery, 490);  /* last_score = 490 at best_position */
+
+    smoothaf_recovery_next(&recovery, NULL, NULL);  /* completes */
+
+    CHECK(recovery.phase == SMOOTHAF_RECOVERY_COMPLETE,
+          "recovery completes");
+    CHECK(recovery.result == SMOOTHAF_RECOVERY_BEST_RECOVERED,
+          "photometrically confirmed return yields BEST_RECOVERED");
+}
+
+/* 8. Initial acquisition failure */
+static void test_initial_acquisition_failure(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 100);
+    af.armed = 0;  /* continuous mode starts disarmed */
+    af.continuous_armed = 1;
+
+    uint32_t now = 1000;
+    CHECK(smoothaf_vlog_af_should_acquire_continuous(&af,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, 1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now),
+          "initial acquisition allowed for provisional reference");
+
+    smoothaf_vlog_af_begin_acquisition(&af, 1);
+    CHECK(af.acquisition_attempts == 1 && af.session_acquisitions == 1 &&
+          af.acquisition_attempt_active,
+          "acquisition counters incremented");
+
+    /* Simulate failure */
+    smoothaf_vlog_af_note_acquisition_failure(&af, now + 100);
+    CHECK(!af.acquisition_attempt_active && af.cooldown_next_episode,
+          "failure clears active attempt and sets cooldown");
+}
+
+/* 9. Retry after cooldown */
+static void test_retry_after_cooldown(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 100);
+    af.armed = 0;
+    af.continuous_armed = 1;
+
+    uint32_t now = 1000;
+    smoothaf_vlog_af_begin_acquisition(&af, 1);
+    smoothaf_vlog_af_note_acquisition_failure(&af, now + 100);
+
+    /* Before cooldown expires - should not allow */
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(&af,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, 1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now + 500),
+          "acquisition blocked during cooldown");
+
+    /* After cooldown expires - should allow */
+    CHECK(smoothaf_vlog_af_should_acquire_continuous(&af,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, 1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now + 3000),
+          "acquisition allowed after cooldown");
+
+    CHECK(af.acquisition_attempts == 1, "attempt counter persists across cooldown");
+}
+
+/* 10. Attempts exhausted */
+static void test_acquisition_attempts_exhausted(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 100);
+    af.armed = 0;
+    af.continuous_armed = 1;
+
+    uint32_t now = 1000;
+    int reference_epoch = 1;
+
+    /* Exhaust all attempts for this epoch */
+    for (int i = 0; i < SMOOTHAF_VLOG_AF_MAX_ACQUISITION_ATTEMPTS; i++) {
+        CHECK(smoothaf_vlog_af_should_acquire_continuous(&af,
+                  SMOOTHAF_MONITOR_REF_PROVISIONAL, reference_epoch,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now),
+              "acquisition allowed until max attempts");
+        smoothaf_vlog_af_begin_acquisition(&af, reference_epoch);
+        smoothaf_vlog_af_note_acquisition_failure(&af, now + 100);
+        now += 3000;  /* wait for cooldown */
+    }
+
+    /* Next attempt should be blocked */
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(&af,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, reference_epoch,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now + 3000),
+          "acquisition blocked after max attempts per epoch");
+
+    CHECK(smoothaf_vlog_af_acquisition_exhausted(&af,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, reference_epoch),
+          "acquisition_exhausted reports true");
+
+    CHECK(smoothaf_vlog_af_next_episode_block_reason_for(&af,
+              SMOOTHAF_MONITOR_POSSIBLE_BLUR, SMOOTHAF_MONITOR_REF_PROVISIONAL,
+              reference_epoch, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now + 3000)
+              == SMOOTHAF_VLOG_AF_NEXT_BLOCK_ACQUIRE_EXHAUSTED,
+          "block reason is ACQUIRE_EXHAUSTED");
+}
+
+/* 11. STOP/PANIC during retry */
+static void test_stop_panic_during_retry(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 100);
+    af.continuous_armed = 1;
+    af.safety_paused = 1;  /* STOP/PANIC */
+
+    uint32_t now = 1000;
+    CHECK(!smoothaf_vlog_af_should_acquire_continuous(&af,
+              SMOOTHAF_MONITOR_REF_PROVISIONAL, 1,
+              SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now),
+          "acquisition blocked by safety pause");
+
+    CHECK(smoothaf_vlog_af_next_episode_block_reason_for(&af,
+              SMOOTHAF_MONITOR_POSSIBLE_BLUR, SMOOTHAF_MONITOR_REF_PROVISIONAL,
+              1, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now)
+              == SMOOTHAF_VLOG_AF_NEXT_BLOCK_SAFETY_PAUSED,
+          "block reason is SAFETY_PAUSED");
+}
+
+/* 12. Lighting change during AUTO probe */
+static void test_lighting_change_during_auto(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* First measurements with stable lighting */
+    int dir, step;
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 100);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1300);
+
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 100);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+
+    /* Sudden lighting change on opposite move */
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 200);  /* lighting shift > LIGHT_DELTA */
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1400);
+
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 200);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+
+    CHECK(!af.auto_probe_lighting_valid,
+          "lighting change invalidates AUTO probe");
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 1, 1300, 1000, 1300, 1, af.auto_probe_lighting_valid),
+          "lighting-invalid AUTO probe does not qualify reference");
+}
+
+/* 13. Gradual lighting drift */
+static void test_gradual_lighting_drift(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    int dir, step;
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 100);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1300);
+
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 100);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+
+    /* Gradual drift across multiple samples - exceeds LIGHT_DELTA (32) */
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 115);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1400);
+
+    smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO, 1, &dir, &step);
+    smoothaf_vlog_af_auto_observe_mean(&af, 135);
+    smoothaf_vlog_af_auto_commit_move(&af);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+
+    CHECK(!af.auto_probe_lighting_valid,
+          "gradual lighting drift exceeding LIGHT_DELTA invalidates probe");
+    CHECK(af.auto_probe_max_mean - af.auto_probe_min_mean >= SMOOTHAF_MONITOR_LIGHT_DELTA,
+          "min/max mean tracks drift magnitude");
+}
+
+/* 14. PROVISIONAL reference not qualified */
+static void test_provisional_not_qualified(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    /* AUTO completes but controller doesn't run (no algorithm commands) */
+    smoothaf_vlog_af_auto_begin_measurement(&af, 100);
+    smoothaf_vlog_af_auto_observe_mean(&af, 100);
+    smoothaf_vlog_af_auto_on_score(&af, 1300);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+    smoothaf_vlog_af_auto_on_score(&af, 1100);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+
+    /* NO_IMPROVEMENT without algorithm commands should not qualify */
+    CHECK(!smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_NO_IMPROVEMENT, af.auto_probe_done,
+              af.auto_probe_result, 0, 1300, 1000, 1300, 1, 1),
+          "PROVISIONAL not qualified without controller confirmation");
+}
+
+/* 15. VALID reference after confirmed convergence */
+static void test_valid_after_confirmed_convergence(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.auto_probe_enabled = 1;
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+
+    smoothaf_vlog_af_auto_begin_measurement(&af, 100);
+    smoothaf_vlog_af_auto_observe_mean(&af, 100);
+    smoothaf_vlog_af_auto_on_score(&af, 1300);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+    smoothaf_vlog_af_auto_on_score(&af, 1100);
+    smoothaf_vlog_af_auto_on_score(&af, 1000);
+
+    /* CONVERGED with meaningful best and valid final score */
+    CHECK(smoothaf_vlog_af_result_qualifies_reference(
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED, af.auto_probe_done,
+              af.auto_probe_result, 2, 1300, 1000, 1280, 1, 1),
+          "CONVERGED with meaningful best and representative final score qualifies");
+}
+
+/* 16. ACTIVE CONTINUOUS with consecutive episodes */
+static void test_active_continuous_consecutive_episodes(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1000);
+    af.armed = 0;  /* continuous mode starts disarmed */
+    af.continuous_armed = 1;
+
+    uint32_t now = 1000;
+    int episode = 0;
+
+    /* Simulate multiple consecutive episodes */
+    for (episode = 0; episode < 3; episode++) {
+        int ref_epoch = episode + 1;
+        af.acquisition_epoch = -1;  /* reset for new episode */
+
+        CHECK(smoothaf_vlog_af_should_acquire_continuous(&af,
+                  SMOOTHAF_MONITOR_REF_PROVISIONAL, ref_epoch,
+                  SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, now),
+              "episode acquisition allowed");
+
+        smoothaf_vlog_af_begin_acquisition(&af, ref_epoch);
+        smoothaf_vlog_af_note_acquisition_failure(&af, now + 100);
+        now += 3000;  /* cooldown */
+
+        CHECK(af.session_acquisitions == episode + 1,
+              "session_acquisitions increments per episode");
+    }
+
+    CHECK(af.session_acquisitions == 3,
+          "three episodes recorded in session_acquisitions");
+}
+
+/* 17. Four controller regression */
+static void test_four_controller_regression(void)
+{
+    struct smoothaf_vlog_af af;
+    int algorithms[] = {
+        SMOOTHAF_ALGORITHM_LEGACY_HC,
+        SMOOTHAF_ALGORITHM_ADAPTIVE_HC,
+        SMOOTHAF_ALGORITHM_CURRENT_VLOG,
+        SMOOTHAF_ALGORITHM_NORMAL_AF
+    };
+
+    for (int i = 0; i < 4; i++) {
+        smoothaf_vlog_af_init(&af);
+        smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+        af.algorithm = algorithms[i];
+
+        /* Each algorithm should initialize without error */
+        CHECK(af.algorithm == smoothaf_algorithm_normalize(algorithms[i]),
+              "algorithm normalizes correctly");
+
+        /* Focus Test support check */
+        if (algorithms[i] == SMOOTHAF_ALGORITHM_LEGACY_HC) {
+            CHECK(smoothaf_algorithm_focus_test_supported(algorithms[i]),
+                  "Legacy HC supports Focus Test");
+        } else if (algorithms[i] == SMOOTHAF_ALGORITHM_CURRENT_VLOG) {
+            CHECK(!smoothaf_algorithm_focus_test_supported(algorithms[i]),
+                  "Current Vlog does not support Focus Test");
+        }
+    }
+}
+
+/* 18. Focus Test unchanged (Legacy HC + AUTO) */
+static void test_focus_test_legacy_hc_auto(void)
+{
+    CHECK(smoothaf_algorithm_focus_test_supported(SMOOTHAF_ALGORITHM_LEGACY_HC),
+          "Focus Test retains Legacy HC");
+    CHECK(smoothaf_algorithm_normalize(SMOOTHAF_ALGORITHM_LEGACY_HC) == SMOOTHAF_ALGORITHM_LEGACY_HC,
+          "Legacy HC normalizes to itself");
+    CHECK(smoothaf_vlog_direction_normalize(SMOOTHAF_VLOG_DIRECTION_AUTO) == SMOOTHAF_VLOG_DIRECTION_AUTO,
+          "Focus Test AUTO direction preserved");
+}
+
+/* 19. Far Focus Recovery preserved */
+static void test_far_focus_recovery_preserved(void)
+{
+    struct smoothaf_recovery recovery;
+    smoothaf_recovery_init(&recovery);
+
+    CHECK(!smoothaf_recovery_should_start(0, 100, 0, 0),
+          "recovery disabled by default");
+    CHECK(smoothaf_recovery_should_start(1, 50, 0, 1),
+          "recovery enabled for low score with explicit opt-in");
+
+    smoothaf_recovery_begin(&recovery, 50, 1);
+    CHECK(recovery.phase == SMOOTHAF_RECOVERY_COARSE,
+          "recovery begins in COARSE phase");
+    CHECK(recovery.initial_score == 50 && recovery.best_score == 50,
+          "initial and best scores recorded");
+}
+
+/* 20. No concurrent commands */
+static void test_no_concurrent_commands(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    af.awaiting_result = 1;
+
+    CHECK(smoothaf_vlog_af_command_block_reason(&af, 1, 1000) == SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT,
+          "concurrent command blocked while awaiting result");
+
+    af.awaiting_result = 0;
+    CHECK(smoothaf_vlog_af_command_block_reason(&af, 1, 1000) != SMOOTHAF_VLOG_AF_BLOCK_WAITING_RESULT,
+          "command allowed after result received");
+}
+
 int main(void)
 {
     struct smoothaf_monitor m;
@@ -1108,6 +1672,26 @@ int main(void)
     test_environmental_abort_is_not_af_failure();
     test_reference_qualification_criteria();
     test_manual_provisional_probe_is_bounded();
+    test_auto_uncertain_flat_curve();
+    test_auto_no_significant_improvement();
+    test_auto_finds_real_improvement();
+    test_no_improvement_after_complete_auto();
+    test_high_best_low_final_score();
+    test_best_recovered_bad_return();
+    test_best_recovered_confirmed_return();
+    test_initial_acquisition_failure();
+    test_retry_after_cooldown();
+    test_acquisition_attempts_exhausted();
+    test_stop_panic_during_retry();
+    test_lighting_change_during_auto();
+    test_gradual_lighting_drift();
+    test_provisional_not_qualified();
+    test_valid_after_confirmed_convergence();
+    test_active_continuous_consecutive_episodes();
+    test_four_controller_regression();
+    test_focus_test_legacy_hc_auto();
+    test_far_focus_recovery_preserved();
+    test_no_concurrent_commands();
 
     smoothaf_vlog_af_init(&af);
     CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
