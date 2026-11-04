@@ -5,7 +5,7 @@
 - **Host test:** deterministic logic and safety checks, not camera evidence.
 - **ARM build validation:** compilation, dependency resolution and target selection, not runtime ABI or physical movement evidence.
 - **Physical test:** camera, firmware, Legacy revision, lens and controlled scene are recorded; results do not generalize beyond those conditions.
-- **Simulation:** benchmark workload only; every reported benchmark row must remain labeled `(SIMULATION)`.
+- **Simulation:** deterministic host episode/controller simulator and comparative benchmark; every reported simulator or benchmark row must remain labeled `(SIMULATION)`.
 
 See [Development](DEVELOPMENT.md) for commands and [Architecture](ARCHITECTURE.md) for runtime safety rules.
 
@@ -19,7 +19,7 @@ Run the repository checks from PowerShell:
 .\build-smoothaf.ps1 -Release
 ```
 
-The v0.6 test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, timeout, task reservation, simulated lens/measurement failures, asynchronous monitor scheduling, intervals, wrap-around, hysteresis, lighting uncertainty, performance snapshot semantics (attempts, valid/invalid, low confidence, blocked/skipped, overruns, start-to-start interval, duration, N/A and post-Stop persistence), individual performance submenu regression and deterministic benchmark invariants. Monitor tests use a fake logical clock and no real camera task or VRAM. Automatic samples update fixed in-memory metrics and do not create one diagnostic record per sample. The benchmark runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time.
+The host test set covers core metrics, simultaneous SAD/Laplacian ROI calculation, bounds, cancellation, fixed-deadline timeout, task reservation, simulated lens/measurement failures, asynchronous monitor scheduling, intervals, wrap-around, hysteresis, lighting uncertainty, provisional-to-valid reference qualification, acquisition limits, 4/6/8/12 budgets, AUTO/recovery reservation, STOP/PANIC gates, continuous lifecycle and failure policy, Focus Test regressions, performance snapshot semantics, individual performance submenu regression, the strict shared-seam episode/controller simulator, and deterministic benchmark invariants. Monitor and simulator tests use fake logical clocks and no real camera task or VRAM. Automatic samples update fixed in-memory metrics and do not create one diagnostic record per sample. The simulator drives the same production episode/controller seam with fake lens acceptance, settle time, post-move scoring, cancellation, and recovery callbacks; its trace and assertions are host evidence only. The benchmark remains separate: it runs Legacy HC, Adaptive HC and Normal AF on the same deterministic scenarios at simulated Step Sizes 1, 2 and 3. Synthetic ticks are workload units, not wall-clock or lens time. Neither host test establishes physical camera safety.
 
 The algorithm-selection tests additionally cover enum normalization, Focus Test isolation, Movie recovery opt-in, bounded coarse/bracket/fine recovery transitions and explicit cancellation. These are host state-machine tests only; they do not validate camera movement or optical recovery.
 
@@ -32,7 +32,7 @@ The v0.8 POC must be validated in this order. The ARM script reports the depende
 The normal module path contains no direct FIO calls in the AF task or menu callbacks. `-TestOnly` compiles the logger and host-simulated FIO backend in a disposable `/tmp` workdir; this validates ownership, retries and rotation logic only. Production FIO remains consumer-task-owned and is not camera evidence.
 
 1. Run `.\build-smoothaf.ps1 -TestOnly` and preserve the `(SIMULATION)` label on benchmark output.
-2. Use host tests to validate mode, arm, episode, four-command limit, settle, cooldown, no-reversal behavior and Stop. Host tests do not prove lens movement safety on camera.
+2. Use host tests to validate mode, arm, episode, 4/6/8/12 command limits, AUTO and recovery reservations, fixed deadline, settle, cooldown, cancellation, failure policy and STOP/PANIC. Host tests do not prove lens movement safety on camera.
 3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, the generated `DEP` count and ELF ARM/EABI5. Save the experimental module only as `artifacts/v0.8/smoothaf.mo`.
 4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
 5. Test Movie Dry Run separately in normal H.264 recording. Start the monitor before recording, select `Vlog AF Mode=DRY RUN`, manually arm one episode, and use a second phone/camera to record the ML display. Confirm recording start/end events, sample count, validity/confidence, score, duration, blur transitions and zero `AF Lens Calls`; custom and RAW recording must remain blocked. The existing menu is the least-invasive visibility path, but it may not remain open or refresh over the recording UI; treat its values as opportunistic and use the fixed RAM Log Page/Log Entry after the clip as the authoritative fallback.
@@ -42,7 +42,7 @@ The normal module path contains no direct FIO calls in the AF task or menu callb
 Test A: H.264 recording, experimental ON, one-shot ACTIVE, episode limit 1, verify at most one STM command and intact clip. Test B: H.264 recording, one-shot ACTIVE, bounded episode search, verify controlled completion. Test C: H.264 recording, ACTIVE CONTINUOUS, one manual arm, multiple episodes, verify cooldown/blur-clear latch and STOP/PANIC interruption.
 8. For Movie Active tests record `Movie Recording State`, mode, `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode`, `AF Episode Result`, scores, delta, direction, cooldown and episode count. `AF Lens Calls=1` proves only API invocation, not physical displacement. Stop immediately on recording corruption, unexpected lens activity, task stall, abnormal heat or battery/card warning.
 9. For any existing non-Movie ACTIVE test, record the same AF fields.
-9. `AF Lens Calls=1` proves only that `lens_focus()` was invoked. It does not prove physical displacement. `COMPLETE` alone is not success; a zero-call episode must show a no-movement, blocked or cancelled result.
+10. `AF Lens Calls=1` proves only that `lens_focus()` was invoked. It does not prove physical displacement. `COMPLETE` alone is not success; a zero-call episode must show a no-movement, blocked or cancelled result.
 
 A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has no general task join/kill guarantee; a task still active after the bounded deinit wait remains an unload hazard.
 
@@ -54,8 +54,8 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - Episode telemetry host coverage includes bounded RAM event/summary records, timestamp wraparound, overflow accounting and retained terminal summaries. Physical lifecycle behavior remains pending.
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
 - ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
-- Latest pre-commit ARM evidence: `Will load on: 600D`, `DEP=36`, `SIZE=97148`, SHA-256 `af71ef86639d45512e6744e8763e26864c006d92eda68c26235fa709a7f4892f`, Build ID `e2eefebf3ff3-600D.102-dirty`. This is superseded by the post-commit build below.
-- The final post-commit ARM command output must be recorded together with `Will load on: 600D`, the generated `.dep` count, module size/hash and the embedded commit-derived Build ID; these values are intentionally not hard-coded before the final commit is immutable.
+- Historical pre-commit ARM evidence is preserved separately: `Will load on: 600D`, `DEP=36`, `SIZE=98324`, SHA-256 `4940383799aafb6c6bfb8fb9c5b3ea44e90ac61ffe57a6ee52c76b2cd3af5b51`, Build ID `01020cee8635-dirty-600D.102`. It is not a release artifact.
+- The final immutable-commit ARM command output is recorded in the completion report together with `Will load on: 600D`, the generated `.dep` count, module size/hash and the embedded commit-derived Build ID.
 
 ## Phase 3A audit matrix
 

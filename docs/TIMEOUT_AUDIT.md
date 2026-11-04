@@ -1,17 +1,17 @@
 # SmoothAF V2 — TIMEOUT Root Cause Audit (Canon EOS 600D/T3i)
 
-**Commit under audit:** `e2eefebf3ff372179fbd267f188f92ac3a0212d6`
-**Build ID expected:** `e2eefebf3ff3-600D.102`
-**Date:** 2026-11-03
-**Status:** Root cause identified — timeout budget insufficient for 8-command episode on STM hardware
+**Commit under audit:** working tree derived from `01020cee8635bc363015d79b289136bba8d67ec6`
+**Build ID expected:** determined only after the final local commit
+**Date:** 2026-11-04
+**Status:** 8000 ms fixed deadline is implemented; physical timing and runtime behavior remain unvalidated
 
 ---
 
 ## 1. Executive Summary
 
-The `TIMEOUT` failure on physical Canon EOS 600D/T3i hardware is caused by the **5000 ms episode deadline (`SMOOTHAF_VLOG_AF_TIMEOUT_MS`)** being too tight for the **8-command episode** (4 AUTO probe + 4 Legacy HC) when using an STM lens. Each `lens_focus()` call takes ~300–500 ms on this body/lens combination. With cooldown (80 ms), sample interval (100–120 ms), and measurement overhead, the 8-command episode requires **~4800–5600 ms**, exceeding the 5000 ms budget.
+The prior physical report identified that a 5000 ms deadline was too tight for an 8-command AUTO-plus-algorithm episode on an STM lens. The monitor now uses an **8000 ms fixed deadline (`SMOOTHAF_VLOG_AF_TIMEOUT_MS`)**, captured at the first accepted physical `lens_focus()` call and enforced at the deadline boundary. This is a host/runtime contract change, not physical evidence that 8000 ms is sufficient.
 
-**No code defect** — the logic is correct. The timeout constant was inherited from the single-shot Focus Test (4 commands max) and not adjusted for Vlog AF's dual-phase episode (AUTO + Algorithm).
+The current candidate also counts 4, 6, 8, and 12 algorithm budgets, includes AUTO and reserved recovery commands in the physical episode budget, and keeps recovery experimental until both position and representative score are confirmed. Runtime ABI, lens timing, cache/DMA behavior and physical convergence remain unvalidated.
 
 ---
 
@@ -54,9 +54,9 @@ Three locations in `src/smoothaf.c` call `smoothaf_vlog_af_timeout_due()` → `s
 | **Post-move result due** | 1405–1410 | Checked when `awaiting_result && now >= settle_until_ms` |
 | **Command gate** | 1722–1726 | Checked before issuing next command |
 
-All three use the **same deadline**: `now - started_ms > SMOOTHAF_VLOG_AF_TIMEOUT_MS (5000 ms)`.
+All three use the **same fixed deadline**: `now >= deadline_ms`, where `deadline_ms = started_ms + SMOOTHAF_VLOG_AF_TIMEOUT_MS (8000 ms)`.
 
-`started_ms` is set at **first command** (`smoothaf_vlog_af_record_command`, `smoothaf_monitor.h:1156`).
+`started_ms` and `deadline_ms` are set at the first accepted physical command, immediately before `lens_focus()` and never extended by later commands.
 
 The telemetry `Before Error: SETTLING` + `Phys Move: COMPLETE` indicates the timeout fired at **monitor loop top (line 1303)** or **post-move result due (line 1405)** — during the 120 ms settle wait after the 8th command, before its result sample was processed.
 
@@ -68,12 +68,13 @@ The telemetry `Before Error: SETTLING` + `Phys Move: COMPLETE` indicates the tim
 
 | Constant | Value | Location |
 |----------|-------|----------|
-| `SMOOTHAF_VLOG_AF_TIMEOUT_MS` | 5000 ms | `smoothaf_monitor.h:69` |
-| `SMOOTHAF_VLOG_AF_SETTLE_MS` | 120 ms | `smoothaf_monitor.h:163` |
+| `SMOOTHAF_VLOG_AF_TIMEOUT_MS` | 8000 ms | `src/smoothaf_monitor.h:73` |
+| `SMOOTHAF_VLOG_AF_SETTLE_MS` | 120 ms | `src/smoothaf_monitor.h` |
 | `SMOOTHAF_COOLDOWN_MS` | 80 ms | `smoothaf.c:35` |
 | `SMOOTHAF_AUTO_MAX_COMMANDS` | 4 | `smoothaf_core.h:35` |
-| `SMOOTHAF_VLOG_AF_MAX_COMMANDS` | 4 | `smoothaf_monitor.h:64` |
-| `SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS` | 8 | `smoothaf_monitor.h:65–66` |
+| `SMOOTHAF_VLOG_AF_MAX_COMMANDS` | 12 | `src/smoothaf_monitor.h` |
+| `SMOOTHAF_VLOG_AF_MAX_RECOVERY_COMMANDS` | 8 | `src/smoothaf_monitor.h` |
+| `SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS` | 24 | `src/smoothaf_monitor.h` |
 | Monitor sample interval | 100 ms (configured) | User config: `Sample Int: 100 ms` |
 
 ### 4.2 Per-Command Timeline (Measured + Simulated)
@@ -106,7 +107,7 @@ The telemetry `Before Error: SETTLING` + `Phys Move: COMPLETE` indicates the tim
 | **With 2 overruns** | 400 ms | ~606 ms | **4848 ms** | ⚠️ 152 ms |
 | **Slow + overruns** | 500 ms | ~706 ms | **5648 ms** | ❌ **−648 ms** |
 
-**Conclusion:** At typical STM speed (400 ms) with observed overruns (120 ms interval), the episode consumes ~4850 ms — leaving <200 ms margin. Any variation (slower focus, extra overrun, scheduler latency) triggers `TIMEOUT`.
+**Host conclusion:** The former 5000 ms budget had insufficient margin. The current 8000 ms fixed deadline is intentionally conservative, but its sufficiency on camera is unproven until runtime timing is recorded.
 
 ---
 
@@ -118,7 +119,7 @@ The telemetry `Before Error: SETTLING` + `Phys Move: COMPLETE` indicates the tim
 - **AF CMDs This EP = 8** = episode used full command budget (4 AUTO + 4 HC)
 - **AF CMDs Left = 0** = no commands remaining when timeout fired
 
-The episode **completed all 8 physical moves** but the **9th monitor cycle** (which would process the 8th command's result) started after `now - started_ms > 5000 ms`. The timeout check at monitor loop top (line 1303) fired **before** the result sample could be evaluated.
+The historical episode **completed all 8 physical moves** but its result processing started after the old 5000 ms boundary. The current implementation checks the fixed `deadline_ms` at the loop top, post-move result boundary and command gate, using 8000 ms and starting timing at the first accepted physical command.
 
 ---
 
@@ -366,11 +367,11 @@ All tests must run in **host simulation** (`tests/benchmark_smoothaf.c`) — no 
 | `test_measure_failure_retry` | Invalid sample at cmd 5 → UNCERTAIN, retry within budget |
 | `test_command_limit_enforced` | 8 commands used → SEARCH_LIMIT, not TIMEOUT |
 
-All tests execute in `tests/benchmark_smoothaf.c` and `tests/test_smoothaf_monitor.c` — no hardware required.
+The timeout rows above are covered by the host monitor tests and the shared-seam episode simulator; no hardware is required.
 
 ---
 
-**Audit complete.** Root cause confirmed and fixed: 5000 ms deadline increased to 8000 ms with full RAM instrumentation for per-phase timing analysis. No logic bugs — configuration constant adjusted for dual-phase (AUTO + Algorithm) episode structure.
+**Audit status.** The historical 5000 ms timing issue is addressed by the 8000 ms fixed deadline and expanded command accounting. This does not close runtime validation: physical timing, ABI, lens behavior, cache/DMA and unload/join safety remain open blockers.
 
-**Build ID aligned to HEAD:** `e2eefebf3ff3-600D.102`
-**Single consolidated commit ready:** All changes in `src/`, `tests/`, `docs/TIMEOUT_AUDIT.md`
+**Build ID:** determined from the immutable candidate commit by the ARM build script.
+**Physical recommendation:** **NO-GO** until runtime ABI, timing, lens behavior, cache/DMA, FIO and task unload/join safety are validated on controlled hardware.

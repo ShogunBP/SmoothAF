@@ -3,10 +3,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "smoothaf.c"
+EPISODE_SOURCE = ROOT / "src" / "smoothaf_episode.h"
 
 
 def test_menu_shape_and_lifecycle():
     source = SOURCE.read_text(encoding="utf-8")
+    episode_source = EPISODE_SOURCE.read_text(encoding="utf-8")
+    implementation = source + "\n" + episode_source
     menu = source.split("static struct menu_entry smoothaf_menu[] =", 1)[1]
     menu = menu.split("static unsigned int smoothaf_init", 1)[0]
     assert "MENU_EOL" in menu
@@ -139,8 +142,8 @@ def test_menu_shape_and_lifecycle():
     assert 'smoothaf_vlog_direction_migrate(' in source
     assert 'SMOOTHAF_VLOG_DIRECTION_AUTO' in source
     assert 'static CONFIG_INT("smoothaf.vlog_direction", smoothaf_vlog_direction, -1);' in source
-    assert 'smoothaf_vlog_af_auto_needs_move(' in source
-    assert 'smoothaf_vlog_af_auto_on_score(' in source
+    assert 'smoothaf_vlog_af_auto_needs_move(' in implementation
+    assert 'smoothaf_vlog_af_auto_on_score(' in implementation
     assert 'smoothaf_vlog_af_set_episode_limit(&smoothaf_vlog_af' in source
     assert 'smoothaf_vlog_af_session_command_limit_for(' in source
     assert 'config_var_was_changed(&smoothaf_step)' in source

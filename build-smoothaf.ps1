@@ -67,7 +67,7 @@ Run-Docker @('build', '-t', $Image, '-f', $Dockerfile, $ProjectRoot)
 
 if ($TestOnly) {
     $mount = "type=bind,source=$ProjectRoot,target=/src"
-    Run-Docker @('run', '--rm', '--mount', $mount, '--workdir', '/tmp', $Image, 'sh', '-c', 'gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_core /src/tests/test_smoothaf_core.c && /tmp/test_smoothaf_core && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_algorithm /src/tests/test_smoothaf_algorithm.c && /tmp/test_smoothaf_algorithm && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_monitor /src/tests/test_smoothaf_monitor.c && /tmp/test_smoothaf_monitor && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_diagnostics /src/tests/test_smoothaf_diagnostics.c && /tmp/test_smoothaf_diagnostics && gcc -std=c99 -Wall -Wextra -O2 -pthread -DSMOOTHAF_HOST_TEST -I/src/src -o /tmp/test_smoothaf_logger /src/tests/test_smoothaf_logger.c /src/src/smoothaf_logger.c /src/src/smoothaf_logger_fio.c && /tmp/test_smoothaf_logger && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/benchmark_smoothaf /src/tests/benchmark_smoothaf.c && /tmp/benchmark_smoothaf && python3 -B /src/tests/test_smoothaf_menu_regression.py')
+    Run-Docker @('run', '--rm', '--mount', $mount, '--workdir', '/tmp', $Image, 'sh', '-c', 'gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_core /src/tests/test_smoothaf_core.c && /tmp/test_smoothaf_core && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_algorithm /src/tests/test_smoothaf_algorithm.c && /tmp/test_smoothaf_algorithm && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_monitor /src/tests/test_smoothaf_monitor.c && /tmp/test_smoothaf_monitor && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_episode /src/tests/test_smoothaf_episode.c && /tmp/test_smoothaf_episode && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_diagnostics /src/tests/test_smoothaf_diagnostics.c && /tmp/test_smoothaf_diagnostics && gcc -std=c99 -Wall -Wextra -O2 -pthread -DSMOOTHAF_HOST_TEST -I/src/src -o /tmp/test_smoothaf_logger /src/tests/test_smoothaf_logger.c /src/src/smoothaf_logger.c /src/src/smoothaf_logger_fio.c && /tmp/test_smoothaf_logger && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/benchmark_smoothaf /src/tests/benchmark_smoothaf.c && /tmp/benchmark_smoothaf && python3 -B /src/tests/test_smoothaf_menu_regression.py')
     exit 0
 }
 
@@ -104,6 +104,7 @@ try {
     Set-Content -LiteralPath (Join-Path $integration 'smoothaf_build_id.h') -Value @("#ifndef SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID `"$buildId`"", "#define SMOOTHAF_BUILD_CONFIG `"600D.102`"", "static inline const char *smoothaf_build_id_value(void)", "{", "    return SMOOTHAF_BUILD_ID;", "}", "#endif") -Encoding ascii
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_diagnostics.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_monitor.h') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_episode.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'integration\Makefile') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'integration\README.rst') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'docker\generate-strings.py') $integration -Force

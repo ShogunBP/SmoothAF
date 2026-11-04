@@ -53,14 +53,15 @@ static struct smoothaf_monitor_sample sample(int score, int mean, int valid, int
 
 struct lens_mock
 {
-    int args[SMOOTHAF_VLOG_AF_MAX_COMMANDS];
+    int args[SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS];
     int count;
 };
 
 static int mock_lens_focus(struct lens_mock *mock, int direction)
 {
-    if (mock->count < SMOOTHAF_VLOG_AF_MAX_COMMANDS)
-        mock->args[mock->count++] = direction;
+    if (mock->count >= SMOOTHAF_VLOG_AF_MAX_EPISODE_COMMANDS)
+        return 0;
+    mock->args[mock->count++] = direction;
     return 1;
 }
 
@@ -349,11 +350,11 @@ static void test_vlog_af_lifecycle(void)
     CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
           "awaiting result blocks another command");
     af.awaiting_result = 0;
-    af.commands = SMOOTHAF_VLOG_AF_MAX_COMMANDS;
+    af.commands = (uint32_t)af.episode_limit;
     CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
-          "episode command limit is enforced");
+          "default episode command limit is enforced");
     af.commands = 0;
-    af.session_commands = SMOOTHAF_VLOG_AF_MAX_COMMANDS;
+    af.session_commands = smoothaf_vlog_af_session_command_limit(&af);
     CHECK(!smoothaf_vlog_af_can_command(&af, 1, 0),
           "session command limit is enforced");
     af.session_commands = 0;
@@ -364,10 +365,10 @@ static void test_vlog_af_lifecycle(void)
 
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
     smoothaf_vlog_af_record_command(&af, 1000);
-    CHECK(!smoothaf_vlog_af_timeout_due(&af, 9000),
-          "timeout does not fire at the exact limit");
+    CHECK(smoothaf_vlog_af_timeout_due(&af, 9000),
+          "timeout fires at the fixed episode deadline");
     CHECK(smoothaf_vlog_af_timeout_due(&af, 9001),
-          "timeout fires during SETTLING");
+          "timeout remains due after the deadline");
     smoothaf_vlog_af_stop(&af);
     CHECK(!smoothaf_vlog_af_timeout_due(&af, 11000),
           "stopped episode is not timed out");
@@ -1644,6 +1645,93 @@ static void test_no_concurrent_commands(void)
           "command allowed after result received");
 }
 
+static void test_controller_lock_is_convergence(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+
+    CHECK(smoothaf_vlog_af_controller_result(SMOOTHAF_HC_LOCKED, 1, 1) ==
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED,
+          "Legacy HC LOCKED with a valid confirmation is CONVERGED");
+    CHECK(smoothaf_vlog_af_controller_result(SMOOTHAF_ADAPTIVE_LOCKED, 1, 1) ==
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED,
+          "Adaptive HC LOCKED with a valid confirmation is CONVERGED");
+    CHECK(smoothaf_vlog_af_controller_result(SMOOTHAF_NORMAL_LOCKED, 1, 1) ==
+              SMOOTHAF_VLOG_AF_RESULT_CONVERGED,
+          "Normal AF LOCKED with a valid confirmation is CONVERGED");
+    CHECK(smoothaf_vlog_af_controller_result(SMOOTHAF_HC_LOCKED, 1, 0) ==
+              SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN,
+          "LOCKED without confidence cannot qualify as convergence");
+
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS, 1, 1000);
+    af.armed = 0;
+    af.continuous_armed = 1;
+    af.consecutive_failures = 1;
+    af.neutral_limit_streak = 2;
+    af.safety_paused = 1;
+    smoothaf_vlog_af_note_confirmed_success(&af);
+    CHECK(af.consecutive_failures == 0 && af.neutral_limit_streak == 0 &&
+          af.safety_paused,
+          "confirmed convergence resets counters but preserves SAFETY_PAUSED");
+}
+
+static void test_command_budgets_and_deadline(void)
+{
+    struct smoothaf_vlog_af af;
+    int limits[] = { 4, 6, 8, 12 };
+    size_t i;
+
+    for (i = 0; i < sizeof(limits) / sizeof(limits[0]); i++)
+    {
+        smoothaf_vlog_af_init(&af);
+        smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+        smoothaf_vlog_af_set_auto_probe(&af, 1);
+        smoothaf_vlog_af_set_episode_limit(&af, limits[i]);
+        CHECK(smoothaf_vlog_af_algorithm_command_limit(&af) == (uint32_t)limits[i],
+              "configured algorithm command budget is preserved");
+        CHECK(smoothaf_vlog_af_episode_command_limit(&af) ==
+                  (uint32_t)(limits[i] + SMOOTHAF_AUTO_MAX_COMMANDS),
+              "AUTO allowance is added to the physical episode budget");
+        smoothaf_vlog_af_reserve_recovery(&af, 1);
+        CHECK(smoothaf_vlog_af_episode_command_limit(&af) ==
+                  (uint32_t)(limits[i] + SMOOTHAF_AUTO_MAX_COMMANDS +
+                             SMOOTHAF_RECOVERY_MAX_COMMANDS),
+              "reserved recovery allowance is counted in the physical budget");
+    }
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_record_command(&af, 100);
+    CHECK(af.deadline_ms == 100 + SMOOTHAF_VLOG_AF_TIMEOUT_MS,
+          "episode deadline is fixed at the first command");
+    smoothaf_vlog_af_record_command(&af, 500);
+    CHECK(af.deadline_ms == 100 + SMOOTHAF_VLOG_AF_TIMEOUT_MS,
+          "later commands cannot extend the episode deadline");
+}
+
+static void test_failure_policy_does_not_reset_on_valid_sample(void)
+{
+    struct smoothaf_vlog_af af;
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_arm_continuous(&af, 1, 1000);
+    smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    af.consecutive_failures = 1;
+    af.awaiting_result = 1;
+    smoothaf_vlog_af_record_result(&af, 1100, 50);
+    CHECK(af.consecutive_failures == 1,
+          "a valid measurement does not erase an existing failure streak");
+    smoothaf_vlog_af_pause_continuous(&af, SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN, 100);
+    CHECK(af.consecutive_failures == 2 && af.safety_paused,
+          "absence of progress increments the failure streak");
+    smoothaf_vlog_af_start_continuous_episode(&af, 1, 1000);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_pause_continuous(&af, SMOOTHAF_VLOG_AF_RESULT_UNCERTAIN, 200);
+    CHECK(af.consecutive_failures == 3 && af.safety_paused,
+          "repeated real failure preserves SAFETY_PAUSED");
+}
+
 int main(void)
 {
     struct smoothaf_monitor m;
@@ -1692,6 +1780,9 @@ int main(void)
     test_focus_test_legacy_hc_auto();
     test_far_focus_recovery_preserved();
     test_no_concurrent_commands();
+    test_controller_lock_is_convergence();
+    test_command_budgets_and_deadline();
+    test_failure_policy_does_not_reset_on_valid_sample();
 
     smoothaf_vlog_af_init(&af);
     CHECK(af.mode == SMOOTHAF_VLOG_AF_OFF && !af.armed,
@@ -1713,11 +1804,12 @@ int main(void)
           "command diagnostics identify a disarmed episode");
 
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
+    smoothaf_vlog_af_set_episode_limit(&af, SMOOTHAF_VLOG_AF_MAX_COMMANDS);
     af.state = SMOOTHAF_VLOG_AF_PROBING;
-    while (af.commands < SMOOTHAF_VLOG_AF_MAX_COMMANDS)
+    while (af.commands < smoothaf_vlog_af_algorithm_command_limit(&af))
     {
         CHECK(smoothaf_vlog_af_can_command(&af, 1, af.commands + 100),
-              "four-command episode accepts commands within its budget");
+              "configured episode accepts commands within its budget");
         smoothaf_vlog_af_record_command(&af, af.commands + 100);
         af.awaiting_result = 0;
         af.state = SMOOTHAF_VLOG_AF_PROBING;
@@ -1729,7 +1821,8 @@ int main(void)
           "command diagnostics identify the episode limit");
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
     af.state = SMOOTHAF_VLOG_AF_PROBING;
-    CHECK(af.commands == 0 && af.session_commands == SMOOTHAF_VLOG_AF_MAX_COMMANDS,
+    CHECK(af.commands == 0 &&
+          af.session_commands == smoothaf_vlog_af_session_command_limit(&af),
           "new episode resets only its counter, not the session budget");
     CHECK(smoothaf_vlog_af_commands_available(&af) == 0 &&
           smoothaf_vlog_af_command_block_reason(&af, 1, 1000) ==
@@ -1741,7 +1834,8 @@ int main(void)
     smoothaf_vlog_af_init(&af);
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
     af.state = SMOOTHAF_VLOG_AF_PROBING;
-    CHECK(smoothaf_vlog_af_commands_available(&af) == SMOOTHAF_VLOG_AF_MAX_COMMANDS &&
+    CHECK(smoothaf_vlog_af_commands_available(&af) ==
+              smoothaf_vlog_af_algorithm_command_limit(&af) &&
           smoothaf_vlog_af_can_command(&af, 1, 1000),
           "restarting the monitor is the explicit session-budget recovery");
 
@@ -1785,9 +1879,9 @@ int main(void)
           "improved result enters cooldown while budget remains");
     CHECK(af.episode_result == SMOOTHAF_VLOG_AF_RESULT_IMPROVED,
           "improvement is distinct from physical movement confirmation");
-    CHECK(SMOOTHAF_VLOG_AF_MAX_COMMANDS == 4 &&
+    CHECK(SMOOTHAF_VLOG_AF_MAX_COMMANDS == 12 &&
           SMOOTHAF_VLOG_AF_MAX_REVERSALS == 1,
-          "local search is limited to four commands and one reversal");
+          "local search supports bounded four-to-twelve command budgets");
     CHECK(af.post_move_score == 1100 && af.score_delta == 100,
           "post-move score and delta are recorded");
     CHECK(strcmp(smoothaf_vlog_af_result_name(SMOOTHAF_VLOG_AF_RESULT_IMPROVED),

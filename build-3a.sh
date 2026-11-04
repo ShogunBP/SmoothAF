@@ -48,6 +48,7 @@ echo "BUILD ID=$buildId"
 
 cp /src/src/smoothaf_diagnostics.h $integration/
 cp /src/src/smoothaf_monitor.h $integration/
+cp /src/src/smoothaf_episode.h $integration/
 cp /src/integration/Makefile $integration/
 cp /src/integration/README.rst $integration/
 cp /src/docker/generate-strings.py $integration/
