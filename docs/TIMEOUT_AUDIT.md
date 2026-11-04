@@ -1,7 +1,7 @@
 # SmoothAF V2 — TIMEOUT Root Cause Audit (Canon EOS 600D/T3i)
 
-**Commit under audit:** working tree derived from `01020cee8635bc363015d79b289136bba8d67ec6`
-**Build ID expected:** determined only after the final local commit
+**Commit under audit:** immutable candidate `5de054e07d9635639d4ce43bfa66745bf2e1e5ff`
+**Build ID:** `5de054e07d96-600D.102` for the validated artifact
 **Date:** 2026-11-04
 **Status:** 8000 ms fixed deadline is implemented; physical timing and runtime behavior remain unvalidated
 
@@ -182,7 +182,7 @@ smoothaf_recovery_should_start(...)
 
 | Hypothesis | Status | Test Needed |
 |------------|--------|-------------|
-| Build ID on SD matches `e2eefebf3ff3` | **Unverified** | User must confirm via menu `Build ID` |
+| Build ID on SD matches `5de054e07d96` | **Not applicable** | No SD installation or physical validation performed |
 | Exact `lens_focus()` duration on this body/lens | **Simulated** | Instrument `movement_ms` / `lens_calls` timing |
 | Scheduler latency adds >5 ms/cycle | **Likely** | FreeRTOS task priority vs other tasks |
 | Step size 3 vs 1 changes `T_lens` linearly | **Unknown** | Test with `Vlog Step: 1` |
@@ -322,7 +322,7 @@ All tests must run in **host simulation** (`tests/benchmark_smoothaf.c`) — no 
 ### 15.2 Validation Results
 
 - ✅ All host tests pass: Core, Algorithm, Monitor, Diagnostics, Benchmark (SIMULATION), Menu regression
-- ✅ ARM build verified for 600D.102 (Build ID `e2eefebf3ff3-600D.102`, SHA256 `439c72ce2929...`, SIZE=81292)
+- ✅ ARM build verified for 600D.102 from immutable commit `5de054e07d96` (SHA-256 `2f679ed6f8fa2ca83b9b62c57a5088858f065cd4fb52f919e0bc3ee74bd4537c`, SIZE=99052, DEP=36)
 - ✅ Timeout boundary test updated and passing
 - ✅ Episode summary struct size within limits
 
@@ -343,7 +343,7 @@ All tests must run in **host simulation** (`tests/benchmark_smoothaf.c`) — no 
 
 ## 16. Remaining Verification (Physical Hardware)
 
-1. **Verify Build ID** on camera menu matches `e2eefebf3ff3-600D.102`
+1. **If physical validation is later authorized**, verify the camera menu Build ID matches `5de054e07d96-600D.102`; no such validation has been performed
 2. **Test on Canon 600D/T3i** with STM lens:
    - Confirm no TIMEOUT episodes during normal Vlog AF operation
    - Verify EP Summary shows `lens=`, `wait2=`, `smpw=` timing breakdown

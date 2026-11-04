@@ -58,6 +58,46 @@ static inline void smoothaf_episode_commit_move(
     af->current_position += direction * step;
 }
 
+static inline void smoothaf_episode_finish_auto_probe(
+    struct smoothaf_vlog_af *af)
+{
+    /* AUTO is directional acquisition evidence, not algorithm evidence.  The
+     * probe returns to the origin; make that restored sample the controller's
+     * baseline before the selected algorithm is initialized. */
+    af->best = af->initial_score;
+    af->previous_score = af->initial_score;
+    af->post_move_score = af->initial_score;
+    af->score_delta = 0;
+    af->best_position = af->current_position;
+}
+
+static inline int smoothaf_episode_on_auto_score(
+    struct smoothaf_vlog_af *af, int score)
+{
+    int result = smoothaf_vlog_af_auto_on_score(af, score);
+    if (af->auto_probe_done)
+        smoothaf_episode_finish_auto_probe(af);
+    return result;
+}
+
+static inline void smoothaf_episode_begin_recovery(
+    struct smoothaf_vlog_af *af, int initial_score, int direction)
+{
+    af->recovery_origin_position = af->current_position;
+    smoothaf_recovery_begin(&af->recovery, initial_score, direction);
+}
+
+static inline void smoothaf_episode_commit_recovery_move(
+    struct smoothaf_vlog_af *af, int direction, int step, uint32_t now)
+{
+    smoothaf_recovery_commit_move(&af->recovery);
+    af->direction = direction;
+    af->command_step = step;
+    smoothaf_vlog_af_record_command(af, now);
+    af->current_position = af->recovery_origin_position +
+                           af->recovery.position;
+}
+
 static inline void smoothaf_episode_rollback_move(
     struct smoothaf_vlog_af *af, int direction, int step)
 {
@@ -171,7 +211,8 @@ static inline int smoothaf_episode_on_score(
         af->direction = af->legacy_controller.dir;
         af->reversals = af->legacy_controller.reversals;
         af->best = af->legacy_controller.best;
-        af->best_position = af->legacy_controller.best_pos;
+        af->best_position = af->legacy_controller.best_pos *
+                            af->controller_step;
         af->controller_pending = action == SMOOTHAF_HC_MOVE;
         if (action == SMOOTHAF_HC_MEASURE)
         {

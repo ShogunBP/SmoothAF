@@ -441,6 +441,7 @@ struct smoothaf_vlog_af
     int session_acquisitions;
     int acquisition_attempt_active;
     int recovery_reserved_commands;
+    int recovery_origin_position;
     int dry_run_requests;
     int episode_result;
     int initial_score;
@@ -964,6 +965,7 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->session_acquisitions = 0;
     af->acquisition_attempt_active = 0;
     af->recovery_reserved_commands = 0;
+    af->recovery_origin_position = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->initial_score = 0;
@@ -1056,6 +1058,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->session_acquisitions = 0;
     af->acquisition_attempt_active = 0;
     af->recovery_reserved_commands = 0;
+    af->recovery_origin_position = 0;
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->controller_initialized = 0;

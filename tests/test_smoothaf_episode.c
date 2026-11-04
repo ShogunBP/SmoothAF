@@ -241,6 +241,77 @@ static void test_legacy_peak_and_reversal(void)
           "trace records accepted lens commands");
 }
 
+static void test_position_units_and_auto_baseline(void)
+{
+    struct smoothaf_vlog_af af;
+    int direction;
+    int step;
+    int baseline;
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_set_algorithm(&af, SMOOTHAF_ALGORITHM_LEGACY_HC);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 600);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    baseline = af.initial_score;
+    CHECK(smoothaf_episode_next_command(&af, SMOOTHAF_VLOG_DIRECTION_A,
+                                        1, 3, &direction, &step),
+          "Legacy HC exposes the first step through the shared seam");
+    smoothaf_episode_commit_move(&af, direction, step, 100);
+    smoothaf_episode_prepare_score(&af, 900, 200);
+    CHECK(smoothaf_episode_on_score(&af, 900),
+          "Legacy HC schedules the next move after an improvement");
+    CHECK(af.best_position == 3,
+          "Legacy HC public best position uses lens-step units");
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_set_algorithm(&af, SMOOTHAF_ALGORITHM_LEGACY_HC);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 600);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    smoothaf_vlog_af_set_auto_probe(&af, 1);
+    CHECK(smoothaf_vlog_af_auto_needs_move(&af, SMOOTHAF_VLOG_DIRECTION_AUTO,
+                                           1, &direction, &step),
+          "AUTO exposes its first probe move");
+    smoothaf_episode_commit_move(&af, direction, step, 100);
+    smoothaf_episode_prepare_score(&af, 900, 200);
+    smoothaf_episode_on_auto_score(&af, 900);
+    CHECK(af.best == 900,
+          "AUTO records its measured peak before the probe completes");
+    /* The remaining probe samples return to the baseline and finish AUTO. */
+    smoothaf_episode_commit_move(&af, -direction, step, 300);
+    smoothaf_episode_prepare_score(&af, 600, 400);
+    smoothaf_episode_on_auto_score(&af, 600);
+    smoothaf_episode_commit_move(&af, -direction, step, 500);
+    smoothaf_episode_prepare_score(&af, 300, 600);
+    smoothaf_episode_on_auto_score(&af, 300);
+    smoothaf_episode_commit_move(&af, direction, step, 700);
+    smoothaf_episode_prepare_score(&af, baseline, 800);
+    smoothaf_episode_on_auto_score(&af, baseline);
+    CHECK(af.auto_probe_done && af.current_position == 0,
+          "AUTO completes at the physical baseline position");
+    CHECK(af.best == baseline && af.best_position == 0 &&
+          af.previous_score == baseline,
+          "AUTO evidence does not contaminate algorithm baseline state");
+}
+
+static void test_recovery_position_is_episode_relative(void)
+{
+    struct smoothaf_vlog_af af;
+    int direction;
+    int step;
+
+    smoothaf_vlog_af_init(&af);
+    smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 100);
+    af.state = SMOOTHAF_VLOG_AF_PROBING;
+    af.current_position = 6;
+    smoothaf_episode_begin_recovery(&af, 100, 1);
+    smoothaf_vlog_af_reserve_recovery(&af, 1);
+    CHECK(smoothaf_recovery_next(&af.recovery, &direction, &step),
+          "recovery exposes its first bounded move");
+    smoothaf_episode_commit_recovery_move(&af, direction, step, 100);
+    CHECK(af.current_position == 9,
+          "recovery position remains in the episode coordinate system");
+}
+
 static void test_other_controllers_use_same_seam(void)
 {
     const int algorithms[] = {
@@ -480,6 +551,8 @@ static void test_monitor_policy_edges(void)
 int main(void)
 {
     test_legacy_peak_and_reversal();
+    test_position_units_and_auto_baseline();
+    test_recovery_position_is_episode_relative();
     test_other_controllers_use_same_seam();
     test_auto_direction_and_budget();
     test_failed_move_rolls_back_controller();

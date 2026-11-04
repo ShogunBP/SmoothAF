@@ -1611,7 +1611,7 @@ static void smoothaf_monitor_task(void)
                                                         (uint8_t)sample.confident);
                     smoothaf_vlog_adapter_prepare_score(sample.score, completed);
                     smoothaf_vlog_af_auto_observe_mean(&smoothaf_vlog_af, sample.mean);
-                    adapter_continue = smoothaf_vlog_af_auto_on_score(
+                    adapter_continue = smoothaf_episode_on_auto_score(
                         &smoothaf_vlog_af, sample.score);
                     (void)adapter_continue;
                     smoothaf_vlog_af.episode_result =
@@ -1632,8 +1632,10 @@ static void smoothaf_monitor_task(void)
                     smoothaf_vlog_af.last_result_ms = completed;
                     smoothaf_vlog_af.best = smoothaf_vlog_af.recovery.best_score;
                     smoothaf_vlog_af.best_position =
+                        smoothaf_vlog_af.recovery_origin_position +
                         smoothaf_vlog_af.recovery.best_position;
                     smoothaf_vlog_af.current_position =
+                        smoothaf_vlog_af.recovery_origin_position +
                         smoothaf_vlog_af.recovery.position;
                     if (!adapter_continue &&
                         (smoothaf_vlog_af.recovery.phase == SMOOTHAF_RECOVERY_COMPLETE ||
@@ -1919,8 +1921,8 @@ static void smoothaf_monitor_task(void)
                                            smoothaf_movie_recording.active,
                                            smoothaf_movie_active_experimental))
         {
-            smoothaf_recovery_begin(&smoothaf_vlog_af.recovery, sample.score,
-                                    smoothaf_vlog_af.direction);
+            smoothaf_episode_begin_recovery(&smoothaf_vlog_af, sample.score,
+                                            smoothaf_vlog_af.direction);
             smoothaf_vlog_af_reserve_recovery(&smoothaf_vlog_af, 1);
             smoothaf_vlog_af.state = SMOOTHAF_VLOG_AF_PROBING;
             recovery_active = 1;
@@ -1995,13 +1997,9 @@ static void smoothaf_monitor_task(void)
                 }
                 else
                 {
-                    smoothaf_recovery_commit_move(&smoothaf_vlog_af.recovery);
-                    smoothaf_vlog_af.direction = command_direction;
-                    smoothaf_vlog_af.command_step = command_step;
-                    smoothaf_vlog_af_record_command(&smoothaf_vlog_af,
-                                                    (uint32_t)get_ms_clock());
-                    smoothaf_vlog_af.current_position =
-                        smoothaf_vlog_af.recovery.position;
+                    smoothaf_episode_commit_recovery_move(
+                        &smoothaf_vlog_af, command_direction, command_step,
+                        (uint32_t)get_ms_clock());
                     smoothaf_af_commands_episode =
                         (int)smoothaf_vlog_af.commands;
                     smoothaf_af_current_position = smoothaf_vlog_af.current_position;
@@ -2772,6 +2770,7 @@ static MENU_UPDATE_FUNC(smoothaf_vlog_recovery_update)
                   smoothaf_recovery_result_name(smoothaf_vlog_af.recovery.result),
                   smoothaf_vlog_af.recovery.commands,
                   smoothaf_vlog_af.recovery.best_score,
+                  smoothaf_vlog_af.recovery_origin_position +
                   smoothaf_vlog_af.recovery.position,
                   smoothaf_vlog_af.recovery.commands);
 }
