@@ -232,7 +232,7 @@ static void smoothaf_logger_flush_task(void* arg) {
 ### 6.1 File Header
 ```
 # SmoothAF Log v1
-# Build: 5de054e07d96-600D.102
+# Build: eb32bdb36824-600D.102
 # Config: timeout=8000 max_cmds=8 algo=LEGACY_HC auto_probe=1
 # Started: 1234567890 ms
 ```
@@ -244,7 +244,7 @@ static void smoothaf_logger_flush_task(void* arg) {
 
 Example:
 ```
-1234567890	1	0	"5de054e07d96"	8000	8	1
+1234567890	1	0	"eb32bdb36824"	8000	8	1
 1234567950	3	1	2	1000
 1234568010	7	1	1	1	3	412	86
 1234568120	8	1	1	842	128	0	1	1

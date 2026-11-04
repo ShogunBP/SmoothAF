@@ -55,7 +55,7 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
 - ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
 - Historical pre-commit ARM evidence is preserved separately: `Will load on: 600D`, `DEP=36`, `SIZE=98324`, SHA-256 `4940383799aafb6c6bfb8fb9c5b3ea44e90ac61ffe57a6ee52c76b2cd3af5b51`, Build ID `01020cee8635-dirty-600D.102`. It is not a release artifact.
-- Final immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99052`, SHA-256 `2f679ed6f8fa2ca83b9b62c57a5088858f065cd4fb52f919e0bc3ee74bd4537c`, embedded Build ID `5de054e07d96-600D.102`; format is ARM/EABI5 relocatable.
+- Final immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99180`, SHA-256 `5d876a06fe8bd3a1d0b869b6adecad78fd55576c8c44220a1d819e8cc13e42eb`, embedded Build ID `eb32bdb36824-600D.102`; format is ARM/EABI5 relocatable.
 
 ## Phase 3A audit matrix
 
