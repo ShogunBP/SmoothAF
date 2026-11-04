@@ -364,12 +364,12 @@ static void test_vlog_af_lifecycle(void)
 
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);
     smoothaf_vlog_af_record_command(&af, 1000);
-    CHECK(!smoothaf_vlog_af_timeout_due(&af, 6000),
+    CHECK(!smoothaf_vlog_af_timeout_due(&af, 9000),
           "timeout does not fire at the exact limit");
-    CHECK(smoothaf_vlog_af_timeout_due(&af, 6001),
+    CHECK(smoothaf_vlog_af_timeout_due(&af, 9001),
           "timeout fires during SETTLING");
     smoothaf_vlog_af_stop(&af);
-    CHECK(!smoothaf_vlog_af_timeout_due(&af, 9000),
+    CHECK(!smoothaf_vlog_af_timeout_due(&af, 11000),
           "stopped episode is not timed out");
 
     smoothaf_vlog_af_new_episode(&af, SMOOTHAF_VLOG_AF_ACTIVE, 1, 1000);

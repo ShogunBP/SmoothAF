@@ -7,4 +7,9 @@
 #define SMOOTHAF_BUILD_ID "DEV-UNBUILT"
 #define SMOOTHAF_BUILD_CONFIG "600D.102"
 
+static inline const char *smoothaf_build_id_value(void)
+{
+    return SMOOTHAF_BUILD_ID;
+}
+
 #endif

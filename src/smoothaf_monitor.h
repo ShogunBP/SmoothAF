@@ -66,7 +66,7 @@
     (SMOOTHAF_VLOG_AF_MAX_COMMANDS + SMOOTHAF_AUTO_MAX_COMMANDS)
 #define SMOOTHAF_VLOG_AF_MAX_REVERSALS  1
 #define SMOOTHAF_VLOG_AF_COOLDOWN_MS    1000
-#define SMOOTHAF_VLOG_AF_TIMEOUT_MS     5000
+#define SMOOTHAF_VLOG_AF_TIMEOUT_MS     8000
 #define SMOOTHAF_VLOG_AF_MAX_CONSECUTIVE_FAILURES 2
 #define SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT 4
 #define SMOOTHAF_VLOG_AF_MIN_EPISODE_LIMIT 1
@@ -448,8 +448,15 @@ struct smoothaf_vlog_af
     uint32_t wait_ms;
     uint32_t movement_ms;
     uint32_t stabilization_ms;
+    uint32_t total_lens_ms;
+    uint32_t total_settle_ms;
+    uint32_t total_sample_wait_ms;
     uint32_t lens_calls;
     uint32_t last_result_ms;
+    uint32_t last_lens_start_ms;
+    uint32_t last_lens_end_ms;
+    uint32_t last_settle_start_ms;
+    uint32_t last_sample_ms;
     struct smoothaf_recovery recovery;
 };
 
@@ -948,8 +955,15 @@ static inline void smoothaf_vlog_af_init(struct smoothaf_vlog_af *af)
     af->wait_ms = 0;
     af->movement_ms = 0;
     af->stabilization_ms = 0;
+    af->total_lens_ms = 0;
+    af->total_settle_ms = 0;
+    af->total_sample_wait_ms = 0;
     af->lens_calls = 0;
     af->last_result_ms = 0;
+    af->last_lens_start_ms = 0;
+    af->last_lens_end_ms = 0;
+    af->last_settle_start_ms = 0;
+    af->last_sample_ms = 0;
     smoothaf_recovery_init(&af->recovery);
 }
 
@@ -1043,8 +1057,15 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->wait_ms = 0;
     af->movement_ms = 0;
     af->stabilization_ms = 0;
+    af->total_lens_ms = 0;
+    af->total_settle_ms = 0;
+    af->total_sample_wait_ms = 0;
     af->lens_calls = 0;
     af->last_result_ms = 0;
+    af->last_lens_start_ms = 0;
+    af->last_lens_end_ms = 0;
+    af->last_settle_start_ms = 0;
+    af->last_sample_ms = 0;
     smoothaf_recovery_init(&af->recovery);
 }
 
@@ -1165,6 +1186,7 @@ static inline void smoothaf_vlog_af_record_command(
         af->wait_ms += SMOOTHAF_VLOG_AF_SETTLE_MS;
     af->state = SMOOTHAF_VLOG_AF_SETTLING;
     af->settle_until_ms = now + SMOOTHAF_VLOG_AF_SETTLE_MS;
+    af->last_settle_start_ms = now;
     af->last_direction = af->direction;
 }
 

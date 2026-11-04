@@ -1,6 +1,6 @@
 # SmoothAF
 
-**SmoothAF v0.2.0 — Experimental**
+**SmoothAF v0.2.0 - Experimental**
 
 **Fast focus. Minimal movement.**
 
@@ -22,7 +22,7 @@ This repository is an independently organized source distribution designed to in
 - Movie Dry Run probe for normal H.264 recording; it never calls the lens adapter.
 - Diagnostic measurement and one-step focus command.
 - Runtime status plus one fixed-RAM telemetry record for score, timing, direction, step, state, error, and reason.
-- Canon AF Assist, filesystem diagnostics, FIO export, and history/log viewers are not included.
+- Optional persistent structured logging with a fixed RAM ring and disabled-by-default FIO consumer; no physical SD validation is claimed.
 - Reproducible host and ARM builds with Docker.
 
 ## Compatibility
@@ -94,7 +94,7 @@ Do not unload or reload the module while a task is active.
 - `lens_focus()` returning success does not by itself prove physical movement.
 - SmoothAF v0.2.0 is experimental and has no continuous AF.
 - The recorded physical tests reported successful module loading, working menus and micro-adjustments, but did not recover large focus-distance changes reliably.
-- Runtime telemetry is a single fixed-RAM record; no persistent log, history viewer, FIO export, or filesystem diagnostic is provided.
+- Persistent logging and FIO export are optional, disabled by default, and not physically validated; runtime telemetry remains fixed-size RAM state.
 - The recorded EF 50mm f/1.8 STM tests used Step Size 3; Step Sizes 1 and 2 did not work in those tests.
 - Legacy HC and Adaptive HC results below are not a controlled same-scene comparison and do not establish that Adaptive HC is superior.
 

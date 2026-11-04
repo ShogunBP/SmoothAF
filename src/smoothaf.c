@@ -23,6 +23,8 @@
 #include "smoothaf_recovery.h"
 #include "smoothaf_diagnostics.h"
 #include "smoothaf_build_id.h"
+#include "smoothaf_logger.h"
+#include "smoothaf_logger_fio.h"
 
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
@@ -42,6 +44,10 @@
 #define SMOOTHAF_TASK_STEP       2
 #define SMOOTHAF_TASK_SEARCH     3
 #define SMOOTHAF_TASK_MONITOR    4
+#define SMOOTHAF_TASK_FIO        5
+
+#define SMOOTHAF_FIO_TASK_PRIORITY 0x1d
+#define SMOOTHAF_FIO_TASK_STACK    0x1000
 
 #define SMOOTHAF_STATUS_IDLE          0
 #define SMOOTHAF_STATUS_MEASURING     1
@@ -104,6 +110,12 @@ static CONFIG_INT("smoothaf.monitor_interval", smoothaf_monitor_interval,
 static CONFIG_INT("smoothaf.vlog_episode_limit", smoothaf_vlog_episode_limit,
                  SMOOTHAF_VLOG_AF_DEFAULT_EPISODE_LIMIT);
 static CONFIG_INT("smoothaf.far_focus_recovery", smoothaf_far_focus_recovery, 0);
+
+/* Persistent Logger (Phase 3A) - disabled by default */
+static CONFIG_INT("smoothaf.logger_enabled", smoothaf_logger_enabled, 0);
+static CONFIG_INT("smoothaf.logger_fio_enabled", smoothaf_logger_fio_enabled, 0);
+static CONFIG_INT("smoothaf.logger_max_file_kb", smoothaf_logger_max_file_kb, 256);
+static CONFIG_INT("smoothaf.logger_max_files", smoothaf_logger_max_files, 9);
 
 /* Deliberately volatile and default-off: authorization never arms an episode. */
 static CONFIG_INT("smoothaf.movie_active_experimental",
@@ -173,11 +185,65 @@ static volatile int smoothaf_af_episode_lens_return;
 static volatile int smoothaf_af_episode_summary_pending;
 static volatile uint32_t smoothaf_af_episode_id;
 static volatile int smoothaf_measure_requested;
+static volatile int smoothaf_persist_session_active;
+static volatile int smoothaf_fio_task_running;
+static volatile int smoothaf_fio_task_exited = 1;
+static volatile int smoothaf_fio_task_created;
+static volatile int smoothaf_fio_shutdown_requested;
+static volatile uint32_t smoothaf_fio_seen_errors;
+static volatile uint32_t smoothaf_fio_seen_partials;
+static volatile uint32_t smoothaf_persist_session_episodes;
 static uint32_t smoothaf_session_started_ms;
 static uint32_t smoothaf_session_finished_ms;
 static struct smoothaf_telemetry smoothaf_telemetry;
 static struct smoothaf_log_buffer smoothaf_log;
 static struct smoothaf_episode_log smoothaf_episode_log;
+
+/* Persistent Logger (Phase 3A) */
+static struct smoothaf_persist_log_buffer smoothaf_persist_log;
+static struct smoothaf_log_fio_backend smoothaf_persist_fio;
+static struct smoothaf_persist_log_batch smoothaf_persist_batch;
+/* Note: smoothaf_logger_enabled, smoothaf_logger_fio_enabled, etc. are defined via CONFIG_INT above */
+
+static void smoothaf_persist_logger_record_fio_errors(void)
+{
+    uint32_t errors = smoothaf_log_fio_get_write_errors(&smoothaf_persist_fio);
+    uint32_t partials = smoothaf_log_fio_get_partial_writes(&smoothaf_persist_fio);
+    if (!smoothaf_persist_logger_is_enabled(&smoothaf_persist_log)) {
+        smoothaf_fio_seen_errors = errors;
+        smoothaf_fio_seen_partials = partials;
+        return;
+    }
+    if (errors != smoothaf_fio_seen_errors || partials != smoothaf_fio_seen_partials) {
+        smoothaf_persist_log_write_error(
+            &smoothaf_persist_log, (uint32_t)get_ms_clock(),
+            (uint16_t)smoothaf_af_episode_id,
+            smoothaf_persist_log_get_dropped(&smoothaf_persist_log),
+            smoothaf_log_fio_get_last_error(&smoothaf_persist_fio));
+        smoothaf_fio_seen_errors = errors;
+        smoothaf_fio_seen_partials = partials;
+    }
+}
+
+static void smoothaf_persist_logger_sync_config(void);
+
+static void smoothaf_persist_logger_sync_config(void)
+{
+    bool logger_enabled = smoothaf_logger_enabled ? true : false;
+    bool fio_enabled = (smoothaf_logger_fio_enabled && logger_enabled) ? true : false;
+
+    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log) != logger_enabled)
+        smoothaf_persist_logger_set_enabled(&smoothaf_persist_log, logger_enabled);
+
+    smoothaf_log_fio_request_enabled(&smoothaf_persist_fio, fio_enabled);
+    smoothaf_log_fio_request_limits(&smoothaf_persist_fio,
+                                    smoothaf_logger_max_file_kb > 0
+                                        ? (uint32_t)smoothaf_logger_max_file_kb * 1024
+                                        : 0,
+                                    smoothaf_logger_max_files > 0 &&
+                                    smoothaf_logger_max_files <= SMOOTHAF_LOG_FIO_MAX_FILES
+                                        ? (uint32_t)smoothaf_logger_max_files : 0);
+}
 static struct smoothaf_episode_summary smoothaf_episode_summary_snapshot[SMOOTHAF_EPISODE_SUMMARY_CAPACITY];
 static struct smoothaf_log_entry smoothaf_diag_snapshot[SMOOTHAF_DIAG_CAPACITY];
 static size_t smoothaf_diag_count;
@@ -204,11 +270,13 @@ static int smoothaf_search_direction = -1;
 #define SMOOTHAF_MEASURE_WAITING  3
 
 static int smoothaf_is_task_running(void);
+static int smoothaf_start_fio_task(void);
 static void smoothaf_measure_task(void);
 static void smoothaf_cancel_pending_measure(void);
 static int smoothaf_start_task(int task_id, int requires_enable);
 static const char *smoothaf_movement_state_name(void);
 static void smoothaf_vlog_algorithm_apply_at_episode_boundary(void);
+static int smoothaf_vlog_direction_auto_selected(void);
 
 static const char *smoothaf_status_name_for(int status)
 {
@@ -376,6 +444,9 @@ static void smoothaf_episode_summary_publish(int result, uint32_t ended_ms)
     summary.wait_ms = smoothaf_vlog_af.wait_ms;
     summary.movement_ms = smoothaf_vlog_af.movement_ms;
     summary.stabilization_ms = smoothaf_vlog_af.stabilization_ms;
+    summary.total_lens_ms = smoothaf_vlog_af.total_lens_ms;
+    summary.total_settle_ms = smoothaf_vlog_af.total_settle_ms;
+    summary.total_sample_wait_ms = smoothaf_vlog_af.total_sample_wait_ms;
     summary.commands = smoothaf_vlog_af.commands;
     summary.reversals = smoothaf_vlog_af.reversals;
     summary.initial_score = smoothaf_vlog_af.initial_score;
@@ -395,7 +466,16 @@ static void smoothaf_episode_summary_publish(int result, uint32_t ended_ms)
     summary.post_move_valid = (int16_t)smoothaf_af_post_move_valid;
     summary.confidence = (int16_t)smoothaf_af_confidence;
     summary.complete = 1;
+    if (smoothaf_persist_session_episodes != UINT32_MAX)
+        smoothaf_persist_session_episodes++;
     smoothaf_episode_log_summary(&smoothaf_episode_log, &summary);
+    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+        smoothaf_persist_log_episode_end(&smoothaf_persist_log, ended_ms,
+                                         summary.episode_id,
+                                         (uint8_t)smoothaf_episode_result_map(result),
+                                         summary.best_score, summary.best_position,
+                                         summary.final_score, summary.final_position,
+                                         (uint8_t)summary.commands);
     smoothaf_episode_log_event(&smoothaf_episode_log, ended_ms, summary.episode_id,
                                SMOOTHAF_EPISODE_EVENT_COMPLETE, result,
                                summary.final_score, summary.best_score,
@@ -428,6 +508,44 @@ static void smoothaf_episode_begin(smoothaf_episode_event_type_t type)
                            smoothaf_vlog_af.direction,
                            smoothaf_vlog_af.command_step,
                            smoothaf_vlog_af.current_position, now, now);
+
+    /* Persistent Logger: EPISODE_START hook (non-blocking producer) */
+    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+    {
+        smoothaf_persist_log_episode_start(&smoothaf_persist_log, now,
+                                   (uint16_t)smoothaf_af_episode_id,
+                                   (uint8_t)smoothaf_vlog_af.algorithm,
+                                   smoothaf_vlog_af.initial_score);
+    }
+}
+
+static void smoothaf_persist_session_start(void)
+{
+    if (!smoothaf_persist_logger_is_enabled(&smoothaf_persist_log) ||
+        smoothaf_persist_session_active)
+        return;
+    if (smoothaf_persist_log_session_start(
+            &smoothaf_persist_log, (uint32_t)get_ms_clock(),
+            smoothaf_build_id_value(), SMOOTHAF_VLOG_AF_TIMEOUT_MS,
+            (uint8_t)smoothaf_vlog_episode_limit,
+            (uint8_t)smoothaf_vlog_direction_auto_selected()))
+    {
+        smoothaf_persist_session_episodes = 0;
+        smoothaf_persist_session_active = 1;
+    }
+}
+
+static void smoothaf_persist_session_end(uint8_t reason)
+{
+    if (!smoothaf_persist_session_active ||
+        !smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+        return;
+    smoothaf_persist_log_session_end(
+        &smoothaf_persist_log, (uint32_t)get_ms_clock(), reason,
+        (uint32_t)get_ms_clock() - smoothaf_session_started_ms,
+        (uint16_t)(smoothaf_persist_session_episodes > UINT16_MAX
+                   ? UINT16_MAX : smoothaf_persist_session_episodes));
+    smoothaf_persist_session_active = 0;
 }
 
 static void smoothaf_episode_stop(void)
@@ -442,6 +560,7 @@ static void smoothaf_episode_stop(void)
     smoothaf_af_episode_state_before_error = smoothaf_vlog_af.state;
     smoothaf_episode_summary_publish(
         smoothaf_episode_result_map(smoothaf_vlog_af.episode_result), ended_ms);
+
 }
 
 /* Menu/recording callbacks request cancellation while the monitor task owns
@@ -685,6 +804,9 @@ static void smoothaf_movie_start_automatic(void)
     smoothaf_task_stop_requested = 0;
     smoothaf_task_exited = 0;
     smoothaf_cancel = 0;
+    smoothaf_session_started_ms = (uint32_t)get_ms_clock();
+    smoothaf_persist_logger_sync_config();
+    smoothaf_persist_session_start();
     smoothaf_vlog_af_reset_session(&smoothaf_vlog_af, smoothaf_vlog_af_mode);
     smoothaf_vlog_af_arm_continuous(&smoothaf_vlog_af,
                                     smoothaf_vlog_direction_for_episode(),
@@ -705,6 +827,7 @@ static void smoothaf_movie_start_automatic(void)
         smoothaf_monitor_task_requested = 0;
         smoothaf_movie_automatic_session = 0;
         smoothaf_episode_stop();
+        smoothaf_persist_session_end(4);
     }
 }
 
@@ -719,6 +842,9 @@ static void smoothaf_movie_stop_automatic(void)
     smoothaf_monitor_stop(&smoothaf_monitor);
     smoothaf_monitor_task_requested = 0;
     smoothaf_movie_automatic_session = 0;
+    /* The monitor task owns final EPISODE_END/SESSION_END ordering. */
+    if (!smoothaf_task_running)
+        smoothaf_persist_session_end(2);
     smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 5, 0, 0, 0, 0);
 }
 
@@ -906,7 +1032,11 @@ static int smoothaf_move_with_step(int direction, int step)
                                smoothaf_af_confidence, direction, step,
                                smoothaf_vlog_af.current_position,
                                (uint32_t)start, (uint32_t)start);
+    smoothaf_vlog_af.last_lens_start_ms = (uint32_t)get_ms_clock();
     result = lens_focus(direction, step, 1, 0);
+    smoothaf_vlog_af.last_lens_end_ms = (uint32_t)get_ms_clock();
+    if (smoothaf_vlog_af.total_lens_ms <= UINT32_MAX - (smoothaf_vlog_af.last_lens_end_ms - smoothaf_vlog_af.last_lens_start_ms))
+        smoothaf_vlog_af.total_lens_ms += smoothaf_vlog_af.last_lens_end_ms - smoothaf_vlog_af.last_lens_start_ms;
     smoothaf_last_lens_return = result;
     if (!smoothaf_test_session) smoothaf_af_episode_lens_return = result;
     if (!smoothaf_test_session)
@@ -916,6 +1046,25 @@ static int smoothaf_move_with_step(int direction, int step)
                                smoothaf_af_confidence, direction, step,
                                smoothaf_vlog_af.current_position,
                                (uint32_t)start, (uint32_t)get_ms_clock());
+
+    /* Persistent Logger: COMMAND hook (non-blocking producer) */
+    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+    {
+        uint32_t lens_ms = smoothaf_vlog_af.last_lens_end_ms - smoothaf_vlog_af.last_lens_start_ms;
+        smoothaf_persist_log_controller(&smoothaf_persist_log,
+                                        smoothaf_vlog_af.last_lens_end_ms,
+                                        (uint16_t)smoothaf_af_episode_id,
+                                        (uint8_t)smoothaf_vlog_af.state,
+                                        (uint8_t)smoothaf_vlog_af.controller_action,
+                                        (uint8_t)smoothaf_af_confidence,
+                                        smoothaf_vlog_af.best);
+        smoothaf_persist_log_command(&smoothaf_persist_log,
+                             smoothaf_vlog_af.last_lens_end_ms,
+                             (uint16_t)smoothaf_af_episode_id,
+                             (uint8_t)smoothaf_vlog_af.commands,
+                             (int8_t)direction, (uint8_t)step,
+                             lens_ms, SMOOTHAF_SETTLE_MS, 0);
+    }
     smoothaf_physical_movement_state = result ? SMOOTHAF_MOVEMENT_COMPLETE
                                                : SMOOTHAF_MOVEMENT_FAILED;
     /* lens_focus() returning nonzero means the Canon call was accepted.  It
@@ -1260,6 +1409,50 @@ static void smoothaf_vlog_af_fail(int result, int block)
                                 (int)smoothaf_vlog_af.commands,
                                 (int)smoothaf_vlog_af_commands_available(&smoothaf_vlog_af),
                                 block);
+
+    /* Persistent Logger: TIMEOUT/CANCELLED/LIMIT hooks (non-blocking producer) */
+    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+    {
+        if (result == SMOOTHAF_VLOG_AF_RESULT_TIMEOUT)
+        {
+            /* Determine phase at timeout */
+            uint8_t phase = 0;
+            if (smoothaf_vlog_af.auto_probe_enabled && !smoothaf_vlog_af.auto_probe_done)
+                phase = 1; /* AUTO probe phase */
+            else if (smoothaf_vlog_af.state == SMOOTHAF_VLOG_AF_SETTLING)
+                phase = 2; /* Settling phase */
+            else if (smoothaf_vlog_af.state == SMOOTHAF_VLOG_AF_PROBING)
+                phase = 3; /* Algorithm phase */
+            else
+                phase = 4; /* Other/cooldown */
+            smoothaf_persist_log_timeout(&smoothaf_persist_log, now,
+                                 (uint16_t)smoothaf_af_episode_id,
+                                 phase, now - smoothaf_vlog_af.started_ms,
+                                 (uint8_t)smoothaf_vlog_af.commands);
+        }
+        else if (result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
+        {
+            uint8_t cancel_reason = (smoothaf_panic ? 2 :
+                                     (smoothaf_task_stop_requested ? 1 :
+                                      (block == SMOOTHAF_VLOG_AF_BLOCK_DISABLED ? 3 : 4)));
+            smoothaf_persist_log_cancelled(&smoothaf_persist_log, now,
+                                           (uint16_t)smoothaf_af_episode_id,
+                                           cancel_reason,
+                                           (uint8_t)smoothaf_vlog_af.commands);
+
+        }
+        else if (result == SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT ||
+                 result == SMOOTHAF_VLOG_AF_RESULT_BLOCKED)
+        {
+            uint8_t limit_type = result == SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT
+                               ? SMOOTHAF_PERSIST_LOG_LIMIT_EPISODE_CMDS
+                               : SMOOTHAF_PERSIST_LOG_LIMIT_SESSION_CMDS;
+            smoothaf_persist_log_limit(&smoothaf_persist_log, now,
+                               (uint16_t)smoothaf_af_episode_id,
+                               limit_type,
+                               (uint32_t)smoothaf_vlog_af.commands);
+        }
+    }
 }
 
 static void smoothaf_monitor_task(void)
@@ -1352,6 +1545,32 @@ static void smoothaf_monitor_task(void)
         sample.metric = smoothaf_vlog_metric == SMOOTHAF_METRIC_LAPLACIAN
                       ? SMOOTHAF_MONITOR_METRIC_LAPLACIAN : SMOOTHAF_MONITOR_METRIC_SAD;
         sample.duration_ms = completed - start;
+        /* Instrumentation: capture sample time and accumulate settle/wait durations */
+        smoothaf_vlog_af.last_sample_ms = completed;
+
+        /* Persistent Logger: MEASUREMENT hook (non-blocking producer) */
+        if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log) && smoothaf_vlog_af.armed)
+        {
+            smoothaf_persist_log_measurement(&smoothaf_persist_log, completed,
+                                     (uint16_t)smoothaf_af_episode_id,
+                                     score, mean, sad, laplacian,
+                                     (uint8_t)(valid ? 1 : 0),
+                                     (uint8_t)(sample.confident ? 1 : 0));
+        }
+        if (smoothaf_vlog_af.last_settle_start_ms &&
+            completed >= smoothaf_vlog_af.last_settle_start_ms &&
+            smoothaf_vlog_af.total_settle_ms <= UINT32_MAX - (completed - smoothaf_vlog_af.last_settle_start_ms))
+        {
+            smoothaf_vlog_af.total_settle_ms += completed - smoothaf_vlog_af.last_settle_start_ms;
+            smoothaf_vlog_af.last_settle_start_ms = 0;
+        }
+        if (smoothaf_vlog_af.last_lens_end_ms &&
+            completed >= smoothaf_vlog_af.last_lens_end_ms + SMOOTHAF_COOLDOWN_MS &&
+            smoothaf_vlog_af.total_sample_wait_ms <= UINT32_MAX - (completed - smoothaf_vlog_af.last_lens_end_ms - SMOOTHAF_COOLDOWN_MS))
+        {
+            smoothaf_vlog_af.total_sample_wait_ms += completed - smoothaf_vlog_af.last_lens_end_ms - SMOOTHAF_COOLDOWN_MS;
+            smoothaf_vlog_af.last_lens_end_ms = 0;
+        }
         if (smoothaf_movie_recording.active &&
             smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_DRY_RUN)
         {
@@ -1410,6 +1629,11 @@ static void smoothaf_monitor_task(void)
             }
             else if (post_move_lighting)
             {
+                if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+                    smoothaf_persist_log_environmental(&smoothaf_persist_log, completed,
+                                                       (uint16_t)smoothaf_af_episode_id,
+                                                       1, sample.mean,
+                                                       sample.mean - smoothaf_monitor.reference_mean);
                 /* The exposure changed between the command and its result.
                  * Do not credit or blame the STM command, and do not add an AF
                  * failure to the safety streak. */
@@ -1455,6 +1679,13 @@ static void smoothaf_monitor_task(void)
                 smoothaf_af_confidence = sample.confident;
                 if (auto_probe_measurement)
                 {
+                    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+                        smoothaf_persist_log_auto_probe(&smoothaf_persist_log, completed,
+                                                        (uint16_t)smoothaf_af_episode_id,
+                                                        1, (int8_t)smoothaf_vlog_af.direction,
+                                                        sample.score,
+                                                        sample.score - smoothaf_vlog_af.previous_score,
+                                                        (uint8_t)sample.confident);
                     smoothaf_vlog_adapter_prepare_score(sample.score, completed);
                     smoothaf_vlog_af_auto_observe_mean(&smoothaf_vlog_af, sample.mean);
                     smoothaf_vlog_af_auto_commit_move(&smoothaf_vlog_af);
@@ -1512,6 +1743,13 @@ static void smoothaf_monitor_task(void)
                 }
                 if (!auto_probe_measurement && smoothaf_vlog_af.controller_measure_only)
                 {
+                    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+                        smoothaf_persist_log_controller(&smoothaf_persist_log, completed,
+                                                        (uint16_t)smoothaf_af_episode_id,
+                                                        (uint8_t)smoothaf_vlog_af.state,
+                                                        (uint8_t)smoothaf_vlog_af.controller_action,
+                                                        (uint8_t)sample.confident,
+                                                        smoothaf_vlog_af.best);
                     smoothaf_vlog_af.controller_measure_only = 0;
                     adapter_continue = smoothaf_vlog_controller_on_score(sample.score);
                     if (adapter_continue == 2)
@@ -1544,6 +1782,13 @@ static void smoothaf_monitor_task(void)
                          smoothaf_vlog_af.algorithm != SMOOTHAF_ALGORITHM_CURRENT_VLOG &&
                          !recovery_active)
                 {
+                    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+                        smoothaf_persist_log_controller(&smoothaf_persist_log, completed,
+                                                        (uint16_t)smoothaf_af_episode_id,
+                                                        (uint8_t)smoothaf_vlog_af.state,
+                                                        (uint8_t)smoothaf_vlog_af.controller_action,
+                                                        (uint8_t)sample.confident,
+                                                        smoothaf_vlog_af.best);
                     adapter_continue = smoothaf_vlog_controller_on_score(sample.score);
                     if (smoothaf_vlog_af.controller_measure_only)
                     {
@@ -1643,6 +1888,12 @@ static void smoothaf_monitor_task(void)
             smoothaf_monitor_qualify_reference(&smoothaf_monitor, sample.score,
                                                sample.mean, sample.metric,
                                                completed);
+            if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+                smoothaf_persist_log_reference_set(&smoothaf_persist_log, completed,
+                                                   (uint16_t)smoothaf_af_episode_id,
+                                                   (uint8_t)smoothaf_monitor.reference_state,
+                                                   sample.score,
+                                                   smoothaf_vlog_af.current_position);
             smoothaf_vlog_af.acquisition_attempt_active = 0;
             smoothaf_monitor_log_transitions();
         }
@@ -1745,6 +1996,13 @@ static void smoothaf_monitor_task(void)
                 smoothaf_vlog_af_dry_run_request(&smoothaf_vlog_af, smoothaf_enabled, completed);
                 smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
                 smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_DRY_RUN;
+                if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+                    smoothaf_persist_log_command(&smoothaf_persist_log, completed,
+                                                 (uint16_t)smoothaf_af_episode_id,
+                                                 (uint8_t)smoothaf_vlog_af.commands,
+                                                 (int8_t)smoothaf_vlog_af.direction,
+                                                 (uint8_t)smoothaf_vlog_af.command_step,
+                                                 0, 0, 0);
             }
             else if (smoothaf_block_reason())
             {
@@ -1831,6 +2089,9 @@ static void smoothaf_monitor_task(void)
          * commands the lens; a later monitor pass may act on PROBING. */
         smoothaf_vlog_af_advance_cooldown(&smoothaf_vlog_af,
                                           (uint32_t)get_ms_clock());
+
+        /* FIO is serviced by the independent logger task. The AF task only
+         * publishes fixed-size RAM records and never performs card I/O. */
     }
     smoothaf_cancel_pending_measure();
     if (smoothaf_af_episode_id && !smoothaf_af_episode_complete)
@@ -1839,6 +2100,11 @@ static void smoothaf_monitor_task(void)
         smoothaf_episode_summary_publish(
             smoothaf_episode_result_map(smoothaf_vlog_af.episode_result),
             (uint32_t)get_ms_clock());
+
+    smoothaf_persist_session_end(smoothaf_cancel ?
+                                 (smoothaf_panic ? 3 : 2) : 1);
+
+    smoothaf_persist_logger_sync_config();
     smoothaf_monitor_task_requested = 0;
 }
 
@@ -2176,6 +2442,50 @@ static void smoothaf_task_entry(void *arg)
     }
 }
 
+static void smoothaf_fio_task(void *arg)
+{
+    (void)arg;
+    smoothaf_fio_task_running = 1;
+    smoothaf_fio_task_exited = 0;
+    while (!smoothaf_fio_shutdown_requested) {
+        smoothaf_persist_logger_sync_config();
+        if (smoothaf_log_fio_is_enabled(&smoothaf_persist_fio) ||
+            smoothaf_persist_fio.config_pending ||
+            smoothaf_persist_fio.close_pending)
+            smoothaf_log_fio_service(&smoothaf_persist_fio,
+                                     &smoothaf_persist_log,
+                                     &smoothaf_persist_batch);
+        smoothaf_persist_logger_record_fio_errors();
+        msleep(20);
+    }
+    /* Shutdown is deliberately non-draining: STOP/deinit must not wait for
+     * card I/O. The consumer remains the sole owner of FILE * and closes it
+     * before publishing task exit. Any unflushed RAM records are retained only
+     * in the disposable module state. */
+    if (smoothaf_log_fio_is_enabled(&smoothaf_persist_fio) ||
+        smoothaf_persist_fio.current_file)
+        smoothaf_log_fio_set_enabled(&smoothaf_persist_fio, false);
+    smoothaf_fio_task_running = 0;
+    smoothaf_fio_task_exited = 1;
+}
+
+static int smoothaf_start_fio_task(void)
+{
+    struct task *task;
+    if (smoothaf_fio_task_running) return 1;
+    smoothaf_fio_task_created = 1;
+    smoothaf_fio_task_exited = 0;
+    task = task_create("smoothaf_fio", SMOOTHAF_FIO_TASK_PRIORITY,
+                       SMOOTHAF_FIO_TASK_STACK, smoothaf_fio_task, NULL);
+    if (!task || (((uintptr_t)task) & 1)) {
+        smoothaf_fio_task_created = 0;
+        smoothaf_fio_task_running = 0;
+        smoothaf_fio_task_exited = 1;
+        return 0;
+    }
+    return 1;
+}
+
 static int smoothaf_is_task_running(void)
 {
     int running;
@@ -2240,6 +2550,19 @@ static void smoothaf_cancel_pending_measure(void)
     smoothaf_last_error = 1;
     smoothaf_last_block = SMOOTHAF_BLOCK_CANCELLED;
     smoothaf_status = SMOOTHAF_STATUS_CANCELLED;
+}
+
+static MENU_SELECT_FUNC(smoothaf_persist_logger_config_select)
+{
+    smoothaf_persist_logger_sync_config();
+    if (smoothaf_logger_fio_enabled && smoothaf_logger_enabled &&
+        !smoothaf_fio_task_running && !smoothaf_fio_task_created &&
+        !smoothaf_monitor_deinit && !smoothaf_start_fio_task())
+    {
+        smoothaf_logger_fio_enabled = 0;
+        smoothaf_last_error = 1;
+        smoothaf_last_block = SMOOTHAF_BLOCK_TASK_CREATE;
+    }
 }
 
 static MENU_SELECT_FUNC(smoothaf_measure_select)
@@ -2310,6 +2633,9 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
     }
     smoothaf_monitor_start(&smoothaf_monitor, smoothaf_vlog_metric,
                            (uint32_t)get_ms_clock());
+    smoothaf_session_started_ms = (uint32_t)get_ms_clock();
+    smoothaf_persist_logger_sync_config();
+    smoothaf_persist_session_start();
     smoothaf_vlog_af_reset_session(&smoothaf_vlog_af, smoothaf_vlog_af_mode);
     smoothaf_vlog_algorithm_apply_at_episode_boundary();
     smoothaf_vlog_af_set_algorithm(&smoothaf_vlog_af,
@@ -2325,6 +2651,7 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
     smoothaf_monitor_log_transitions();
     if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))
     {
+        smoothaf_persist_session_end(4);
         smoothaf_monitor_stop(&smoothaf_monitor);
         smoothaf_monitor_task_requested = 0;
         smoothaf_monitor_transition(&smoothaf_monitor, SMOOTHAF_MONITOR_ERROR);
@@ -2711,13 +3038,16 @@ static MENU_UPDATE_FUNC(smoothaf_episode_summary_update)
                    (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].episode_id,
                    smoothaf_episode_result_name(smoothaf_episode_summary_snapshot[
                        smoothaf_episode_summary_page].result));
-    MENU_SET_HELP("best=%d final=%d img=%ums wait=%ums move=%ums settle=%ums cmds=%u rev=%u",
+    MENU_SET_HELP("best=%d final=%d img=%ums wait=%ums move=%ums settle=%ums lens=%ums wait2=%ums smpw=%ums cmds=%u rev=%u",
                   (int)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].best_score,
                   (int)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].final_score,
                   (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].image_ms,
                   (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].wait_ms,
                   (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].movement_ms,
                   (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].stabilization_ms,
+                  (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].total_lens_ms,
+                  (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].total_settle_ms,
+                  (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].total_sample_wait_ms,
                   (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].commands,
                   (unsigned)smoothaf_episode_summary_snapshot[smoothaf_episode_summary_page].reversals);
 }
@@ -2828,6 +3158,21 @@ static MENU_UPDATE_FUNC(smoothaf_diag_entry_update)
 
 static MENU_UPDATE_FUNC(smoothaf_diag_dropped_update)
 { MENU_SET_VALUE("%d", (int)smoothaf_log.dropped); }
+
+static MENU_UPDATE_FUNC(smoothaf_logger_fill_update)
+{ MENU_SET_VALUE("%d / %d", (int)smoothaf_persist_log_get_fill(&smoothaf_persist_log), SMOOTHAF_LOG_BUF_ENTRIES - 1); }
+
+static MENU_UPDATE_FUNC(smoothaf_logger_dropped_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_persist_log_get_dropped(&smoothaf_persist_log)); }
+
+static MENU_UPDATE_FUNC(smoothaf_logger_fio_errors_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_log_fio_get_write_errors(&smoothaf_persist_fio)); }
+
+static MENU_UPDATE_FUNC(smoothaf_logger_fio_partials_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_log_fio_get_partial_writes(&smoothaf_persist_fio)); }
+
+static MENU_UPDATE_FUNC(smoothaf_logger_fio_files_update)
+{ MENU_SET_VALUE("%d", (int)smoothaf_persist_fio.total_files_written); }
 
 static MENU_UPDATE_FUNC(smoothaf_measure_result_update)
 {
@@ -3175,6 +3520,26 @@ static struct menu_entry smoothaf_menu[] =
           .help = "Diagnostic/manual relative motor direction; does not control automatic Vlog AF." },
         { .name = "Debug Logging", .priv = &smoothaf_log.enabled, .min = 0, .max = 1,
           .help = "Record MOVE, MEASURE, CONTROLLER, ERROR and TASK-END events in RAM." },
+        { .name = "Persistent Logger", .priv = &smoothaf_logger_enabled, .min = 0, .max = 1,
+          .select = smoothaf_persist_logger_config_select,
+          .help = "Enable RAM logging of AF episodes (session/episode/command/measurement/timeout)." },
+        { .name = "Logger FIO Enable", .priv = &smoothaf_logger_fio_enabled, .min = 0, .max = 1,
+          .select = smoothaf_persist_logger_config_select,
+          .help = "Enable file I/O backend for persistent SD logging (requires Persistent Logger ON)." },
+        { .name = "Logger Max File KB", .priv = &smoothaf_logger_max_file_kb, .min = 64, .max = 1024,
+          .unit = UNIT_DEC, .help = "Maximum KB per log file before rotation." },
+        { .name = "Logger Max Files", .priv = &smoothaf_logger_max_files, .min = 1, .max = 9,
+          .help = "Maximum number of rotated log files (SMTH000.LOG..SMTH008.LOG)." },
+        { .name = "Logger Fill Level", .update = smoothaf_logger_fill_update,
+          .help = "Current RAM ring buffer fill (0..255)." },
+        { .name = "Logger Dropped", .update = smoothaf_logger_dropped_update,
+          .help = "Records lost due to full buffer." },
+        { .name = "Logger FIO Errors", .update = smoothaf_logger_fio_errors_update,
+          .help = "FIO write errors (card unavailable, partial write, file full)." },
+        { .name = "Logger FIO Partials", .update = smoothaf_logger_fio_partials_update,
+          .help = "Partial FIO writes (buffer full during write)." },
+        { .name = "Logger FIO Files", .update = smoothaf_logger_fio_files_update,
+          .help = "Times file rotation triggered (size limit reached)." },
         { .name = "Log Page", .update = smoothaf_diag_page_update,
           .help = "EP/event page in the fixed RAM snapshot." },
         { .name = "Log Entry", .update = smoothaf_diag_entry_update,
@@ -3364,6 +3729,14 @@ static unsigned int smoothaf_init(void)
     smoothaf_af_episode_cancel_reason = 0;
     smoothaf_af_episode_lens_return = 0;
     smoothaf_measure_requested = 0;
+    smoothaf_persist_session_active = 0;
+    smoothaf_persist_session_episodes = 0;
+    smoothaf_fio_shutdown_requested = 0;
+    smoothaf_fio_task_created = 0;
+    smoothaf_fio_task_running = 0;
+    smoothaf_fio_task_exited = 1;
+    smoothaf_fio_seen_errors = 0;
+    smoothaf_fio_seen_partials = 0;
     smoothaf_episode_log_init(&smoothaf_episode_log);
     smoothaf_episode_summary_count = 0;
     smoothaf_episode_summary_page = 0;
@@ -3378,6 +3751,12 @@ static unsigned int smoothaf_init(void)
     smoothaf_movie_recording_init(&smoothaf_movie_recording);
     smoothaf_monitor_task_requested = 0;
     smoothaf_monitor_deinit = 0;
+    smoothaf_fio_shutdown_requested = 0;
+    smoothaf_fio_task_created = 0;
+    smoothaf_fio_task_running = 0;
+    smoothaf_fio_task_exited = 1;
+    smoothaf_fio_seen_errors = 0;
+    smoothaf_fio_seen_partials = 0;
     smoothaf_vlog_af_init(&smoothaf_vlog_af);
     smoothaf_vlog_af_mode = SMOOTHAF_VLOG_AF_OFF;
     smoothaf_vlog_algorithm = smoothaf_algorithm_normalize(smoothaf_vlog_algorithm);
@@ -3391,6 +3770,25 @@ static unsigned int smoothaf_init(void)
     smoothaf_af_episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     smoothaf_log_init(&smoothaf_log);
     smoothaf_diag_count = 0;
+
+    /* Persistent Logger (Phase 3A) - initialize but keep disabled by default */
+    smoothaf_persist_logger_init(&smoothaf_persist_log);
+    smoothaf_persist_logger_set_enabled(&smoothaf_persist_log, smoothaf_logger_enabled ? true : false);
+    smoothaf_log_fio_init(&smoothaf_persist_fio);
+    smoothaf_log_fio_request_enabled(&smoothaf_persist_fio,
+                                     (smoothaf_logger_fio_enabled && smoothaf_logger_enabled) ? true : false);
+    if (smoothaf_logger_fio_enabled && smoothaf_logger_enabled &&
+        !smoothaf_start_fio_task()) {
+        smoothaf_logger_fio_enabled = 0;
+        smoothaf_last_error = 1;
+        smoothaf_last_block = SMOOTHAF_BLOCK_TASK_CREATE;
+    }
+    if (smoothaf_logger_max_file_kb > 0) {
+        smoothaf_persist_fio.max_file_size_bytes = (uint32_t)smoothaf_logger_max_file_kb * 1024;
+    }
+    if (smoothaf_logger_max_files > 0 && smoothaf_logger_max_files <= SMOOTHAF_LOG_FIO_MAX_FILES) {
+        smoothaf_persist_fio.max_files = (uint32_t)smoothaf_logger_max_files;
+    }
     smoothaf_diag_page = 0;
     smoothaf_diag_seen_total = 0;
     smoothaf_telemetry_init(&smoothaf_telemetry);
@@ -3437,6 +3835,7 @@ static unsigned int smoothaf_deinit(void)
     int i;
     smoothaf_monitor_deinit = 1;
     smoothaf_task_stop_requested = 1;
+    smoothaf_fio_shutdown_requested = 0;
     smoothaf_cancel_pending_measure();
     smoothaf_monitor_stop(&smoothaf_monitor);
     if (smoothaf_lock())
@@ -3460,6 +3859,23 @@ static unsigned int smoothaf_deinit(void)
         smoothaf_last_error = 1;
         smoothaf_last_block = SMOOTHAF_BLOCK_CANCELLED;
     }
+
+    /* Stop the independent consumer without waiting for card I/O. The task
+     * owns FILE * and will close it as part of its own exit path. If it is
+     * already inside a non-cancellable FIO/lens primitive, leave the menu in
+     * place and report the unload hazard instead of blocking deinit. */
+    smoothaf_fio_shutdown_requested = 1;
+    smoothaf_log_fio_request_close(&smoothaf_persist_fio);
+    smoothaf_persist_logger_set_enabled(&smoothaf_persist_log, false);
+    if (smoothaf_fio_task_created && !smoothaf_fio_task_exited)
+    {
+        smoothaf_last_error = 1;
+        smoothaf_last_block = SMOOTHAF_BLOCK_CANCELLED;
+    }
+
+    if (smoothaf_is_task_running() || !smoothaf_task_exited ||
+        (smoothaf_fio_task_created && !smoothaf_fio_task_exited))
+        return 1;
     menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
     return 0;
 }
@@ -3492,4 +3908,8 @@ MODULE_CONFIGS_START()
     MODULE_CONFIG(smoothaf_vlog_episode_limit)
     MODULE_CONFIG(smoothaf_far_focus_recovery)
     MODULE_CONFIG(smoothaf_movie_active_experimental)
+    MODULE_CONFIG(smoothaf_logger_enabled)
+    MODULE_CONFIG(smoothaf_logger_fio_enabled)
+    MODULE_CONFIG(smoothaf_logger_max_file_kb)
+    MODULE_CONFIG(smoothaf_logger_max_files)
 MODULE_CONFIGS_END()

@@ -18,6 +18,10 @@ $Dockerfile = Join-Path $ProjectRoot 'docker\Dockerfile'
 $Image = 'smoothaf-legacy-build:bookworm'
 $OutputRoot = Join-Path $ProjectRoot 'artifacts'
 $ModulePath = Join-Path $OutputRoot 'v0.8\smoothaf.mo'
+$ShortCommit = (& git -c core.autocrlf=true -C $ProjectRoot rev-parse --short=12 HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ShortCommit)) { throw 'Unable to determine source commit for Build ID.' }
+$Dirty = (& git -c core.autocrlf=true -C $ProjectRoot status --porcelain)
+$BuildSuffix = if ($Dirty) { '-dirty' } else { '' }
 
 if ([string]::IsNullOrWhiteSpace($LegacyRoot)) {
     $legacyCandidates = @(
@@ -63,7 +67,7 @@ Run-Docker @('build', '-t', $Image, '-f', $Dockerfile, $ProjectRoot)
 
 if ($TestOnly) {
     $mount = "type=bind,source=$ProjectRoot,target=/src"
-    Run-Docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', 'gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_core /src/tests/test_smoothaf_core.c && /tmp/test_smoothaf_core && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_algorithm /src/tests/test_smoothaf_algorithm.c && /tmp/test_smoothaf_algorithm && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_monitor /src/tests/test_smoothaf_monitor.c && /tmp/test_smoothaf_monitor && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_diagnostics /src/tests/test_smoothaf_diagnostics.c && /tmp/test_smoothaf_diagnostics && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/benchmark_smoothaf /src/tests/benchmark_smoothaf.c && /tmp/benchmark_smoothaf && python3 /src/tests/test_smoothaf_menu_regression.py')
+    Run-Docker @('run', '--rm', '--mount', $mount, '--workdir', '/tmp', $Image, 'sh', '-c', 'gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_core /src/tests/test_smoothaf_core.c && /tmp/test_smoothaf_core && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_algorithm /src/tests/test_smoothaf_algorithm.c && /tmp/test_smoothaf_algorithm && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_monitor /src/tests/test_smoothaf_monitor.c && /tmp/test_smoothaf_monitor && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/test_smoothaf_diagnostics /src/tests/test_smoothaf_diagnostics.c && /tmp/test_smoothaf_diagnostics && gcc -std=c99 -Wall -Wextra -O2 -pthread -DSMOOTHAF_HOST_TEST -I/src/src -o /tmp/test_smoothaf_logger /src/tests/test_smoothaf_logger.c /src/src/smoothaf_logger.c /src/src/smoothaf_logger_fio.c && /tmp/test_smoothaf_logger && gcc -std=c99 -Wall -Wextra -O2 -o /tmp/benchmark_smoothaf /src/tests/benchmark_smoothaf.c && /tmp/benchmark_smoothaf && python3 -B /src/tests/test_smoothaf_menu_regression.py')
     exit 0
 }
 
@@ -91,10 +95,13 @@ try {
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_direction.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_recovery.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_build_id.h') $integration -Force
-    $commit = (& git -C $ProjectRoot rev-parse --short=12 HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) { throw 'Unable to determine source commit for Build ID.' }
-    $buildId = "${commit}-600D.102"
-    Set-Content -LiteralPath (Join-Path $integration 'smoothaf_build_id.h') -Value @("#ifndef SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID `"$buildId`"", "#define SMOOTHAF_BUILD_CONFIG `"600D.102`"", "#endif") -Encoding ascii
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_logger.h') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_logger.c') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_logger_fio.h') $integration -Force
+    Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_logger_fio.c') $integration -Force
+    $commit = $ShortCommit
+    $buildId = "${commit}${BuildSuffix}-600D.102"
+    Set-Content -LiteralPath (Join-Path $integration 'smoothaf_build_id.h') -Value @("#ifndef SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID_H", "#define SMOOTHAF_BUILD_ID `"$buildId`"", "#define SMOOTHAF_BUILD_CONFIG `"600D.102`"", "static inline const char *smoothaf_build_id_value(void)", "{", "    return SMOOTHAF_BUILD_ID;", "}", "#endif") -Encoding ascii
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_diagnostics.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'src\smoothaf_monitor.h') $integration -Force
     Copy-Item (Join-Path $ProjectRoot 'integration\Makefile') $integration -Force
@@ -135,7 +142,15 @@ try {
     }
     $strings = & docker @('run', '--rm', '--mount', $mount, $Image, 'sh', '-c', "strings -a /src/legacy/modules/smoothaf/smoothaf.mo | grep -F '$buildId'")
     if ($LASTEXITCODE -ne 0 -or -not ($strings -match [regex]::Escape($buildId))) { throw 'Final module does not contain the expected Build ID.' }
-    Write-Output 'DEP=23'
+    $depPath = Join-Path $integration 'smoothaf.dep'
+    if (-not (Test-Path -LiteralPath $depPath -PathType Leaf)) {
+        throw "ARM build completed without producing smoothaf.dep."
+    }
+    $depCount = @(
+        Get-Content -LiteralPath $depPath |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    ).Count
+    Write-Output "DEP=$depCount"
 
     if ($Release) {
         $releaseDir = Join-Path $OutputRoot ("releases\smoothaf-$sha")

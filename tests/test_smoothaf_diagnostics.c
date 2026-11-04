@@ -19,7 +19,7 @@ int main(void)
     smoothaf_log_init(&log);
     smoothaf_episode_log_init(&episodes);
     CHECK(sizeof(struct smoothaf_episode_event) <= 56 &&
-          sizeof(struct smoothaf_episode_summary) <= 80,
+          sizeof(struct smoothaf_episode_summary) <= 96,
           "compact episode records");
     CHECK(strcmp(smoothaf_episode_event_name(SMOOTHAF_EPISODE_EVENT_POST_MOVE),
                  "POST_MOVE") == 0 &&

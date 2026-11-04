@@ -77,11 +77,17 @@ def test_menu_shape_and_lifecycle():
         '"PTP_AF_START"', '"lens_setup_af"', '"module_send_keypress"',
         '"Export AF Log"', '"Test SD Write"', '"Test Root Create"',
         '"Test Root Edit"', '"Test File Paths"', '"Path Entry"',
-        '"Path Result"', 'FIO_',
+        '"Path Result"', 'FIO_CreateFile(', 'FIO_WriteFile(', 'FIO_CloseFile(',
     ):
         assert forbidden not in source
     assert 'smoothaf_af_assist' not in source
     assert 'SMOOTHAF_ENABLE_FILESYSTEM_DIAGNOSTICS' not in source
+    for logger_menu_name in (
+        '"Persistent Logger"', '"Logger FIO Enable"',
+        '"Logger Max File KB"', '"Logger Max Files"',
+        '"Logger Fill Level"', '"Logger Dropped"',
+    ):
+        assert logger_menu_name in menu
     assert 'smoothaf_log_' in source
     assert 'smoothaf_diag_' in source
     assert '#include "smoothaf_diagnostics.h"' in source

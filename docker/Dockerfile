@@ -17,6 +17,7 @@ RUN apt-get update \
        gzip \
        zip \
        xz-utils \
+       git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

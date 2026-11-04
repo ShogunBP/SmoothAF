@@ -111,6 +111,9 @@ struct smoothaf_episode_summary
     uint32_t wait_ms;
     uint32_t movement_ms;
     uint32_t stabilization_ms;
+    uint32_t total_lens_ms;
+    uint32_t total_settle_ms;
+    uint32_t total_sample_wait_ms;
     uint32_t commands;
     uint32_t reversals;
     int32_t initial_score;

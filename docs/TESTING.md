@@ -23,17 +23,17 @@ The v0.6 test set covers core metrics, simultaneous SAD/Laplacian ROI calculatio
 
 The algorithm-selection tests additionally cover enum normalization, Focus Test isolation, Movie recovery opt-in, bounded coarse/bracket/fine recovery transitions and explicit cancellation. These are host state-machine tests only; they do not validate camera movement or optical recovery.
 
-The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output `DEP=23` and `Will load on: 600D` confirm build-time resolution only.
+The ARM build uses the compatible Legacy Lua Fix tree and private `600D_102.SYM` input supplied outside the repository. Dependency output is counted from the generated `.dep` file and `Will load on: 600D` confirms build-time resolution only.
 
 ## SmoothAF v0.8 validation procedure
 
-The v0.8 POC must be validated in this order:
+The v0.8 POC must be validated in this order. The ARM script reports the dependency count from the generated `.dep` file; neither that count nor `Will load on: 600D` proves runtime ABI or camera behavior.
 
-The normal build does not include filesystem export or FIO probes. `Export AF Log`, `Test SD Write`, Root FIO tests and path probes are absent from the normal menu. Logging and AF telemetry are fixed-size, volatile and RAM-only; no FIO operation is performed during initialization, autofocus, monitoring or normal diagnostics. The experimental FIO sources remain isolated and are not compiled by the default `-TestOnly` path.
+The normal module path contains no direct FIO calls in the AF task or menu callbacks. `-TestOnly` compiles the logger and host-simulated FIO backend in a disposable `/tmp` workdir; this validates ownership, retries and rotation logic only. Production FIO remains consumer-task-owned and is not camera evidence.
 
 1. Run `.\build-smoothaf.ps1 -TestOnly` and preserve the `(SIMULATION)` label on benchmark output.
 2. Use host tests to validate mode, arm, episode, four-command limit, settle, cooldown, no-reversal behavior and Stop. Host tests do not prove lens movement safety on camera.
-3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, `DEP=23` and ELF ARM/EABI5. Save the experimental module only as `artifacts/v0.8/smoothaf.mo`.
+3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, the generated `DEP` count and ELF ARM/EABI5. Save the experimental module only as `artifacts/v0.8/smoothaf.mo`.
 4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
 5. Test Movie Dry Run separately in normal H.264 recording. Start the monitor before recording, select `Vlog AF Mode=DRY RUN`, manually arm one episode, and use a second phone/camera to record the ML display. Confirm recording start/end events, sample count, validity/confidence, score, duration, blur transitions and zero `AF Lens Calls`; custom and RAW recording must remain blocked. The existing menu is the least-invasive visibility path, but it may not remain open or refresh over the recording UI; treat its values as opportunistic and use the fixed RAM Log Page/Log Entry after the clip as the authoritative fallback.
 6. Exercise four short scenes: initially focused static target, nearly focused target, heavily defocused target and a subject approaching/receding. Use short clips first; stop immediately on recording corruption, task stall, abnormal heat, battery/card warning or any unexpected lens command.
@@ -54,11 +54,27 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - Episode telemetry host coverage includes bounded RAM event/summary records, timestamp wraparound, overflow accounting and retained terminal summaries. Physical lifecycle behavior remains pending.
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
 - ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
-- The final build output includes the commit-derived Build ID, `Will load on: 600D` and `DEP=23`; exact final provenance is recorded from the final build command output rather than copied from a historical artifact.
+- Latest pre-commit ARM evidence: `Will load on: 600D`, `DEP=36`, `SIZE=97148`, SHA-256 `af71ef86639d45512e6744e8763e26864c006d92eda68c26235fa709a7f4892f`, Build ID `e2eefebf3ff3-600D.102-dirty`. This is superseded by the post-commit build below.
+- The final post-commit ARM command output must be recorded together with `Will load on: 600D`, the generated `.dep` count, module size/hash and the embedded commit-derived Build ID; these values are intentionally not hard-coded before the final commit is immutable.
+
+## Phase 3A audit matrix
+
+| ID | Problema | Correção implementada | Teste | Resultado | Risco restante |
+|---|---|---|---|---|---|
+| P3A-01 | FIO/card I/O no caminho AF | Ring RAM MPSC e consumidor FIO independente com ownership exclusivo de `FILE *` | Logger host, `-Wall -Wextra -Werror`, ARM build | PASS | FIO/cache/DMA real não validado |
+| P3A-02 | STOP/PANIC poderia aguardar escrita | STOP/PANIC apenas publicam estado/request; deinit sinaliza o consumidor sem drenar o cartão síncronamente | `stop_panic_non_blocking`, revisão de lifecycle | PASS no host | `lens_focus(wait=1)` e loader Legacy podem permanecer bloqueantes |
+| P3A-03 | Corrupção após short write/erro | Batch permanece reservado; retry usa assinatura/offset e não rotaciona linha em andamento | `consumer_failure`, short-write, rotation-boundary retry | PASS | Falhas FIO e remoção física dependem do runtime |
+| P3A-04 | Configuração concorrente de FIO | Requests são aplicados pelo consumidor; mudanças durante aplicação deixam `config_pending` para o próximo ciclo | logger FIO host e revisão de ownership | PASS | Não há teste concorrente com preempção DryOS real |
+| P3A-05 | Contenção/overflow do ring | Gate bounded try-lock, barreiras ARM9 e contadores de drop/contensão | pthread producer/consumer, overflow, UBSan | PASS | TSan indisponível neste ambiente |
+| P3A-06 | Eventos persistentes incompletos/duplicados | Hooks centralizados para sessão, episódio terminal, COMMAND, MEASUREMENT, TIMEOUT, LIMIT, CANCELLED e WRITE_ERROR | eventos específicos, integridade e ordenação host | PASS | Ordenação física só será observável no cartão |
+| P3A-07 | Proveniência ARM/DEP inconsistente | Build ID derivado de commit/configuração, `.dep` contado do arquivo gerado e staging descartável | `build-3a.sh`, ARM/EABI5 | PASS pré-commit; repetir pós-commit | Avisos HGVERSION/HGDIFF por ausência de `.hg` no staging |
+| P3A-08 | Unload seguro não demonstrável | Deinit observa quiescência e não remove menu se tarefa continuar; documentação explicita NO-GO | revisão Legacy + testes host | PASS como contenção | Loader sem join/kill e tarefa ativa continuam bloqueador físico |
+
+**Recomendação física:** **NO-GO**. Não instalar no SD nem executar validação física até o build pós-commit ser conferido e a quiescência do loader/tarefas ser observada em câmera controlada.
 - The staged module is an `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)` `.mo`; undefined symbols are Legacy-resolved imports, including `lens_focus`, `get_ms_clock`, VRAM, task, menu and semaphore APIs. The Legacy build does not emit a separate `.elf`; the `.mo` is the inspected relocatable ELF.
 - The embedded Build ID is checked against the final commit. The pre-build v0.8 artifacts remain preserved in the existing untracked `artifacts/v0.8/smoothaf.mo.pre-*` backups; no backup was deleted.
 - No physical v0.8 or Movie validation or SD-card installation has been performed. All camera results, including zero lens movement in Dry Run and optical focus/displacement, remain pending. Movie Dry Run must have zero physical lens commands; Movie ACTIVE is not enabled for recording.
-- FIO export and filesystem probes are intentionally not part of the normal v0.8 validation path. The normal menu performs no card writes; host validation covers only volatile RAM telemetry and history. Experimental FIO tests remain isolated for a future explicitly enabled build and must not be treated as production validation.
+- FIO export is disabled by default and host validation covers only the simulated consumer, rotation, short-write retry, card removal/recovery and configuration ownership. No physical SD, cache/DMA or camera-runtime evidence is claimed.
 
 ## SmoothAF v0.6 validation record
 
