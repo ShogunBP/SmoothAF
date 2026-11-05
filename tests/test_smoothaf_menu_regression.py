@@ -213,8 +213,61 @@ def test_production_runtime_diagnostics_invariants():
     assert 'MENU_SET_VALUE("G=%u F=%u"' not in source
 
 
+def test_production_menu_and_task_start_paths():
+    source = SOURCE.read_text(encoding="utf-8")
+    logger_select = source.split(
+        "static MENU_SELECT_FUNC(smoothaf_persist_logger_config_select)", 1
+    )[1].split("static MENU_SELECT_FUNC(smoothaf_measure_select)", 1)[0]
+    monitor_select = source.split(
+        "static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)", 1
+    )[1].split("static const char *smoothaf_monitor_task_state_name", 1)[0]
+    movie_start = source.split(
+        "static void smoothaf_movie_start_automatic(void)", 1
+    )[1].split("static void smoothaf_movie_stop_automatic(void)\n{", 1)[0]
+    start_task = source.split(
+        "static int smoothaf_start_task(int task_id, int requires_enable)\n{", 1
+    )[1].split("/* A queued Measure", 1)[0]
+
+    # Legacy calls a custom .select instead of applying the default .priv
+    # toggle, so this production callback must perform the toggle explicitly.
+    assert "smoothaf_logger_config_toggle(priv, delta, menu_numeric_toggle)" in logger_select
+    assert '#include "smoothaf_menu_toggle.h"' in source
+    assert logger_select.index("smoothaf_logger_config_toggle") < logger_select.index(
+        "smoothaf_persist_logger_sync_config();"
+    )
+    assert source.count(".select = smoothaf_persist_logger_config_select") == 2
+    assert source.count(".priv = &smoothaf_logger_enabled") == 1
+    assert source.count(".priv = &smoothaf_logger_fio_enabled") == 1
+
+    # Monitoring and Movie Active Exp leave task_exited to the common starter;
+    # a failed semaphore acquisition therefore cannot leave a false 'active'
+    # state behind before a task exists.
+    assert "smoothaf_task_exited = 0;" not in monitor_select
+    assert "smoothaf_task_exited = 0;" not in movie_start
+    assert "if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))" in monitor_select
+    assert "if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))" in movie_start
+    assert '#include "smoothaf_task_lifecycle.h"' in source
+    assert "if (!smoothaf_lock())" in start_task
+    lock_failure = start_task.split("if (!smoothaf_lock())", 1)[1].split(
+        "    if ((", 1
+    )[0]
+    assert "smoothaf_task_running = 1;" not in lock_failure
+    assert "smoothaf_task_exited = 0;" not in lock_failure
+    assert "return 0;" in lock_failure
+    assert "smoothaf_task_create_failed(&smoothaf_task_running" in start_task
+    assert "smoothaf_task_running = 0;" not in start_task
+    assert "smoothaf_task_exited = 1;" not in start_task
+    assert start_task.index("smoothaf_task_reserve(") < start_task.index(
+        "task = task_create("
+    )
+    assert start_task.index("task = task_create(") < start_task.index(
+        "smoothaf_task_create_failed("
+    )
+
+
 if __name__ == "__main__":
     test_production_runtime_diagnostics_invariants()
+    test_production_menu_and_task_start_paths()
 
     test_menu_shape_and_lifecycle()
     test_removed_integration_files_are_not_present()

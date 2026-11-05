@@ -26,6 +26,8 @@
 #include "smoothaf_build_id.h"
 #include "smoothaf_logger.h"
 #include "smoothaf_logger_fio.h"
+#include "smoothaf_menu_toggle.h"
+#include "smoothaf_task_lifecycle.h"
 
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
@@ -997,7 +999,6 @@ static void smoothaf_movie_start_automatic(void)
     smoothaf_monitor_task_requested = 1;
     smoothaf_monitor_deinit = 0;
     smoothaf_task_stop_requested = 0;
-    smoothaf_task_exited = 0;
     smoothaf_cancel = 0;
     smoothaf_session_started_ms = (uint32_t)get_ms_clock();
     smoothaf_persist_logger_sync_config();
@@ -2658,8 +2659,11 @@ static int smoothaf_start_task(int task_id, int requires_enable)
         smoothaf_unlock();
         return 0;
     }
-    smoothaf_task_running = 1;
-    smoothaf_task_exited = 0;
+    if (!smoothaf_task_reserve(&smoothaf_task_running, &smoothaf_task_exited))
+    {
+        smoothaf_unlock();
+        return 0;
+    }
     smoothaf_session_started_ms = (uint32_t)get_ms_clock();
     smoothaf_session_finished_ms = 0;
     smoothaf_cancel = 0;
@@ -2682,8 +2686,8 @@ static int smoothaf_start_task(int task_id, int requires_enable)
         smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_TASK_CREATE,
                                     task ? 3 : 2,
                                     SMOOTHAF_RUNTIME_STAGE_TASK_CREATE);
-        smoothaf_task_running = 0;
-        smoothaf_task_exited = 1;
+        smoothaf_task_create_failed(&smoothaf_task_running,
+                                    &smoothaf_task_exited);
         smoothaf_session_finished_ms = (uint32_t)get_ms_clock();
         smoothaf_last_block = SMOOTHAF_BLOCK_TASK_CREATE;
         smoothaf_last_error = 1;
@@ -2712,6 +2716,8 @@ static void smoothaf_cancel_pending_measure(void)
 
 static MENU_SELECT_FUNC(smoothaf_persist_logger_config_select)
 {
+    /* A custom .select replaces Legacy's automatic .priv toggle. */
+    if (!smoothaf_logger_config_toggle(priv, delta, menu_numeric_toggle)) return;
     smoothaf_persist_logger_sync_config();
     if (smoothaf_logger_fio_enabled && smoothaf_logger_enabled &&
         !smoothaf_fio_task_running && !smoothaf_fio_task_created &&
@@ -2804,7 +2810,6 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
     smoothaf_monitor_task_requested = 1;
     smoothaf_monitor_deinit = 0;
     smoothaf_task_stop_requested = 0;
-    smoothaf_task_exited = 0;
     smoothaf_cancel = 0;
     smoothaf_monitor_log_transitions();
     if (!smoothaf_start_task(SMOOTHAF_TASK_MONITOR, 0))
