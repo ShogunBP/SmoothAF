@@ -290,8 +290,33 @@ static int smoothaf_search_direction = -1;
 #define SMOOTHAF_RUNTIME_ERROR_TASK_CREATE 4
 #define SMOOTHAF_RUNTIME_ERROR_FIO_TASK    5
 #define SMOOTHAF_RUNTIME_ERROR_READY      6
+#define SMOOTHAF_RUNTIME_ERROR_INIT_DUPLICATE 7
+
+#define SMOOTHAF_INIT_STAGE_NONE          0
+#define SMOOTHAF_INIT_STAGE_STARTED       1
+#define SMOOTHAF_INIT_STAGE_SEM_CREATE    2
+#define SMOOTHAF_INIT_STAGE_READY         3
+#define SMOOTHAF_INIT_STAGE_FINISHED      4
+#define SMOOTHAF_INIT_LIFECYCLE_NONE      0
+#define SMOOTHAF_INIT_LIFECYCLE_RUNNING   1
+#define SMOOTHAF_INIT_LIFECYCLE_SUCCESS   2
+#define SMOOTHAF_INIT_LIFECYCLE_FAILURE   3
 
 static volatile int smoothaf_runtime_stage;
+static volatile int smoothaf_runtime_init_stage;
+static volatile uint32_t smoothaf_runtime_init_started;
+static volatile uint32_t smoothaf_runtime_init_finished;
+static volatile uint32_t smoothaf_runtime_init_failed;
+static volatile uint32_t smoothaf_runtime_init_duplicates;
+static volatile int smoothaf_runtime_init_first_error;
+static volatile int smoothaf_runtime_init_lifecycle;
+static volatile uintptr_t smoothaf_runtime_sem_storage_address;
+static volatile uintptr_t smoothaf_runtime_sem_created_value;
+static volatile uintptr_t smoothaf_runtime_sem_copied_value;
+static volatile uintptr_t smoothaf_runtime_sem_post_create_value;
+static volatile uintptr_t smoothaf_runtime_sem_end_init_value;
+static volatile uintptr_t smoothaf_runtime_sem_first_no_handle_value;
+static volatile int smoothaf_runtime_sem_first_no_handle_valid;
 static volatile int smoothaf_runtime_sem_create_result;
 static volatile uintptr_t smoothaf_runtime_sem_handle;
 static volatile int smoothaf_runtime_first_take_result = SMOOTHAF_RUNTIME_RESULT_UNSET;
@@ -349,6 +374,44 @@ static void smoothaf_runtime_note_error(int error, int result, int stage)
 static void smoothaf_runtime_increment(volatile uint32_t *value)
 {
     if (*value != 0xffffffffu) (*value)++;
+}
+
+static unsigned int smoothaf_init(void);
+static int smoothaf_lock(void);
+
+static void smoothaf_runtime_init_failure(int error, int result,
+                                           int init_stage, int runtime_stage)
+{
+    smoothaf_runtime_init_stage = init_stage;
+    smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_FAILURE;
+    smoothaf_runtime_sem_end_init_value = (uintptr_t)smoothaf_sem;
+    smoothaf_runtime_increment(&smoothaf_runtime_init_failed);
+    if (!smoothaf_runtime_init_first_error)
+        smoothaf_runtime_init_first_error = error;
+    smoothaf_runtime_note_error(error, result, runtime_stage);
+}
+
+static void smoothaf_runtime_init_duplicate_failure(void)
+{
+    smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_FAILURE;
+    smoothaf_runtime_increment(&smoothaf_runtime_init_failed);
+    if (!smoothaf_runtime_init_first_error)
+        smoothaf_runtime_init_first_error = SMOOTHAF_RUNTIME_ERROR_INIT_DUPLICATE;
+    smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_INIT_DUPLICATE, 0,
+                                SMOOTHAF_RUNTIME_STAGE_INIT);
+}
+
+static void smoothaf_runtime_init_reset_attempt_fields(void)
+{
+    smoothaf_runtime_init_stage = SMOOTHAF_INIT_STAGE_STARTED;
+    smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_RUNNING;
+    smoothaf_runtime_sem_storage_address = (uintptr_t)&smoothaf_sem;
+    smoothaf_runtime_sem_created_value = 0;
+    smoothaf_runtime_sem_copied_value = 0;
+    smoothaf_runtime_sem_post_create_value = 0;
+    smoothaf_runtime_sem_end_init_value = 0;
+    smoothaf_runtime_sem_first_no_handle_value = 0;
+    smoothaf_runtime_sem_first_no_handle_valid = 0;
 }
 
 #define SMOOTHAF_MEASURE_OK       0
@@ -430,6 +493,11 @@ static int smoothaf_lock(void)
     smoothaf_runtime_last_take_caller = (uintptr_t)current_task;
     if (!smoothaf_sem)
     {
+        if (!smoothaf_runtime_sem_first_no_handle_valid)
+        {
+            smoothaf_runtime_sem_first_no_handle_value = (uintptr_t)smoothaf_sem;
+            smoothaf_runtime_sem_first_no_handle_valid = 1;
+        }
         /* A missing handle is still a failed lock attempt from the
          * operational path; keep it visible instead of silently returning. */
         smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_SEM_TAKE;
@@ -3472,6 +3540,14 @@ static const char *smoothaf_runtime_task_result_name(int result)
 static MENU_UPDATE_FUNC(smoothaf_runtime_stage_update)
 { MENU_SET_VALUE("%s", smoothaf_runtime_stage_name()); }
 
+static MENU_UPDATE_FUNC(smoothaf_runtime_init_state_update)
+{
+    MENU_SET_VALUE("S=%d F=%d X=%d D=%d St=%d E=%d L=%d", (int)smoothaf_runtime_init_started,
+                   (int)smoothaf_runtime_init_finished, (int)smoothaf_runtime_init_failed,
+                   (int)smoothaf_runtime_init_duplicates, (int)smoothaf_runtime_init_stage,
+                   (int)smoothaf_runtime_init_first_error, (int)smoothaf_runtime_init_lifecycle);
+}
+
 static MENU_UPDATE_FUNC(smoothaf_runtime_sem_create_update)
 {
     if (smoothaf_runtime_sem_create_result == 1)
@@ -3484,6 +3560,51 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_sem_create_update)
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_sem_handle_update)
 { MENU_SET_VALUE("0x%08x", (unsigned)smoothaf_runtime_sem_handle); }
+
+static MENU_UPDATE_FUNC(smoothaf_runtime_sem_current_update)
+{ MENU_SET_VALUE("0x%08x", (unsigned)(uintptr_t)smoothaf_sem); }
+
+static MENU_UPDATE_FUNC(smoothaf_runtime_sem_snapshot_update)
+{
+    MENU_SET_VALUE("S=0x%08x C=0x%08x", (unsigned)smoothaf_runtime_sem_storage_address,
+                   (unsigned)smoothaf_runtime_sem_created_value);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_runtime_sem_copy_update)
+{
+    MENU_SET_VALUE("P=0x%08x E=0x%08x", (unsigned)smoothaf_runtime_sem_copied_value,
+                   (unsigned)smoothaf_runtime_sem_post_create_value);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_runtime_sem_end_update)
+{
+    MENU_SET_VALUE("E=0x%08x N=0x%08x", (unsigned)smoothaf_runtime_sem_end_init_value,
+                   (unsigned)smoothaf_runtime_sem_first_no_handle_value);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_runtime_code_identity_update)
+{
+    MENU_SET_VALUE("I=0x%08x L=0x%08x", (unsigned)(uintptr_t)&smoothaf_init,
+                   (unsigned)(uintptr_t)&smoothaf_lock);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_runtime_data_identity_update)
+{
+    MENU_SET_VALUE("S=0x%08x R=0x%08x", (unsigned)(uintptr_t)&smoothaf_sem,
+                   (unsigned)(uintptr_t)&smoothaf_runtime_sem_create_result);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_build_code_identity_update)
+{
+    MENU_SET_VALUE("I=0x%08x L=0x%08x", (unsigned)(uintptr_t)&smoothaf_init,
+                   (unsigned)(uintptr_t)&smoothaf_lock);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_build_data_identity_update)
+{
+    MENU_SET_VALUE("S=0x%08x R=0x%08x", (unsigned)(uintptr_t)&smoothaf_sem,
+                   (unsigned)(uintptr_t)&smoothaf_runtime_sem_create_result);
+}
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_take_result_update)
 { MENU_SET_VALUE("%s(%d)", smoothaf_runtime_result_name(smoothaf_runtime_first_take_result), (int)smoothaf_runtime_first_take_result); }
@@ -3592,6 +3713,7 @@ static const char *smoothaf_runtime_error_name(int error)
         case SMOOTHAF_RUNTIME_ERROR_TASK_CREATE: return "TASK CREATE";
         case SMOOTHAF_RUNTIME_ERROR_FIO_TASK: return "FIO TASK";
         case SMOOTHAF_RUNTIME_ERROR_READY: return "READY INVARIANT";
+        case SMOOTHAF_RUNTIME_ERROR_INIT_DUPLICATE: return "INIT DUPLICATE";
         default: return "NONE";
     }
 }
@@ -3800,8 +3922,15 @@ static MENU_UPDATE_FUNC(smoothaf_status_update)
 static struct menu_entry smoothaf_runtime_menu[] =
 {
     { .name = "Runtime Stage", .update = smoothaf_runtime_stage_update },
+    { .name = "Code Identity", .update = smoothaf_runtime_code_identity_update },
+    { .name = "Data Identity", .update = smoothaf_runtime_data_identity_update },
+    { .name = "Init S/F/X/St/E", .update = smoothaf_runtime_init_state_update },
     { .name = "Semaphore Create", .update = smoothaf_runtime_sem_create_update },
     { .name = "Semaphore Handle", .update = smoothaf_runtime_sem_handle_update },
+    { .name = "Semaphore Current", .update = smoothaf_runtime_sem_current_update },
+    { .name = "Semaphore Snap S/C", .update = smoothaf_runtime_sem_snapshot_update },
+    { .name = "Semaphore Snap P/E", .update = smoothaf_runtime_sem_copy_update },
+    { .name = "Semaphore Snap E/N", .update = smoothaf_runtime_sem_end_update },
     { .name = "First Take Result", .update = smoothaf_runtime_take_result_update },
     { .name = "Last Take Result", .update = smoothaf_runtime_last_take_update },
     { .name = "First Take Duration", .update = smoothaf_runtime_take_duration_update },
@@ -3823,10 +3952,24 @@ static struct menu_entry smoothaf_runtime_menu[] =
     MENU_EOL,
 };
 
-static struct menu_entry smoothaf_runtime_root_menu[] =
+/* The pre-init menu is flat by design.  It has no submenu callback, no
+ * private configuration pointer and no task/FIO/controller reads. */
+static struct menu_entry smoothaf_runtime_init_menu[] =
 {
-    { .name = "Runtime Diagnostics", .select = menu_open_submenu,
-      .children = smoothaf_runtime_menu },
+    { .name = "Runtime Stage", .update = smoothaf_runtime_stage_update },
+    { .name = "Code Identity", .update = smoothaf_runtime_code_identity_update },
+    { .name = "Data Identity", .update = smoothaf_runtime_data_identity_update },
+    { .name = "Init S/F/X/St/E", .update = smoothaf_runtime_init_state_update },
+    { .name = "Semaphore Create", .update = smoothaf_runtime_sem_create_update },
+    { .name = "Semaphore Handle", .update = smoothaf_runtime_sem_handle_update },
+    { .name = "Semaphore Current", .update = smoothaf_runtime_sem_current_update },
+    { .name = "Semaphore Snap S/C", .update = smoothaf_runtime_sem_snapshot_update },
+    { .name = "Semaphore Snap P/E", .update = smoothaf_runtime_sem_copy_update },
+    { .name = "Semaphore Snap E/N", .update = smoothaf_runtime_sem_end_update },
+    { .name = "First Take Result", .update = smoothaf_runtime_take_result_update },
+    { .name = "Last Take Result", .update = smoothaf_runtime_last_take_update },
+    { .name = "First Runtime Error", .update = smoothaf_runtime_first_error_update },
+    { .name = "Last Runtime Error", .update = smoothaf_runtime_error_update },
     MENU_EOL,
 };
 
@@ -3923,7 +4066,6 @@ static struct menu_entry smoothaf_menu[] =
           .help = "Show the next diagnostic record." },
         { .name = "Clear History", .select = smoothaf_diag_clear_select,
           .help = "Clear records and page tracking." },
-        { .name = "Runtime Diagnostics", .select = menu_open_submenu,
         { .name = "Runtime Diagnostics", .select = menu_open_submenu,
           .children = smoothaf_runtime_menu },
         { .name = "Dropped", .update = smoothaf_diag_dropped_update,
@@ -4057,10 +4199,23 @@ static struct menu_entry smoothaf_menu[] =
       .help = "Clear PANIC only after the previous task has ended; Enable remains off." },
     { .name = "Build Info", .update = smoothaf_build_info_update,
       .help = "Deterministic source/configuration identifier for this module." },
+    { .name = "Code Identity", .update = smoothaf_build_code_identity_update },
+    { .name = "Data Identity", .update = smoothaf_build_data_identity_update },
 };
 
 static unsigned int smoothaf_init(void)
 {
+    int duplicate_init = smoothaf_runtime_init_lifecycle != SMOOTHAF_INIT_LIFECYCLE_NONE;
+    smoothaf_runtime_increment(&smoothaf_runtime_init_started);
+    if (duplicate_init)
+    {
+        smoothaf_runtime_increment(&smoothaf_runtime_init_duplicates);
+        smoothaf_runtime_init_duplicate_failure();
+        return 1;
+    }
+    smoothaf_runtime_init_stage = SMOOTHAF_INIT_STAGE_STARTED;
+    smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_RUNNING;
+    smoothaf_runtime_sem_storage_address = (uintptr_t)&smoothaf_sem;
     smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_INIT;
     smoothaf_runtime_sem_create_result = SMOOTHAF_RUNTIME_RESULT_UNSET;
     smoothaf_runtime_sem_handle = 0;
@@ -4100,20 +4255,26 @@ static unsigned int smoothaf_init(void)
     smoothaf_runtime_last_error_result = 0;
     smoothaf_runtime_last_error_stage = SMOOTHAF_RUNTIME_STAGE_NONE;
     smoothaf_runtime_fio_failed = 0;
+    smoothaf_runtime_init_reset_attempt_fields();
     smoothaf_fio_task_starting = 0;
     smoothaf_movie_active_experimental = 0;
     /* Publish only the read-only diagnostic page before mandatory resource
      * validation.  The operational menu must not expose callbacks while init
      * can still fail; Legacy skips deinit for errored modules. */
-    menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));
+    menu_add("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));
     smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_SEM_CREATE;
+    smoothaf_runtime_init_stage = SMOOTHAF_INIT_STAGE_SEM_CREATE;
     smoothaf_sem = create_named_semaphore("smoothaf_sem", 1);
+    smoothaf_runtime_sem_created_value = (uintptr_t)smoothaf_sem;
+    smoothaf_runtime_sem_copied_value = (uintptr_t)smoothaf_sem;
     smoothaf_runtime_sem_handle = (uintptr_t)smoothaf_sem;
     smoothaf_runtime_sem_create_result = smoothaf_sem ? 1 : 0;
+    smoothaf_runtime_sem_post_create_value = (uintptr_t)smoothaf_sem;
     if (!smoothaf_sem)
     {
-        smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_SEM_CREATE, 0,
-                                    SMOOTHAF_RUNTIME_STAGE_SEM_CREATE);
+        smoothaf_runtime_init_failure(SMOOTHAF_RUNTIME_ERROR_SEM_CREATE, 0,
+                                      SMOOTHAF_INIT_STAGE_SEM_CREATE,
+                                      SMOOTHAF_RUNTIME_STAGE_SEM_CREATE);
         return 1;
     }
     /* READY is a published invariant, not merely the next source line:
@@ -4121,11 +4282,13 @@ static unsigned int smoothaf_init(void)
     if (smoothaf_runtime_sem_create_result != 1 || !smoothaf_runtime_sem_handle)
     {
         smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_SEM_CREATE;
-        smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_READY,
-                                    smoothaf_runtime_sem_create_result,
-                                    SMOOTHAF_RUNTIME_STAGE_SEM_CREATE);
+        smoothaf_runtime_init_failure(SMOOTHAF_RUNTIME_ERROR_READY,
+                                      smoothaf_runtime_sem_create_result,
+                                      SMOOTHAF_INIT_STAGE_SEM_CREATE,
+                                      SMOOTHAF_RUNTIME_STAGE_SEM_CREATE);
         return 1;
     }
+    smoothaf_runtime_init_stage = SMOOTHAF_INIT_STAGE_READY;
     smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_READY;
     smoothaf_enabled = 0;
     smoothaf_panic = 0;
@@ -4266,7 +4429,11 @@ static unsigned int smoothaf_init(void)
     smoothaf_monitor_interval = smoothaf_monitor_normalize_interval(smoothaf_monitor_interval);
     smoothaf_monitor.interval_index = smoothaf_monitor_interval;
     menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
-    menu_remove("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));
+    smoothaf_runtime_sem_end_init_value = (uintptr_t)smoothaf_sem;
+    smoothaf_runtime_init_stage = SMOOTHAF_INIT_STAGE_FINISHED;
+    smoothaf_runtime_increment(&smoothaf_runtime_init_finished);
+    smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_SUCCESS;
+    menu_remove("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));
     return 0;
 }
 
@@ -4317,7 +4484,7 @@ static unsigned int smoothaf_deinit(void)
         (smoothaf_fio_task_created && !smoothaf_fio_task_exited))
         return 1;
     menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
-    menu_remove("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));
+    menu_remove("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));
     return 0;
 }
 

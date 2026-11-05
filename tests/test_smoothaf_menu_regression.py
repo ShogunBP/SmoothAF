@@ -73,12 +73,14 @@ def test_menu_shape_and_lifecycle():
     ):
         assert name in menu
 
-    assert 'menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));' in source
+    assert 'menu_add("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));' in source
     assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
-    assert 'menu_remove("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));' in source
+    assert 'menu_remove("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));' in source
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
-    init = source.split("static unsigned int smoothaf_init(void)", 1)[1]
-    runtime_add = init.index('menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));')
+    assert 'static struct menu_entry smoothaf_runtime_init_menu[] =' in source
+    assert 'static struct menu_entry smoothaf_runtime_root_menu[] =' not in source
+    init = source.rsplit("static unsigned int smoothaf_init(void)", 1)[1]
+    runtime_add = init.index('menu_add("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));')
     sem_create = init.index('smoothaf_sem = create_named_semaphore("smoothaf_sem", 1);')
     operational_add = init.index('menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));')
     assert runtime_add < sem_create < operational_add
@@ -189,6 +191,8 @@ def test_production_runtime_diagnostics_invariants():
     assert source.count("take_semaphore(") == 1
     assert source.count("give_semaphore(") == 1
     assert "if (!smoothaf_sem)" in lock
+    assert "smoothaf_runtime_sem_first_no_handle_value = (uintptr_t)smoothaf_sem;" in lock
+    assert "smoothaf_runtime_sem_first_no_handle_valid = 1;" in lock
     assert "smoothaf_runtime_increment(&smoothaf_runtime_take_count);" in lock
     assert "smoothaf_runtime_increment(&smoothaf_runtime_take_failures);" in lock
     assert "smoothaf_runtime_last_take_caller = (uintptr_t)current_task;" in lock
@@ -198,15 +202,31 @@ def test_production_runtime_diagnostics_invariants():
 
     # Initialization publishes the semaphore result before READY; a later
     # change must not make an unverified handle look ready.
-    init = source.split("static unsigned int smoothaf_init(void)", 1)[1]
+    init = source.rsplit("static unsigned int smoothaf_init(void)", 1)[1]
     create_publish = init.index("smoothaf_runtime_sem_create_result = smoothaf_sem ? 1 : 0;")
     ready_guard = init.index("if (smoothaf_runtime_sem_create_result != 1 || !smoothaf_runtime_sem_handle)")
     ready_publish = init.index("smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_READY;")
     assert create_publish < ready_guard < ready_publish
-    assert "smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_READY" in init
+    assert "smoothaf_runtime_init_failure(SMOOTHAF_RUNTIME_ERROR_READY" in init
+    assert "smoothaf_runtime_note_error(error, result, runtime_stage);" in source
     assert "READY INVARIANT" in source
-    assert 'menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));' in init
+    assert 'menu_add("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));' in init
     assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in init
+    assert source.count('"Code Identity"') == 3
+    assert source.count('"Data Identity"') == 3
+    for callback in (
+        "smoothaf_runtime_code_identity_update",
+        "smoothaf_runtime_data_identity_update",
+        "smoothaf_build_code_identity_update",
+        "smoothaf_build_data_identity_update",
+    ):
+        body = source.split("static MENU_UPDATE_FUNC(" + callback + ")", 1)[1].split("static ", 1)[0]
+        if "code" in callback:
+            assert "&smoothaf_init" in body
+            assert "&smoothaf_lock" in body
+        else:
+            assert "&smoothaf_sem" in body
+            assert "&smoothaf_runtime_sem_create_result" in body
 
     # The first runtime error is a latch: menu refreshes and later errors must
     # not clear or replace it.
@@ -220,6 +240,34 @@ def test_production_runtime_diagnostics_invariants():
     assert 'MENU_SET_VALUE("G=%d F=%d"' in source
     assert 'MENU_SET_VALUE("T=%u F=%u"' not in source
     assert 'MENU_SET_VALUE("G=%u F=%u"' not in source
+
+    # Init lifecycle and pointer snapshots are independent of the last-event
+    # runtime stage and use uintptr_t for all pointer evidence.
+    assert "smoothaf_runtime_increment(&smoothaf_runtime_init_started);" in init
+    assert "smoothaf_runtime_increment(&smoothaf_runtime_init_finished);" in init
+    assert "smoothaf_runtime_increment(&smoothaf_runtime_init_failed);" in source
+    assert "smoothaf_runtime_increment(&smoothaf_runtime_init_duplicates);" in init
+    assert source.count("smoothaf_runtime_increment(&smoothaf_runtime_init_duplicates);") == 1
+    assert "SMOOTHAF_INIT_STAGE_DUPLICATE" not in source
+    assert "smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_RUNNING;" in init
+    assert "smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_SUCCESS;" in init
+    assert "smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_FAILURE;" in source
+    assert "smoothaf_runtime_init_first_error = 0;" not in init
+    assert "smoothaf_runtime_init_duplicate_failure();" in init
+    assert "int duplicate_init = smoothaf_runtime_init_lifecycle != SMOOTHAF_INIT_LIFECYCLE_NONE;" in init
+    assert source.count("smoothaf_runtime_increment(&smoothaf_runtime_init_duplicates);") == 1
+    assert "return 1;" in init[init.index("smoothaf_runtime_init_duplicate_failure();"):]
+    for field in (
+        "smoothaf_runtime_sem_storage_address",
+        "smoothaf_runtime_sem_created_value",
+        "smoothaf_runtime_sem_copied_value",
+        "smoothaf_runtime_sem_post_create_value",
+        "smoothaf_runtime_sem_end_init_value",
+        "smoothaf_runtime_sem_first_no_handle_value",
+    ):
+        assert "uintptr_t " + field in source
+    assert "(uintptr_t)&smoothaf_sem" in init
+    assert "(uintptr_t)smoothaf_sem" in source
 
 
 def test_production_menu_and_task_start_paths():
