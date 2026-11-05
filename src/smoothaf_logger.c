@@ -397,17 +397,71 @@ static const char *event_name(uint16_t type) {
     }
 }
 
+static int append_unsigned_decimal(char *out, size_t maxlen, size_t *len,
+                                   uint32_t value)
+{
+    char digits[10];
+    size_t count = 0;
+
+    do {
+        digits[count++] = (char)('0' + value % 10u);
+        value /= 10u;
+    } while (value != 0u);
+
+    if (*len + count >= maxlen) return -1;
+    while (count != 0u) out[(*len)++] = digits[--count];
+    out[*len] = '\0';
+    return 0;
+}
+
+static int append_signed_decimal(char *out, size_t maxlen, size_t *len,
+                                 int32_t value)
+{
+    uint32_t magnitude;
+
+    if (value < 0) {
+        if (*len + 1u >= maxlen) return -1;
+        out[(*len)++] = '-';
+        /* This also handles INT32_MIN without signed overflow. */
+        magnitude = 0u - (uint32_t)value;
+    } else {
+        magnitude = (uint32_t)value;
+    }
+    return append_unsigned_decimal(out, maxlen, len, magnitude);
+}
+
+static int append_text(char *out, size_t maxlen, size_t *len, const char *text)
+{
+    size_t text_len = strlen(text);
+    if (*len + text_len >= maxlen) return -1;
+    memcpy(out + *len, text, text_len);
+    *len += text_len;
+    out[*len] = '\0';
+    return 0;
+}
+
 static int format_record(const struct smoothaf_persist_log_record *rec, char *out, size_t maxlen) {
-    int len = snprintf(out, maxlen, "%lu\t%s\t%u",
-                       (unsigned long)rec->timestamp_ms, event_name(rec->event_type), rec->episode_id);
-    if (len < 0 || (size_t)len >= maxlen) return -1;
+    size_t len = 0;
+
+    if (!rec || !out || maxlen == 0u) return -1;
+    out[0] = '\0';
+
+    /* Do not use %u/%lu here.  The 600D Canon formatter renders those
+     * unsigned conversions as a literal 'u'; decimal serialization is small,
+     * deterministic, and avoids variadic-width differences entirely. */
+    if (append_unsigned_decimal(out, maxlen, &len, rec->timestamp_ms) < 0 ||
+        append_text(out, maxlen, &len, "\t") < 0 ||
+        append_text(out, maxlen, &len, event_name(rec->event_type)) < 0 ||
+        append_text(out, maxlen, &len, "\t") < 0 ||
+        append_unsigned_decimal(out, maxlen, &len, (uint32_t)rec->episode_id) < 0)
+        return -1;
 
     for (int i = 0; i < SMOOTHAF_LOG_MAX_PAYLOAD; i++) {
-        int n = snprintf(out + len, maxlen - (size_t)len, "\t%ld", (long)rec->payload[i]);
-        if (n < 0 || len + n >= (int)maxlen) return -1;
-        len += n;
+        if (append_text(out, maxlen, &len, "\t") < 0 ||
+            append_signed_decimal(out, maxlen, &len, rec->payload[i]) < 0)
+            return -1;
     }
-    return len;
+    return (int)len;
 }
 
 uint32_t smoothaf_persist_log_consume_batch(struct smoothaf_persist_log_buffer *buf,

@@ -518,6 +518,30 @@ static void test_logging_off_no_interference(void) {
     PASS();
 }
 
+static void test_format_unsigned_contract(void) {
+    TEST("format_unsigned_contract");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        INT32_MIN, 0, 0, 0, 0, 0
+    };
+
+    reset_logger(&buf);
+    enable_logger(&buf);
+    ASSERT_TRUE(smoothaf_persist_log_record(
+                    &buf, UINT32_MAX, SMOOTHAF_PERSIST_LOG_CANCELLED,
+                    UINT16_MAX, payload),
+                "boundary record accepted");
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 1u,
+              "boundary record consumed");
+    ASSERT_STREQ(batch.lines[0],
+                 "4294967295\tCANCELLED\t65535\t-2147483648\t0\t0\t0\t0\t0",
+                 "unsigned and signed fields serialize exactly");
+    ASSERT_TRUE(strstr(batch.lines[0], "u") == NULL,
+                "formatter must not leak unsupported conversion suffixes");
+    PASS();
+}
+
 static void test_specific_events(void) {
     TEST("specific_events_episode_start");
     struct smoothaf_persist_log_buffer buf;
@@ -1007,6 +1031,7 @@ int main(void) {
     test_wrap_around();
     test_overflow_ordering();
     test_record_integrity();
+    test_format_unsigned_contract();
     test_producer_consumer_concurrency();
     test_real_pthread_producer_consumer();
     test_dropped_counter();
