@@ -393,6 +393,8 @@ static void smoothaf_runtime_init_failure(int error, int result,
 
 static void smoothaf_runtime_init_duplicate_failure(void)
 {
+    smoothaf_runtime_init_stage = SMOOTHAF_INIT_STAGE_STARTED;
+    smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_INIT;
     smoothaf_runtime_init_lifecycle = SMOOTHAF_INIT_LIFECYCLE_FAILURE;
     smoothaf_runtime_increment(&smoothaf_runtime_init_failed);
     if (!smoothaf_runtime_init_first_error)

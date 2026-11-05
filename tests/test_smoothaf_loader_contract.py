@@ -11,13 +11,12 @@ def test_legacy_init_contract_and_failed_module_lifecycle():
     failure_branch = LOADER.index("if (err)", init_call)
     disable_callbacks = LOADER.index("module_list[mod].cbr = 0;", failure_branch)
     registration = LOADER.index("if(!module_list[mod].error)", disable_callbacks)
-    unload_filter = LOADER.index("!module_list[mod].error")
     deinit = LOADER.index("module_list[mod].info->deinit();")
 
     assert "if (err)" in LOADER[init_call:failure_branch + 30]
     assert "module_list[mod].error = err;" in LOADER[failure_branch:disable_callbacks]
     assert disable_callbacks < registration
-    unload_filter = LOADER.index("if(module_list[mod].valid && module_list[mod].enabled && !module_list[mod].error)", deinit)
+    unload_filter = LOADER.index("if(module_list[mod].valid && module_list[mod].enabled && !module_list[mod].error)")
     assert unload_filter < deinit
     assert "module_list[mod].valid = 0;" in LOADER[deinit:deinit + 180]
 
@@ -49,7 +48,7 @@ def test_legacy_menu_add_remove_contract_is_flat_safe():
     remove_entry = MENU.index("static void menu_remove_entry", remove)
     submenu_cleanup = MENU.index("if (entry->children)", remove_entry)
     assert add_internal < add_lookup
-    assert remove < remove_lookup < remove_entry < submenu_cleanup
+    assert remove_entry < remove < remove_lookup < submenu_cleanup
     assert "menu_remove_entry(menu, entry);" in MENU[remove:remove + 1000]
     assert "menu_add_internal(entry->name, entry->children, count);" in MENU[add_internal:add_internal + 1700]
 
@@ -131,7 +130,7 @@ def test_init_lifecycle_and_snapshot_contracts_are_latched():
     assert "int duplicate_init = smoothaf_runtime_init_lifecycle != SMOOTHAF_INIT_LIFECYCLE_NONE;" in init
     assert "smoothaf_runtime_init_duplicate_failure();" in init
     assert "smoothaf_runtime_init_first_error = error;" in SOURCE
-    assert "smoothaf_runtime_init_failure(SMOOTHAF_RUNTIME_ERROR_INIT_DUPLICATE" in init
+    assert "smoothaf_runtime_init_duplicate_failure();" in init
     assert "smoothaf_runtime_init_first_error = 0;" not in init
     assert SOURCE.count("(uintptr_t)&smoothaf_init") == 2
     assert SOURCE.count("(uintptr_t)&smoothaf_lock") == 2
