@@ -3794,6 +3794,42 @@ static MENU_UPDATE_FUNC(smoothaf_status_update)
     }
 }
 
+/* These pages are deliberately read-only and contain no operational callbacks.
+ * The diagnostic root is registered before the mandatory semaphore attempt so
+ * a failed module can still expose evidence without publishing AF handlers. */
+static struct menu_entry smoothaf_runtime_menu[] =
+{
+    { .name = "Runtime Stage", .update = smoothaf_runtime_stage_update },
+    { .name = "Semaphore Create", .update = smoothaf_runtime_sem_create_update },
+    { .name = "Semaphore Handle", .update = smoothaf_runtime_sem_handle_update },
+    { .name = "First Take Result", .update = smoothaf_runtime_take_result_update },
+    { .name = "Last Take Result", .update = smoothaf_runtime_last_take_update },
+    { .name = "First Take Duration", .update = smoothaf_runtime_take_duration_update },
+    { .name = "Last Take Duration", .update = smoothaf_runtime_last_take_duration_update },
+    { .name = "First Give Result", .update = smoothaf_runtime_give_result_update },
+    { .name = "Last Give Result", .update = smoothaf_runtime_last_give_update },
+    { .name = "First Give Duration", .update = smoothaf_runtime_give_duration_update },
+    { .name = "Last Give Duration", .update = smoothaf_runtime_last_give_duration_update },
+    { .name = "Take Counters", .update = smoothaf_runtime_counter_update },
+    { .name = "Give Counters", .update = smoothaf_runtime_give_counter_update },
+    { .name = "Last Callers", .update = smoothaf_runtime_caller_update },
+    { .name = "Semaphore Owner", .update = smoothaf_runtime_owner_update },
+    { .name = "Last Hold Duration", .update = smoothaf_runtime_hold_update },
+    { .name = "Task Create Result", .update = smoothaf_runtime_task_create_update },
+    { .name = "Task State", .update = smoothaf_runtime_task_state_update },
+    { .name = "Logger/FIO State", .update = smoothaf_runtime_logger_update },
+    { .name = "First Runtime Error", .update = smoothaf_runtime_first_error_update },
+    { .name = "Last Runtime Error", .update = smoothaf_runtime_error_update },
+    MENU_EOL,
+};
+
+static struct menu_entry smoothaf_runtime_root_menu[] =
+{
+    { .name = "Runtime Diagnostics", .select = menu_open_submenu,
+      .children = smoothaf_runtime_menu },
+    MENU_EOL,
+};
+
 static struct menu_entry smoothaf_menu[] =
 {
     { .name = "Enable", .priv = &smoothaf_enabled, .max = 1,
@@ -3888,30 +3924,8 @@ static struct menu_entry smoothaf_menu[] =
         { .name = "Clear History", .select = smoothaf_diag_clear_select,
           .help = "Clear records and page tracking." },
         { .name = "Runtime Diagnostics", .select = menu_open_submenu,
-          .children = (struct menu_entry[]){
-            { .name = "Runtime Stage", .update = smoothaf_runtime_stage_update },
-            { .name = "Semaphore Create", .update = smoothaf_runtime_sem_create_update },
-            { .name = "Semaphore Handle", .update = smoothaf_runtime_sem_handle_update },
-            { .name = "First Take Result", .update = smoothaf_runtime_take_result_update },
-             { .name = "Last Take Result", .update = smoothaf_runtime_last_take_update },
-            { .name = "First Take Duration", .update = smoothaf_runtime_take_duration_update },
-             { .name = "Last Take Duration", .update = smoothaf_runtime_last_take_duration_update },
-            { .name = "First Give Result", .update = smoothaf_runtime_give_result_update },
-             { .name = "Last Give Result", .update = smoothaf_runtime_last_give_update },
-             { .name = "First Give Duration", .update = smoothaf_runtime_give_duration_update },
-             { .name = "Last Give Duration", .update = smoothaf_runtime_last_give_duration_update },
-             { .name = "Take Counters", .update = smoothaf_runtime_counter_update },
-             { .name = "Give Counters", .update = smoothaf_runtime_give_counter_update },
-             { .name = "Last Callers", .update = smoothaf_runtime_caller_update },
-             { .name = "Semaphore Owner", .update = smoothaf_runtime_owner_update },
-             { .name = "Last Hold Duration", .update = smoothaf_runtime_hold_update },
-            { .name = "Task Create Result", .update = smoothaf_runtime_task_create_update },
-            { .name = "Task State", .update = smoothaf_runtime_task_state_update },
-             { .name = "Logger/FIO State", .update = smoothaf_runtime_logger_update },
-            { .name = "First Runtime Error", .update = smoothaf_runtime_first_error_update },
-             { .name = "Last Runtime Error", .update = smoothaf_runtime_error_update },
-            MENU_EOL,
-          } },
+        { .name = "Runtime Diagnostics", .select = menu_open_submenu,
+          .children = smoothaf_runtime_menu },
         { .name = "Dropped", .update = smoothaf_diag_dropped_update,
           .help = "Events overwritten after the bounded RAM ring filled." },
         { .name = "EP Summary", .update = smoothaf_episode_summary_update,
@@ -4088,9 +4102,10 @@ static unsigned int smoothaf_init(void)
     smoothaf_runtime_fio_failed = 0;
     smoothaf_fio_task_starting = 0;
     smoothaf_movie_active_experimental = 0;
-    /* Register before the mandatory resource attempt so a NULL semaphore is
-     * still observable through the read-only Runtime Diagnostics page. */
-    menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
+    /* Publish only the read-only diagnostic page before mandatory resource
+     * validation.  The operational menu must not expose callbacks while init
+     * can still fail; Legacy skips deinit for errored modules. */
+    menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));
     smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_SEM_CREATE;
     smoothaf_sem = create_named_semaphore("smoothaf_sem", 1);
     smoothaf_runtime_sem_handle = (uintptr_t)smoothaf_sem;
@@ -4250,6 +4265,8 @@ static unsigned int smoothaf_init(void)
                          ? SMOOTHAF_HC_ADAPTIVE : SMOOTHAF_HC_LEGACY;
     smoothaf_monitor_interval = smoothaf_monitor_normalize_interval(smoothaf_monitor_interval);
     smoothaf_monitor.interval_index = smoothaf_monitor_interval;
+    menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
+    menu_remove("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));
     return 0;
 }
 
@@ -4300,6 +4317,7 @@ static unsigned int smoothaf_deinit(void)
         (smoothaf_fio_task_created && !smoothaf_fio_task_exited))
         return 1;
     menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));
+    menu_remove("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));
     return 0;
 }
 

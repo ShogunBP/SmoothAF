@@ -73,8 +73,15 @@ def test_menu_shape_and_lifecycle():
     ):
         assert name in menu
 
+    assert 'menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));' in source
     assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
+    assert 'menu_remove("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));' in source
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
+    init = source.split("static unsigned int smoothaf_init(void)", 1)[1]
+    runtime_add = init.index('menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));')
+    sem_create = init.index('smoothaf_sem = create_named_semaphore("smoothaf_sem", 1);')
+    operational_add = init.index('menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));')
+    assert runtime_add < sem_create < operational_add
     for forbidden in (
         '"Canon AF Assist"', '"Trigger Canon AF"', '"lens_autofocus"',
         '"PTP_AF_START"', '"lens_setup_af"', '"module_send_keypress"',
@@ -198,6 +205,8 @@ def test_production_runtime_diagnostics_invariants():
     assert create_publish < ready_guard < ready_publish
     assert "smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_READY" in init
     assert "READY INVARIANT" in source
+    assert 'menu_add("SmoothAF Runtime", smoothaf_runtime_root_menu, COUNT(smoothaf_runtime_root_menu));' in init
+    assert 'menu_add("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in init
 
     # The first runtime error is a latch: menu refreshes and later errors must
     # not clear or replace it.
