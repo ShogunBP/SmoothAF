@@ -59,7 +59,8 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - Previous dirty diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `106072`, SHA-256 `71e9975a01377bd56387ad41775e18ad423bdbb0b89b82c92204a8bdec0a37c1`, embedded Build ID `5d5ef1406810-dirty-600D.102`; it remains historical evidence only and has not been installed.
 - Intermediate clean diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `107536`, SHA-256 `bf9c11c208db0c17b4026d3344b801a453fa63f2d80fe1431ceec064a524a2c4`, embedded Build ID `8a97f9e36340-600D.102`; it remains historical evidence only.
 - Previous clean diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `107536`, SHA-256 `a1e5d1ab9f3064e491412bdec0f0b4621a1bd4b2bbf7bed0c6607052cc3cc376`, embedded Build ID `49236401addc-600D.102`; it remains historical evidence only.
-- Final clean diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `107536`, SHA-256 `2eb5c94e1899bf99ec643eabe5190b57b40c3aae306d120d93dbaa3b0d6b2b17`, embedded Build ID `3cb51e83b3a7-600D.102`; format is ARM/EABI5 relocatable. It has not been installed.
+- Previous clean diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `107536`, SHA-256 `2eb5c94e1899bf99ec643eabe5190b57b40c3aae306d120d93dbaa3b0d6b2b17`, embedded Build ID `3cb51e83b3a7-600D.102`; it remains historical evidence only.
+- Final clean diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `107536`, SHA-256 `db1f5ae638d8036aa6372661ec46925f248a4c77c8d13ada632a316c9425749b`, embedded Build ID `d9a330a3ac10-600D.102`; format is ARM/EABI5 relocatable. It has not been installed.
 
 ## Phase 3A audit matrix
 
