@@ -819,6 +819,58 @@ static void test_fio_configuration_and_lifecycle(void) {
     PASS();
 }
 
+static void test_fio_task_loop_reproduction_snapshot(void) {
+    TEST("fio_task_loop_reproduction_snapshot");
+    struct smoothaf_log_fio_backend fio;
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    int32_t payload[6] = {1, 2, 3, 4, 5, 6};
+
+    /* Model the production sequence: publish the request, run the consumer
+     * iteration that applies it, then publish the seven records observed on
+     * the camera and run the next consumer iteration.  No state fields are
+     * assigned directly; all transitions use the production backend API. */
+    reset_logger(&buf);
+    smoothaf_log_fio_init(&fio);
+    smoothaf_persist_logger_set_enabled(&buf, true);
+    smoothaf_log_fio_request_enabled(&fio, true);
+    smoothaf_log_fio_request_limits(&fio, 256u * 1024u,
+                                    SMOOTHAF_LOG_FIO_MAX_FILES);
+    ASSERT_TRUE(fio.requested_enabled && fio.config_pending,
+                "task-loop request is published before service");
+    ASSERT_FALSE(fio.enabled, "effective FIO starts disabled");
+
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "task-loop service applies the pending request");
+    ASSERT_TRUE(fio.enabled, "effective FIO is enabled by the consumer");
+    ASSERT_FALSE(fio.config_pending, "request is acknowledged by the consumer");
+
+    for (int i = 0; i < 7; i++) {
+        ASSERT_TRUE(smoothaf_persist_log_record(
+                        &buf, 5000u + (uint32_t)i,
+                        SMOOTHAF_PERSIST_LOG_COMMAND, 1, payload),
+                    "task-loop reproduction publishes each record");
+    }
+    ASSERT_EQ(smoothaf_persist_log_get_published(&buf), 7u,
+              "task-loop reproduction publishes seven records");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 7u,
+              "seven records remain queued before the next service");
+
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "task-loop service consumes the queued records");
+    ASSERT_EQ(smoothaf_persist_log_get_flushed(&buf), 7u,
+              "all seven records are confirmed by the backend");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 0u,
+              "task-loop service drains the ring");
+    ASSERT_EQ(fio.file_open_attempts, 1u,
+              "the first non-empty service reaches file open exactly once");
+    ASSERT_TRUE(fio.bytes_written > 0u,
+                "the first non-empty service accepts bytes");
+    ASSERT_TRUE(fio.enabled && !fio.config_pending,
+                "normal task-loop state cannot leave effective FIO off");
+    PASS();
+}
+
 static void test_fio_open_failure_and_counter_contract(void) {
     TEST("fio_open_failure_and_counter_contract");
     struct smoothaf_log_fio_backend fio;
@@ -913,7 +965,17 @@ static void test_fio_backend(void) {
 static void test_struct_sizes(void) {
     TEST("struct_sizes");
     struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_log_fio_backend fio;
     smoothaf_persist_logger_init(&buf);
+    smoothaf_log_fio_init(&fio);
+
+    /* The Legacy FIO ABI defines this array as 0x80 bytes.  Keep the
+     * translation-unit contract visible in the host regression: smoothaf.c
+     * includes fio-ml.h while smoothaf_logger_fio.c uses this fallback. */
+    ASSERT_EQ(FIO_MAX_PATH_LENGTH, 0x80u,
+              "FIO path length matches the Legacy ABI");
+    ASSERT_EQ(sizeof(fio.current_filename), 0x80u,
+              "FIO backend uses the Legacy filename field size");
 
     /* Verify actual sizes (may vary by alignment) */
     size_t record_size = sizeof(struct smoothaf_persist_log_record);
@@ -957,6 +1019,7 @@ int main(void) {
     test_flush_batch();
     test_integrated_active_continuous_pipeline();
     test_fio_configuration_and_lifecycle();
+    test_fio_task_loop_reproduction_snapshot();
     test_fio_open_failure_and_counter_contract();
     test_fio_backend();
     test_struct_sizes();

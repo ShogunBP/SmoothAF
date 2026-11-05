@@ -12,6 +12,7 @@
 #include "smoothaf_logger.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 
 /* ============================================================
@@ -23,9 +24,13 @@
 #define SMOOTHAF_LOG_FIO_DIR            "ML/LOGS" /* Log directory */
 #define SMOOTHAF_LOG_FIO_PATTERN        "SMTH%03d.LOG"  /* 8.3 filename pattern */
 
-/* ML FIO_MAX_PATH_LENGTH fallback */
+/* Magic Lantern's fio-ml.h defines this as 0x80.  The FIO backend structure
+ * crosses translation units, so the host fallback must have the same layout. */
 #ifndef FIO_MAX_PATH_LENGTH
-#define FIO_MAX_PATH_LENGTH 256
+#define FIO_MAX_PATH_LENGTH 0x80
+#endif
+#if FIO_MAX_PATH_LENGTH != 0x80
+#error "SmoothAF FIO backend requires FIO_MAX_PATH_LENGTH == 0x80"
 #endif
 
 /* ============================================================
@@ -72,6 +77,53 @@ struct smoothaf_log_fio_backend {
     uint32_t retry_len;
     uint32_t retry_offset;
 };
+
+/* ABI contract: this structure is shared by smoothaf.c and
+ * smoothaf_logger_fio.c. Keep the checks in the shared header so every
+ * translation unit fails at compile time if the Legacy layout changes. */
+#define SMOOTHAF_LOG_FIO_FILENAME_OFFSET \
+    (offsetof(struct smoothaf_log_fio_backend, current_filename))
+#define SMOOTHAF_LOG_FIO_SIZE \
+    (sizeof(struct smoothaf_log_fio_backend))
+
+#if UINTPTR_MAX == 0xffffffffu
+#define SMOOTHAF_LOG_FIO_EXPECTED_SIZE 0xe0u
+#define SMOOTHAF_LOG_FIO_EXPECTED_FILENAME_OFFSET 0x10u
+#define SMOOTHAF_LOG_FIO_EXPECTED_BYTES_WRITTEN_OFFSET 0xa0u
+#define SMOOTHAF_LOG_FIO_EXPECTED_ENABLED_OFFSET 0xa8u
+#define SMOOTHAF_LOG_FIO_EXPECTED_PENDING_OFFSET 0xaau
+#define SMOOTHAF_LOG_FIO_EXPECTED_MAX_FILE_SIZE_OFFSET 0xacu
+#else
+#define SMOOTHAF_LOG_FIO_EXPECTED_SIZE 0xf0u
+#define SMOOTHAF_LOG_FIO_EXPECTED_FILENAME_OFFSET 0x20u
+#define SMOOTHAF_LOG_FIO_EXPECTED_BYTES_WRITTEN_OFFSET 0xb0u
+#define SMOOTHAF_LOG_FIO_EXPECTED_ENABLED_OFFSET 0xb8u
+#define SMOOTHAF_LOG_FIO_EXPECTED_PENDING_OFFSET 0xbau
+#define SMOOTHAF_LOG_FIO_EXPECTED_MAX_FILE_SIZE_OFFSET 0xbcu
+#endif
+
+#define SMOOTHAF_LOG_FIO_STATIC_ASSERT(condition, name) \
+    typedef char name[(condition) ? 1 : -1]
+
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(FIO_MAX_PATH_LENGTH == 0x80,
+                               smoothaf_fio_path_length_contract);
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(SMOOTHAF_LOG_FIO_SIZE == SMOOTHAF_LOG_FIO_EXPECTED_SIZE,
+                               smoothaf_fio_size_contract);
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(SMOOTHAF_LOG_FIO_FILENAME_OFFSET ==
+                               SMOOTHAF_LOG_FIO_EXPECTED_FILENAME_OFFSET,
+                               smoothaf_fio_filename_offset_contract);
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(offsetof(struct smoothaf_log_fio_backend, bytes_written) ==
+                               SMOOTHAF_LOG_FIO_EXPECTED_BYTES_WRITTEN_OFFSET,
+                               smoothaf_fio_bytes_offset_contract);
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(offsetof(struct smoothaf_log_fio_backend, enabled) ==
+                               SMOOTHAF_LOG_FIO_EXPECTED_ENABLED_OFFSET,
+                               smoothaf_fio_enabled_offset_contract);
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(offsetof(struct smoothaf_log_fio_backend, config_pending) ==
+                               SMOOTHAF_LOG_FIO_EXPECTED_PENDING_OFFSET,
+                               smoothaf_fio_pending_offset_contract);
+SMOOTHAF_LOG_FIO_STATIC_ASSERT(offsetof(struct smoothaf_log_fio_backend, max_file_size_bytes) ==
+                               SMOOTHAF_LOG_FIO_EXPECTED_MAX_FILE_SIZE_OFFSET,
+                               smoothaf_fio_max_file_size_offset_contract);
 
 /* ============================================================
  * Public API
