@@ -31,6 +31,12 @@ static void logger_atomic_inc(volatile uint32_t *value)
     (*value)++;
 }
 
+static void logger_atomic_add(volatile uint32_t *value, uint32_t amount)
+{
+    /* Counters are advisory; record publication remains protected by the gate. */
+    (*value) += amount;
+}
+
 static bool producer_try_lock(struct smoothaf_persist_log_buffer *buf)
 {
 #if defined(__arm__) || defined(__ARM_ARCH)
@@ -164,6 +170,7 @@ bool smoothaf_persist_log_record(struct smoothaf_persist_log_buffer *buf,
     /* Publish the complete payload only after it has been written. */
     SMOOTHAF_PERSIST_LOG_BARRIER();
     buf->head = next_head;
+    logger_atomic_inc(&buf->published_count);
     producer_unlock(buf);
     return true;
 }
@@ -522,6 +529,7 @@ smoothaf_persist_log_write_result_e smoothaf_persist_log_flush_batch(
     if (batch->next_line > batch->count) {
         batch->next_line = batch->count;
     }
+    uint32_t start_line = batch->next_line;
     current_tail = (current_tail + batch->next_line) & buf_mask(buf);
 
     for (uint32_t i = batch->next_line; i < batch->count; i++) {
@@ -552,6 +560,7 @@ smoothaf_persist_log_write_result_e smoothaf_persist_log_flush_batch(
     buf->consumer_pending = false;
     buf->tail = current_tail;
     buf->reserved_tail = current_tail;
+    logger_atomic_add(&buf->flushed_count, batch->count - start_line);
     return SMOOTHAF_PERSIST_LOG_WRITE_OK;
 }
 
@@ -594,6 +603,14 @@ void smoothaf_persist_log_reset_dropped(struct smoothaf_persist_log_buffer *buf)
 
 uint32_t smoothaf_persist_log_get_fill(const struct smoothaf_persist_log_buffer *buf) {
     return buf ? buf_fill(buf) : 0;
+}
+
+uint32_t smoothaf_persist_log_get_published(const struct smoothaf_persist_log_buffer *buf) {
+    return buf ? buf->published_count : 0;
+}
+
+uint32_t smoothaf_persist_log_get_flushed(const struct smoothaf_persist_log_buffer *buf) {
+    return buf ? buf->flushed_count : 0;
 }
 
 bool smoothaf_persist_log_is_empty(const struct smoothaf_persist_log_buffer *buf) {

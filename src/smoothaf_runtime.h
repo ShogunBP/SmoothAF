@@ -44,6 +44,7 @@ struct smoothaf_runtime_state {
     int fio_enabled;
     int fio_task_created;
     int fio_task_running;
+    int fio_task_exited; /* 1 after failed creation or consumer exit */
     int monitor_started;
     int stop_requested;
     int panic;
@@ -72,6 +73,7 @@ static inline void smoothaf_runtime_reset(struct smoothaf_runtime_state *state)
     state->fio_enabled = 0;
     state->fio_task_created = 0;
     state->fio_task_running = 0;
+    state->fio_task_exited = 1;
     state->monitor_started = 0;
     state->stop_requested = 0;
     state->panic = 0;
@@ -128,9 +130,11 @@ static inline int smoothaf_runtime_init(struct smoothaf_runtime_state *state,
                                 ops->task_valid(state->fio_task))) {
             state->fio_task_created = 1;
             state->fio_task_running = 1;
+            state->fio_task_exited = 0;
             state->fio_enabled = 1;
         } else {
             state->fio_task = 0;
+            state->fio_task_exited = 1;
             state->error = SMOOTHAF_RUNTIME_FIO_TASK;
             smoothaf_runtime_note_error(state, state->error);
         }
@@ -175,6 +179,7 @@ static inline void smoothaf_runtime_shutdown(struct smoothaf_runtime_state *stat
     if (state->fio_task_created && state->fio_task && ops && ops->stop_task)
         ops->stop_task(state->fio_task);
     state->fio_task_running = 0;
+    state->fio_task_exited = 1;
     state->fio_task_created = 0;
     state->fio_task = 0;
     state->fio_enabled = 0;

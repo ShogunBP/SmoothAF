@@ -9,6 +9,8 @@
 
 #include "smoothaf_logger.h"
 #include "smoothaf_logger_fio.h"
+#include "../src/smoothaf_menu_toggle.h"
+#include "../src/smoothaf_runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -653,6 +655,202 @@ static void test_flush_batch(void) {
     PASS();
 }
 
+static int g_task_create_calls;
+static int g_task_create_success;
+static int g_runtime_semaphore;
+
+static void *integration_create_semaphore(const char *name, int initial_value)
+{
+    if (strcmp(name, "smoothaf_sem") != 0 || initial_value != 1) return NULL;
+    return &g_runtime_semaphore;
+}
+
+static int integration_take_semaphore(void *semaphore, int timeout)
+{
+    return semaphore == &g_runtime_semaphore && timeout == 0 ? 0 : 1;
+}
+
+static int integration_give_semaphore(void *semaphore)
+{
+    return semaphore == &g_runtime_semaphore ? 0 : 1;
+}
+
+static int integration_task_valid(void *task)
+{
+    return task != NULL;
+}
+
+static void integration_numeric_toggle(int *value, int delta, int min, int max)
+{
+    *value += delta;
+    if (*value < min) *value = max;
+    if (*value > max) *value = min;
+}
+
+static void *integration_task_create(const char *name, uint32_t priority,
+                                     uint32_t stack_size, void *entry, void *arg)
+{
+    (void)priority;
+    (void)stack_size;
+    (void)entry;
+    (void)arg;
+    if (strcmp(name, "smoothaf_fio") != 0) return NULL;
+    g_task_create_calls++;
+    return g_task_create_success ? (void *)0x1000 : NULL;
+}
+
+static void test_integrated_active_continuous_pipeline(void) {
+    TEST("integrated_active_continuous_pipeline");
+    struct smoothaf_log_fio_backend fio;
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    int logger_enabled = 0;
+    int fio_requested = 0;
+
+    /* Exercise the same menu priv/delta seam, then apply the effective FIO
+     * request through the shared runtime lifecycle seam. */
+    smoothaf_log_fio_init(&fio);
+    smoothaf_persist_logger_init(&buf);
+    {
+        const struct smoothaf_runtime_ops runtime_ops = {
+            integration_create_semaphore, integration_take_semaphore,
+            integration_give_semaphore, integration_task_create,
+            integration_task_valid, NULL
+        };
+        struct smoothaf_runtime_state runtime;
+        g_task_create_calls = 0;
+        g_task_create_success = 1;
+        ASSERT_TRUE(smoothaf_runtime_init(&runtime, &runtime_ops, 1),
+                    "integrated runtime applies FIO request and creates task");
+        ASSERT_TRUE(runtime.ready && runtime.fio_requested &&
+                    runtime.fio_task_created && runtime.fio_task_running &&
+                    runtime.fio_enabled,
+                    "integrated runtime reports effective FIO task state");
+        ASSERT_EQ(g_task_create_calls, 1, "integrated runtime starts FIO task");
+        ASSERT_TRUE(smoothaf_runtime_start_monitor(&runtime),
+                    "integrated ACTIVE CONTINUOUS monitor starts");
+    }
+    smoothaf_logger_config_toggle(&logger_enabled, 1, integration_numeric_toggle);
+    smoothaf_logger_config_toggle(&fio_requested, 1, integration_numeric_toggle);
+    smoothaf_persist_logger_set_enabled(&buf, logger_enabled != 0);
+    smoothaf_log_fio_request_enabled(&fio, fio_requested && logger_enabled);
+    ASSERT_EQ(g_task_create_calls, 1, "FIO task startup is attempted");
+    ASSERT_TRUE(fio.requested_enabled && fio.config_pending,
+                "FIO request is pending before consumer service");
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "FIO consumer applies both toggle requests");
+    ASSERT_TRUE(fio.enabled, "FIO becomes effective after consumer service");
+    ASSERT_FALSE(fio.current_file != NULL, "active session starts without an open file");
+
+    /* SESSION_START models the first event emitted by ACTIVE CONTINUOUS;
+     * EPISODE_START models the next armed episode event. */
+    ASSERT_TRUE(smoothaf_persist_log_session_start(
+                    &buf, 1000, "integration-build", 10000, 8, 1),
+                "ACTIVE CONTINUOUS publishes SESSION_START");
+    ASSERT_TRUE(smoothaf_persist_log_episode_start(&buf, 1010, 1, 0, 123),
+                "ACTIVE CONTINUOUS publishes EPISODE_START");
+    ASSERT_TRUE(smoothaf_persist_log_command(&buf, 1020, 1, 1, 1, 3, 4, 5, 6),
+                "ACTIVE CONTINUOUS publishes COMMAND");
+    ASSERT_TRUE(smoothaf_persist_log_measurement(
+                    &buf, 1030, 1, 130, 120, 10, 7, 1, 1),
+                "ACTIVE CONTINUOUS publishes MEASUREMENT");
+    ASSERT_TRUE(smoothaf_persist_log_episode_end(
+                    &buf, 1040, 1, 1, 130, 3, 129, 3, 1),
+                "ACTIVE CONTINUOUS publishes EPISODE_END");
+    ASSERT_TRUE(smoothaf_persist_log_session_end(&buf, 1050, 1, 50, 1),
+                "ACTIVE CONTINUOUS publishes SESSION_END");
+    ASSERT_EQ(smoothaf_persist_log_get_published(&buf), 6u,
+              "all ACTIVE CONTINUOUS lifecycle events are published");
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "ACTIVE CONTINUOUS events reach the FIO consumer");
+    ASSERT_EQ(smoothaf_persist_log_get_flushed(&buf), 6u,
+              "all lifecycle events are confirmed by backend");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 0u,
+              "integrated consumer drains the complete lifecycle");
+    ASSERT_EQ(fio.total_files_written, 1u,
+              "integrated first event creates the first file");
+    ASSERT_TRUE(fio.bytes_written > 0u, "integrated pipeline writes bytes");
+    smoothaf_log_fio_request_close(&fio);
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "integrated pipeline services close");
+    ASSERT_EQ(fio.close_count, 1u, "integrated pipeline closes the file");
+    PASS();
+}
+
+static void test_fio_configuration_and_lifecycle(void) {
+    TEST("fio_configuration_and_lifecycle");
+    struct smoothaf_log_fio_backend fio;
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    int32_t payload[6] = {11, 22, 33, 44, 55, 66};
+
+    reset_logger(&buf);
+    smoothaf_log_fio_init(&fio);
+    smoothaf_log_fio_request_enabled(&fio, true);
+    ASSERT_TRUE(fio.requested_enabled, "FIO request is published");
+    ASSERT_FALSE(fio.enabled, "FIO request is not yet effective");
+    ASSERT_TRUE(fio.config_pending, "FIO request is pending for consumer");
+
+    /* Enabling the consumer alone must not create a file. */
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer applies FIO configuration");
+    ASSERT_TRUE(fio.enabled, "FIO request becomes effective");
+    ASSERT_EQ(fio.total_files_written, 0u,
+              "no file is created while the logger ring is empty");
+
+    smoothaf_persist_logger_set_enabled(&buf, true);
+    smoothaf_persist_log_record(&buf, 3000, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                                payload);
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer flushes the first persistent event");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 0u,
+              "first event is committed after a successful write");
+    ASSERT_EQ(fio.total_files_written, 1u,
+              "first non-empty batch creates exactly one file");
+    ASSERT_TRUE(fio.current_file != NULL, "file remains open until close request");
+
+    smoothaf_log_fio_request_close(&fio);
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer handles close request");
+    ASSERT_FALSE(fio.enabled, "close request disables effective FIO");
+    ASSERT_FALSE(fio.current_file != NULL, "close request closes the file");
+    ASSERT_TRUE(fio.total_files_written == 1u,
+                "close does not create an extra file");
+    PASS();
+}
+
+static void test_fio_open_failure_and_counter_contract(void) {
+    TEST("fio_open_failure_and_counter_contract");
+    struct smoothaf_log_fio_backend fio;
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    int32_t payload[6] = {1, 2, 3, 4, 5, 6};
+
+    reset_logger(&buf);
+    smoothaf_log_fio_init(&fio);
+    smoothaf_persist_logger_set_enabled(&buf, true);
+    smoothaf_log_fio_set_enabled(&fio, true);
+    smoothaf_log_fio_set_card_present(false);
+    smoothaf_persist_log_record(&buf, 4000, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                                payload);
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer reports attempted open failure");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 1u,
+              "open failure retains the event for retry");
+    ASSERT_TRUE(fio.write_errors > 0u, "open failure increments write errors");
+    ASSERT_EQ(fio.total_files_written, 0u,
+              "failed open does not increment file counter");
+    smoothaf_log_fio_set_card_present(true);
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer retries after card recovery");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 0u,
+              "recovered open eventually commits the event");
+    ASSERT_EQ(fio.total_files_written, 1u,
+              "successful retry increments file counter once");
+    smoothaf_log_fio_set_enabled(&fio, false);
+    PASS();
+}
+
 static void test_fio_backend(void) {
     TEST("fio_backend");
     struct smoothaf_log_fio_backend fio;
@@ -670,7 +868,11 @@ static void test_fio_backend(void) {
                                     SMOOTHAF_PERSIST_LOG_COMMAND, 1, payload);
     ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch), "FIO service writes batch");
     ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 0u, "FIO service drains batch");
+    ASSERT_EQ(smoothaf_persist_log_get_published(&buf), 3u, "producer publication count");
+    ASSERT_EQ(smoothaf_persist_log_get_flushed(&buf), 3u, "backend confirmation count");
     ASSERT_TRUE(fio.total_files_written >= 1u, "FIO creates a numbered file");
+    ASSERT_TRUE(fio.file_open_attempts >= 1u, "FIO open attempt is counted");
+    ASSERT_TRUE(fio.bytes_written > 0u, "accepted bytes are counted");
 
     smoothaf_log_fio_set_simulated_write_chunk(7);
     for (int i = 0; i < 2; i++)
@@ -753,6 +955,9 @@ int main(void) {
     test_specific_events();
     test_small_batches();
     test_flush_batch();
+    test_integrated_active_continuous_pipeline();
+    test_fio_configuration_and_lifecycle();
+    test_fio_open_failure_and_counter_contract();
     test_fio_backend();
     test_struct_sizes();
 

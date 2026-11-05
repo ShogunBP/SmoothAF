@@ -79,6 +79,22 @@ def test_menu_shape_and_lifecycle():
     assert 'menu_remove("SmoothAF", smoothaf_menu, COUNT(smoothaf_menu));' in source
     assert 'static struct menu_entry smoothaf_runtime_init_menu[] =' in source
     assert 'static struct menu_entry smoothaf_runtime_root_menu[] =' not in source
+    runtime_init_menu = source.split(
+        "static struct menu_entry smoothaf_runtime_init_menu[] =", 1
+    )[1].split("static struct menu_entry smoothaf_menu[] =", 1)[0]
+    runtime_init_body = runtime_init_menu.rsplit("};", 1)[0]
+    # These entries are passed directly to menu_add/menu_remove. Legacy walks
+    # exactly COUNT entries, so a MENU_EOL sentinel would be treated as an
+    # entry and would trip ASSERT(new_entry->name) on the final iteration.
+    assert "MENU_EOL" not in runtime_init_body
+    assert runtime_init_menu.count('{ .name = "') == 14
+    operational_menu = source.split(
+        "static struct menu_entry smoothaf_menu[] =", 1
+    )[1].split("static unsigned int smoothaf_init(void)", 1)[0]
+    # Nested children are sentinel-terminated; only the directly registered
+    # root must be count-safe. Build Info is its final root entry.
+    assert '{ .name = "Build Info", .update = smoothaf_build_info_update,' in operational_menu
+    assert operational_menu.rstrip().endswith('};')
     init = source.rsplit("static unsigned int smoothaf_init(void)", 1)[1]
     runtime_add = init.index('menu_add("SmoothAF Runtime", smoothaf_runtime_init_menu, COUNT(smoothaf_runtime_init_menu));')
     sem_create = init.index('smoothaf_sem = create_named_semaphore("smoothaf_sem", 1);')
@@ -238,6 +254,10 @@ def test_production_runtime_diagnostics_invariants():
     # not the newly introduced %u. Keep runtime counters/durations on %d.
     assert 'MENU_SET_VALUE("T=%d F=%d"' in source
     assert 'MENU_SET_VALUE("G=%d F=%d"' in source
+    assert 'smoothaf_persist_log_get_published(&smoothaf_persist_log)' in source
+    assert 'smoothaf_persist_log_get_flushed(&smoothaf_persist_log)' in source
+    assert 'smoothaf_persist_fio.file_open_attempts' in source
+    assert 'smoothaf_persist_fio.bytes_written' in source
     assert 'MENU_SET_VALUE("T=%u F=%u"' not in source
     assert 'MENU_SET_VALUE("G=%u F=%u"' not in source
 

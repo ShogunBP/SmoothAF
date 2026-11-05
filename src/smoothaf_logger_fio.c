@@ -154,6 +154,9 @@ void smoothaf_log_fio_init(struct smoothaf_log_fio_backend *fio) {
     fio->current_file = NULL;
     fio->current_file_size = 0;
     fio->total_files_written = 0;
+    fio->file_open_attempts = 0;
+    fio->bytes_written = 0;
+    fio->close_count = 0;
     fio->write_errors = 0;
     fio->partial_writes = 0;
     fio->file_full_count = 0;
@@ -193,6 +196,7 @@ static void fio_apply_enabled(struct smoothaf_log_fio_backend *fio, bool enabled
         fio->current_file_size = 0;
         if (fio->current_file) {
             FIO_CloseFile(fio->current_file);
+            fio->close_count++;
             fio->current_file = NULL;
         }
         fio->retry_pending = false;
@@ -203,6 +207,7 @@ static void fio_apply_enabled(struct smoothaf_log_fio_backend *fio, bool enabled
         /* Disabling: close any open file */
         if (fio->current_file) {
             FIO_CloseFile(fio->current_file);
+            fio->close_count++;
             fio->current_file = NULL;
         }
         fio->retry_pending = false;
@@ -286,6 +291,7 @@ FILE *smoothaf_log_fio_open_file(struct smoothaf_log_fio_backend *fio) {
 
     /* Create file (ML wrapper creates directories). get_numbered_file_name
      * returned the complete ML/LOGS/SMTHxxx.LOG path. */
+    fio->file_open_attempts++;
     FILE *f = FIO_CreateFile(filename);
     if (!f) {
         fio->last_error = -3;  /* Create failed */
@@ -312,6 +318,7 @@ void smoothaf_log_fio_close_file(struct smoothaf_log_fio_backend *fio) {
     if (!fio || !fio->current_file) return;
 
     FIO_CloseFile(fio->current_file);
+    fio->close_count++;
     fio->current_file = NULL;
     fio->current_file_size = 0;
     fio->current_filename[0] = '\0';
@@ -401,6 +408,7 @@ smoothaf_persist_log_write_result_e smoothaf_log_fio_write_batch(struct smoothaf
         offset += (uint32_t)written;
         fio->retry_offset = offset;
         fio->current_file_size += (uint32_t)written;
+        fio->bytes_written += (uint32_t)written;
         if (offset < len) {
             fio->last_error = -5;
             fio->partial_writes++;

@@ -3695,14 +3695,28 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_task_state_update)
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_logger_update)
 {
-    MENU_SET_VALUE("L=%s F=%s%s C=%s/%s %d/%d",
+    MENU_SET_VALUE("L=%s F=%s%s E=%s P=%s T=%s",
                    smoothaf_logger_enabled ? "ON" : "OFF",
                    smoothaf_logger_fio_enabled ? "ON" : "OFF",
                    smoothaf_runtime_fio_failed ? "!" : "",
-                   smoothaf_runtime_task_result_name(smoothaf_runtime_first_fio_task_create_result),
-                   smoothaf_runtime_task_result_name(smoothaf_runtime_last_fio_task_create_result),
-                   (int)smoothaf_runtime_fio_task_create_count,
-                   (int)smoothaf_runtime_fio_task_create_failures);
+                   smoothaf_log_fio_is_enabled(&smoothaf_persist_fio) ? "ON" : "OFF",
+                   smoothaf_persist_fio.config_pending ? "YES" : "NO",
+                   smoothaf_fio_task_running ? "RUN" :
+                   (smoothaf_fio_task_created && !smoothaf_fio_task_exited ? "START" :
+                    (smoothaf_runtime_fio_failed ? "FAIL" :
+                     (smoothaf_fio_task_exited ? "EXIT" : "STOP"))));
+    MENU_SET_HELP("C=%s/%s %d/%d pub=%d fl=%d fill=%d open=%d bytes=%d err=%d part=%d",
+                  smoothaf_runtime_task_result_name(smoothaf_runtime_first_fio_task_create_result),
+                  smoothaf_runtime_task_result_name(smoothaf_runtime_last_fio_task_create_result),
+                  (int)smoothaf_runtime_fio_task_create_count,
+                  (int)smoothaf_runtime_fio_task_create_failures,
+                  (int)smoothaf_persist_log_get_published(&smoothaf_persist_log),
+                  (int)smoothaf_persist_log_get_flushed(&smoothaf_persist_log),
+                  (int)smoothaf_persist_log_get_fill(&smoothaf_persist_log),
+                  (int)smoothaf_persist_fio.file_open_attempts,
+                  (int)smoothaf_persist_fio.bytes_written,
+                  (int)smoothaf_persist_fio.write_errors,
+                  (int)smoothaf_persist_fio.partial_writes);
 }
 
 static const char *smoothaf_runtime_error_name(int error)
@@ -3972,7 +3986,6 @@ static struct menu_entry smoothaf_runtime_init_menu[] =
     { .name = "Last Take Result", .update = smoothaf_runtime_last_take_update },
     { .name = "First Runtime Error", .update = smoothaf_runtime_first_error_update },
     { .name = "Last Runtime Error", .update = smoothaf_runtime_error_update },
-    MENU_EOL,
 };
 
 static struct menu_entry smoothaf_menu[] =

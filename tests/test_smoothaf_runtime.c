@@ -148,7 +148,7 @@ static void test_fio_is_optional(void)
     task_result = 0;
     CHECK(smoothaf_runtime_init(&state, &OPS, 1),
           "FIO task failure does not reject monitor runtime");
-    CHECK(state.ready && !state.fio_enabled &&
+    CHECK(state.ready && !state.fio_enabled && state.fio_task_exited &&
           state.error == SMOOTHAF_RUNTIME_FIO_TASK &&
           state.first_error == SMOOTHAF_RUNTIME_FIO_TASK &&
           state.last_error == SMOOTHAF_RUNTIME_FIO_TASK,
@@ -175,7 +175,8 @@ static void test_partial_cleanup_stop_panic_and_no_move(void)
     struct smoothaf_runtime_state state;
     reset_mocks();
     CHECK(smoothaf_runtime_init(&state, &OPS, 1), "FIO-on initialization succeeds");
-    CHECK(state.fio_task_created, "successful FIO task is tracked");
+    CHECK(state.fio_task_created && state.fio_task_running &&
+          !state.fio_task_exited, "successful FIO task is tracked as running");
     smoothaf_runtime_shutdown(&state, &OPS);
     CHECK(stop_calls == 1 && !state.ready && !smoothaf_runtime_can_move(&state),
           "partial cleanup disables movement and stops optional task");

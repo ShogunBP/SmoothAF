@@ -41,6 +41,9 @@ struct smoothaf_log_fio_backend {
     uint32_t current_file_size;           /* Bytes written to current file */
     uint32_t file_index;                  /* Current file number (0..SMOOTHAF_LOG_FIO_MAX_FILES-1) */
     uint32_t total_files_written;         /* Total files created this session */
+    uint32_t file_open_attempts;           /* FIO_CreateFile attempts */
+    uint32_t bytes_written;                /* Bytes accepted by FIO */
+    uint32_t close_count;                  /* FIO_CloseFile calls */
 
     /* Configuration */
     volatile bool enabled;                /* Effective state, FIO-task owned */

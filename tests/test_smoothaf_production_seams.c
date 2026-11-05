@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "../src/smoothaf_menu_toggle.h"
 #include "../src/smoothaf_task_lifecycle.h"
+#include "../src/smoothaf_runtime.h"
 
 static int failures;
 static int toggle_calls;
@@ -47,6 +48,14 @@ static void test_logger_callback_contract(void)
           "invalid callback inputs do not authorize a logger change");
 }
 
+static void test_runtime_fio_lifecycle_state(void)
+{
+    struct smoothaf_runtime_state state;
+    smoothaf_runtime_reset(&state);
+    CHECK(state.fio_task_exited == 1,
+          "reset state reports an exited consumer task");
+}
+
 static void test_task_failure_publication(void)
 {
     int running = 0;
@@ -74,6 +83,7 @@ static void test_task_failure_publication(void)
 int main(void)
 {
     test_logger_callback_contract();
+    test_runtime_fio_lifecycle_state();
     test_task_failure_publication();
     if (failures) {
         printf("SmoothAF production seam tests failed: %d\n", failures);

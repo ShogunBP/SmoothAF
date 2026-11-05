@@ -161,6 +161,8 @@ struct smoothaf_persist_log_buffer {
     volatile uint32_t reserved_tail;     /* Oldest slot reserved by consumer */
     volatile bool consumer_pending;      /* A formatted batch owns the range */
     volatile uint32_t dropped_count;     /* Records lost due to full buffer */
+    volatile uint32_t published_count;   /* Records published by producers */
+    volatile uint32_t flushed_count;     /* Records confirmed by a backend */
     uint32_t sequence;                   /* Monotonic sequence for ordering */
     char build_id[32];                   /* Session build ID, copied at start */
     volatile bool enabled;               /* Global enable flag (default false) */
@@ -309,6 +311,8 @@ void smoothaf_persist_log_reset_dropped(struct smoothaf_persist_log_buffer *buf)
 
 /* Get buffer fill level (0..SMOOTHAF_LOG_BUF_ENTRIES) for monitoring */
 uint32_t smoothaf_persist_log_get_fill(const struct smoothaf_persist_log_buffer *buf);
+uint32_t smoothaf_persist_log_get_published(const struct smoothaf_persist_log_buffer *buf);
+uint32_t smoothaf_persist_log_get_flushed(const struct smoothaf_persist_log_buffer *buf);
 
 /* Check if buffer is empty/full */
 bool smoothaf_persist_log_is_empty(const struct smoothaf_persist_log_buffer *buf);
