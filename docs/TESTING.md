@@ -57,7 +57,7 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - Historical pre-commit ARM evidence is preserved separately: `Will load on: 600D`, `DEP=36`, `SIZE=98324`, SHA-256 `4940383799aafb6c6bfb8fb9c5b3ea44e90ac61ffe57a6ee52c76b2cd3af5b51`, Build ID `01020cee8635-dirty-600D.102`. It is not a release artifact.
 - Historical immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99052`, SHA-256 `2f679ed6f8fa2ca83b9b62c57a5088858f065cd4fb52f919e0bc3ee74bd4537c`, embedded Build ID `5de054e07d96-600D.102`; format is ARM/EABI5 relocatable.
 - Previous dirty diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `106072`, SHA-256 `71e9975a01377bd56387ad41775e18ad423bdbb0b89b82c92204a8bdec0a37c1`, embedded Build ID `5d5ef1406810-dirty-600D.102`; it remains historical evidence only and has not been installed.
-- Final clean diagnostic candidate metadata is generated from the final clean HEAD with `.\build-smoothaf.ps1`; the validation report records the emitted Build ID, size, SHA-256, DEP=37, target 600D.102 and ARM/EABI5 format. The candidate has not been installed automatically.
+- Final clean diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `107536`, SHA-256 `9ddb6874f1fe7b9860710434e8c6cad931ca6e8982ae736be5630e58d8576675`, embedded Build ID `43f0a6ca753d-600D.102`; format is ARM/EABI5 relocatable. It has not been installed automatically.
 
 ## Phase 3A audit matrix
 
