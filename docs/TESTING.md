@@ -48,12 +48,13 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 
 ## SmoothAF v0.8 validation record
 
-- Host tests: passed (`All SmoothAF core tests passed`; `SmoothAF monitor tests passed`; `SmoothAF diagnostics RAM tests passed`).
+- Host tests: passed (`SmoothAF runtime tests passed`; `SmoothAF production seam tests passed`; `All SmoothAF core tests passed`; `SmoothAF monitor tests passed`; `SmoothAF diagnostics RAM tests passed`).
 - Comparative benchmark: passed; scenarios reported `invariants=PASS` and output remained `(SIMULATION)`.
 - Menu regression: passed (`SmoothAF menu regression tests passed`).
 - Episode telemetry host coverage includes bounded RAM event/summary records, timestamp wraparound, overflow accounting and retained terminal summaries. Physical lifecycle behavior remains pending.
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
 - ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
+- The final post-fix candidate was rebuilt from clean commit `ebc2b5e65bc26eaf160f7ace415eb74dbc592461`: `Will load on: 600D`, `DEP=38`, size `107788`, SHA-256 `a5945b7f5d68d9179be513cc25a17204b24d78ac7b613982b014ee152cb3da1a`, Build ID `ebc2b5e65bc2-600D.102`, format ARM/EABI5 relocatable. This is the only current candidate; it was not installed.
 - Historical pre-commit ARM evidence is preserved separately: `Will load on: 600D`, `DEP=36`, `SIZE=98324`, SHA-256 `4940383799aafb6c6bfb8fb9c5b3ea44e90ac61ffe57a6ee52c76b2cd3af5b51`, Build ID `01020cee8635-dirty-600D.102`. It is not a release artifact.
 - Historical immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99052`, SHA-256 `2f679ed6f8fa2ca83b9b62c57a5088858f065cd4fb52f919e0bc3ee74bd4537c`, embedded Build ID `5de054e07d96-600D.102`; format is ARM/EABI5 relocatable.
 - Previous dirty diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `106072`, SHA-256 `71e9975a01377bd56387ad41775e18ad423bdbb0b89b82c92204a8bdec0a37c1`, embedded Build ID `5d5ef1406810-dirty-600D.102`; it remains historical evidence only and has not been installed.
@@ -85,15 +86,14 @@ The diagnostic candidate instruments the real `smoothaf_init()` -> `smoothaf_loc
 
 Host coverage in `tests/test_smoothaf_runtime.c` covers create NULL/non-NULL, invalid handles, take/give success/failure, optional FIO OFF and FIO-task failure, cleanup, STOP/PANIC and no-movement gating. `src/smoothaf_runtime.h` is a host-only lifecycle seam and is not used as a substitute for the ARM DryOS path; host tests cannot prove camera object validity or runtime ABI. The seam is therefore evidence for lifecycle expectations only, not a reproduction of `src/smoothaf.c` or DryOS.
 
-**Current conclusion: root cause remains unconfirmed; physical status remains NO-GO.** The final diagnostic ARM candidate is built from the final clean commit after validation and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
+**Current conclusion: the two investigated defects are confirmed and minimally fixed; physical status remains NO-GO.** The final diagnostic ARM candidate is built from clean commit `ebc2b5e65bc26eaf160f7ace415eb74dbc592461` and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
 
 ### Final diagnostic candidate (2026-11-05)
 
 - Designated installation artifact: `artifacts/v0.8/smoothaf.mo` only. Historical `smoothaf.mo.pre-*` files remain preserved and are not installation candidates; intermediate post-fix copies were removed.
-- The post-commit Build ID, size, SHA-256 and absolute path are recorded in the final build delivery; they must be checked against the file before installation.
-- Expected format: `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)`; target must report `Will load on: 600D`; expected dependency count is `DEP=37`.
-- The DEP=37 delta is the `current_task` data symbol introduced by the runtime caller/owner diagnostics; the 600D.102 table maps it to `0x00001A2C` (`docs/references/magic-lantern-branch-lua_fix/600D_102.SYM:3`). The other diagnostic API imports (`get_ms_clock`, semaphore APIs and task creation) were already present in the preceding dependency set.
-- The final build is generated after the final commit and embeds that same Build ID. Logger and FIO remain disabled by default.
+- Absolute path: `D:\Projetos\Community\SmoothAF\artifacts\v0.8\smoothaf.mo`.
+- Verified metadata: Build ID `ebc2b5e65bc2-600D.102`, size `107788` bytes, SHA-256 `a5945b7f5d68d9179be513cc25a17204b24d78ac7b613982b014ee152cb3da1a`, format ARM/EABI5 relocatable, target `Will load on: 600D`, `DEP=38`.
+- The dependency count is build evidence only; logger and FIO remain disabled by default.
 
 For the one controlled diagnostic installation, first verify the camera displays the exact Build ID from the final build delivery after loading this exact file. Keep `Enable=OFF`, monitoring/AF inactive, and logger/FIO OFF. Open only the read-only Runtime Diagnostics page, record all fields once, and do not select START, Focus Test, ACTIVE, STOP/PANIC, or any movement-related control. If the Build ID is absent/mismatched, or any task remains active during unload, stop and return to NO-GO; do not install another candidate or perform physical movement.
 
