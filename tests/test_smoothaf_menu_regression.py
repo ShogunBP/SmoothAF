@@ -168,7 +168,54 @@ def test_removed_integration_files_are_not_present():
         assert not (ROOT / relative).exists(), relative
 
 
+def test_production_runtime_diagnostics_invariants():
+    source = SOURCE.read_text(encoding="utf-8")
+    lock = source.split("static int smoothaf_lock(void)", 1)[1].split(
+        "static void smoothaf_unlock(void)", 1
+    )[0]
+    note_error = source.split("static void smoothaf_runtime_note_error", 1)[1].split(
+        "static void smoothaf_runtime_increment", 1
+    )[0]
+
+    # Every production semaphore operation must remain behind the instrumented
+    # wrappers, including the no-handle failure path.
+    assert source.count("take_semaphore(") == 1
+    assert source.count("give_semaphore(") == 1
+    assert "if (!smoothaf_sem)" in lock
+    assert "smoothaf_runtime_increment(&smoothaf_runtime_take_count);" in lock
+    assert "smoothaf_runtime_increment(&smoothaf_runtime_take_failures);" in lock
+    assert "smoothaf_runtime_last_take_caller = (uintptr_t)current_task;" in lock
+    assert "smoothaf_runtime_last_take_duration = 0;" in lock
+    assert "SMOOTHAF_RUNTIME_RESULT_NO_HANDLE" in lock
+    assert "smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_SEM_TAKE" in lock
+
+    # Initialization publishes the semaphore result before READY; a later
+    # change must not make an unverified handle look ready.
+    init = source.split("static unsigned int smoothaf_init(void)", 1)[1]
+    create_publish = init.index("smoothaf_runtime_sem_create_result = smoothaf_sem ? 1 : 0;")
+    ready_guard = init.index("if (smoothaf_runtime_sem_create_result != 1 || !smoothaf_runtime_sem_handle)")
+    ready_publish = init.index("smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_READY;")
+    assert create_publish < ready_guard < ready_publish
+    assert "smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_READY" in init
+    assert "READY INVARIANT" in source
+
+    # The first runtime error is a latch: menu refreshes and later errors must
+    # not clear or replace it.
+    assert "if (!smoothaf_runtime_first_error)" in note_error
+    assert "smoothaf_runtime_first_error = error;" in note_error
+    assert "smoothaf_runtime_last_error = error;" in note_error
+
+    # Canon's Legacy formatter path has demonstrated compatibility with %d,
+    # not the newly introduced %u. Keep runtime counters/durations on %d.
+    assert 'MENU_SET_VALUE("T=%d F=%d"' in source
+    assert 'MENU_SET_VALUE("G=%d F=%d"' in source
+    assert 'MENU_SET_VALUE("T=%u F=%u"' not in source
+    assert 'MENU_SET_VALUE("G=%u F=%u"' not in source
+
+
 if __name__ == "__main__":
+    test_production_runtime_diagnostics_invariants()
+
     test_menu_shape_and_lifecycle()
     test_removed_integration_files_are_not_present()
     print("SmoothAF menu regression tests passed")

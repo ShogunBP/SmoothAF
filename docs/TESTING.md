@@ -85,7 +85,17 @@ The diagnostic candidate instruments the real `smoothaf_init()` -> `smoothaf_loc
 
 Host coverage in `tests/test_smoothaf_runtime.c` covers create NULL/non-NULL, invalid handles, take/give success/failure, optional FIO OFF and FIO-task failure, cleanup, STOP/PANIC and no-movement gating. `src/smoothaf_runtime.h` is a host-only lifecycle seam and is not used as a substitute for the ARM DryOS path; host tests cannot prove camera object validity or runtime ABI. The seam is therefore evidence for lifecycle expectations only, not a reproduction of `src/smoothaf.c` or DryOS.
 
-**Current conclusion: root cause remains unconfirmed; physical status remains NO-GO.** The final diagnostic ARM candidate is built from the clean HEAD after validation and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
+**Current conclusion: root cause remains unconfirmed; physical status remains NO-GO.** The final diagnostic ARM candidate is built from the final clean commit after validation and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
+
+### Final diagnostic candidate (2026-11-05)
+
+- Designated installation artifact: `artifacts/v0.8/smoothaf.mo` only. Historical `smoothaf.mo.pre-*` files remain preserved and are not installation candidates; intermediate post-fix copies were removed.
+- The post-commit Build ID, size, SHA-256 and absolute path are recorded in the final build delivery; they must be checked against the file before installation.
+- Expected format: `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)`; target must report `Will load on: 600D`; expected dependency count is `DEP=37`.
+- The DEP=37 delta is the `current_task` data symbol introduced by the runtime caller/owner diagnostics; the 600D.102 table maps it to `0x00001A2C` (`docs/references/magic-lantern-branch-lua_fix/600D_102.SYM:3`). The other diagnostic API imports (`get_ms_clock`, semaphore APIs and task creation) were already present in the preceding dependency set.
+- The final build is generated after the final commit and embeds that same Build ID. Logger and FIO remain disabled by default.
+
+For the one controlled diagnostic installation, first verify the camera displays the exact Build ID from the final build delivery after loading this exact file. Keep `Enable=OFF`, monitoring/AF inactive, and logger/FIO OFF. Open only the read-only Runtime Diagnostics page, record all fields once, and do not select START, Focus Test, ACTIVE, STOP/PANIC, or any movement-related control. If the Build ID is absent/mismatched, or any task remains active during unload, stop and return to NO-GO; do not install another candidate or perform physical movement.
 
 ## SmoothAF v0.6 validation record
 

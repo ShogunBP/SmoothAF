@@ -278,6 +278,7 @@ static int smoothaf_search_direction = -1;
 #define SMOOTHAF_RUNTIME_STAGE_FIO_TASK    6
 #define SMOOTHAF_RUNTIME_STAGE_TASK_CREATE 7
 #define SMOOTHAF_RUNTIME_STAGE_TASK_RUNNING 8
+#define SMOOTHAF_RUNTIME_RESULT_NO_HANDLE  (-3)
 #define SMOOTHAF_RUNTIME_RESULT_UNSET      (-2)
 #define SMOOTHAF_RUNTIME_RESULT_NOT_CALLED (-1)
 #define SMOOTHAF_RUNTIME_ERROR_NONE        0
@@ -286,6 +287,7 @@ static int smoothaf_search_direction = -1;
 #define SMOOTHAF_RUNTIME_ERROR_SEM_GIVE    3
 #define SMOOTHAF_RUNTIME_ERROR_TASK_CREATE 4
 #define SMOOTHAF_RUNTIME_ERROR_FIO_TASK    5
+#define SMOOTHAF_RUNTIME_ERROR_READY      6
 
 static volatile int smoothaf_runtime_stage;
 static volatile int smoothaf_runtime_sem_create_result;
@@ -423,8 +425,26 @@ static int smoothaf_lock(void)
     uint32_t started;
     uint32_t ended;
     int result;
-    if (!smoothaf_sem) return 0;
     smoothaf_runtime_last_take_caller = (uintptr_t)current_task;
+    if (!smoothaf_sem)
+    {
+        /* A missing handle is still a failed lock attempt from the
+         * operational path; keep it visible instead of silently returning. */
+        smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_SEM_TAKE;
+        smoothaf_runtime_increment(&smoothaf_runtime_take_count);
+        smoothaf_runtime_increment(&smoothaf_runtime_take_failures);
+        smoothaf_runtime_last_take_result = SMOOTHAF_RUNTIME_RESULT_NO_HANDLE;
+        smoothaf_runtime_last_take_duration = 0;
+        if (smoothaf_runtime_first_take_result == SMOOTHAF_RUNTIME_RESULT_NOT_CALLED)
+        {
+            smoothaf_runtime_first_take_result = SMOOTHAF_RUNTIME_RESULT_NO_HANDLE;
+            smoothaf_runtime_first_take_duration = 0;
+        }
+        smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_SEM_TAKE,
+                                    SMOOTHAF_RUNTIME_RESULT_NO_HANDLE,
+                                    SMOOTHAF_RUNTIME_STAGE_SEM_TAKE);
+        return 0;
+    }
     started = (uint32_t)get_ms_clock();
     smoothaf_runtime_increment(&smoothaf_runtime_take_count);
     result = take_semaphore(smoothaf_sem, 50);
@@ -3424,6 +3444,7 @@ static const char *smoothaf_runtime_result_name(int result)
 {
     switch (result)
     {
+        case SMOOTHAF_RUNTIME_RESULT_NO_HANDLE: return "NO HANDLE";
         case SMOOTHAF_RUNTIME_RESULT_UNSET: return "UNSET";
         case SMOOTHAF_RUNTIME_RESULT_NOT_CALLED: return "N/A";
         case 0: return "OK";
@@ -3467,18 +3488,21 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_last_take_update)
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_take_duration_update)
 {
-    if (smoothaf_runtime_first_take_result == SMOOTHAF_RUNTIME_RESULT_NOT_CALLED)
+    if (smoothaf_runtime_first_take_result == SMOOTHAF_RUNTIME_RESULT_UNSET ||
+        smoothaf_runtime_first_take_result == SMOOTHAF_RUNTIME_RESULT_NOT_CALLED ||
+        smoothaf_runtime_first_take_result == SMOOTHAF_RUNTIME_RESULT_NO_HANDLE)
         MENU_SET_VALUE("N/A");
     else
-        MENU_SET_VALUE("%u ms", (unsigned)smoothaf_runtime_first_take_duration);
+        MENU_SET_VALUE("%d ms", (int)smoothaf_runtime_first_take_duration);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_last_take_duration_update)
 {
-    if (smoothaf_runtime_take_count == 0)
+    if (smoothaf_runtime_take_count == 0 ||
+        smoothaf_runtime_last_take_result == SMOOTHAF_RUNTIME_RESULT_NO_HANDLE)
         MENU_SET_VALUE("N/A");
     else
-        MENU_SET_VALUE("%u ms", (unsigned)smoothaf_runtime_last_take_duration);
+        MENU_SET_VALUE("%d ms", (int)smoothaf_runtime_last_take_duration);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_give_result_update)
@@ -3492,7 +3516,7 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_give_duration_update)
     if (smoothaf_runtime_give_count == 0)
         MENU_SET_VALUE("N/A");
     else
-        MENU_SET_VALUE("%u ms", (unsigned)smoothaf_runtime_first_give_duration);
+        MENU_SET_VALUE("%d ms", (int)smoothaf_runtime_first_give_duration);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_last_give_duration_update)
@@ -3500,14 +3524,14 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_last_give_duration_update)
     if (smoothaf_runtime_give_count == 0)
         MENU_SET_VALUE("N/A");
     else
-        MENU_SET_VALUE("%u ms", (unsigned)smoothaf_runtime_last_give_duration);
+        MENU_SET_VALUE("%d ms", (int)smoothaf_runtime_last_give_duration);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_counter_update)
-{ MENU_SET_VALUE("T=%u F=%u", (unsigned)smoothaf_runtime_take_count, (unsigned)smoothaf_runtime_take_failures); }
+{ MENU_SET_VALUE("T=%d F=%d", (int)smoothaf_runtime_take_count, (int)smoothaf_runtime_take_failures); }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_give_counter_update)
-{ MENU_SET_VALUE("G=%u F=%u", (unsigned)smoothaf_runtime_give_count, (unsigned)smoothaf_runtime_give_failures); }
+{ MENU_SET_VALUE("G=%d F=%d", (int)smoothaf_runtime_give_count, (int)smoothaf_runtime_give_failures); }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_caller_update)
 { MENU_SET_VALUE("T=0x%08x G=0x%08x", (unsigned)smoothaf_runtime_last_take_caller, (unsigned)smoothaf_runtime_last_give_caller); }
@@ -3518,15 +3542,15 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_owner_update)
 static MENU_UPDATE_FUNC(smoothaf_runtime_hold_update)
 {
     if (smoothaf_runtime_lock_held)
-        MENU_SET_VALUE("HELD %u ms", (unsigned)((uint32_t)get_ms_clock() - smoothaf_runtime_hold_start_ms));
+        MENU_SET_VALUE("HELD %d ms", (int)((uint32_t)get_ms_clock() - smoothaf_runtime_hold_start_ms));
     else if (smoothaf_runtime_give_count == 0)
         MENU_SET_VALUE("N/A");
     else
-        MENU_SET_VALUE("LAST %u ms", (unsigned)smoothaf_runtime_last_hold_duration);
+        MENU_SET_VALUE("LAST %d ms", (int)smoothaf_runtime_last_hold_duration);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_task_create_update)
-{ MENU_SET_VALUE("F=%s L=%s %u/%u", smoothaf_runtime_task_result_name(smoothaf_runtime_first_task_create_result), smoothaf_runtime_task_result_name(smoothaf_runtime_last_task_create_result), (unsigned)smoothaf_runtime_task_create_count, (unsigned)smoothaf_runtime_task_create_failures); }
+{ MENU_SET_VALUE("F=%s L=%s %d/%d", smoothaf_runtime_task_result_name(smoothaf_runtime_first_task_create_result), smoothaf_runtime_task_result_name(smoothaf_runtime_last_task_create_result), (int)smoothaf_runtime_task_create_count, (int)smoothaf_runtime_task_create_failures); }
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_task_state_update)
 {
@@ -3543,14 +3567,14 @@ static MENU_UPDATE_FUNC(smoothaf_runtime_task_state_update)
 
 static MENU_UPDATE_FUNC(smoothaf_runtime_logger_update)
 {
-    MENU_SET_VALUE("L=%s F=%s%s C=%s/%s %u/%u",
+    MENU_SET_VALUE("L=%s F=%s%s C=%s/%s %d/%d",
                    smoothaf_logger_enabled ? "ON" : "OFF",
                    smoothaf_logger_fio_enabled ? "ON" : "OFF",
                    smoothaf_runtime_fio_failed ? "!" : "",
                    smoothaf_runtime_task_result_name(smoothaf_runtime_first_fio_task_create_result),
                    smoothaf_runtime_task_result_name(smoothaf_runtime_last_fio_task_create_result),
-                   (unsigned)smoothaf_runtime_fio_task_create_count,
-                   (unsigned)smoothaf_runtime_fio_task_create_failures);
+                   (int)smoothaf_runtime_fio_task_create_count,
+                   (int)smoothaf_runtime_fio_task_create_failures);
 }
 
 static const char *smoothaf_runtime_error_name(int error)
@@ -3562,6 +3586,7 @@ static const char *smoothaf_runtime_error_name(int error)
         case SMOOTHAF_RUNTIME_ERROR_SEM_GIVE: return "SEM GIVE";
         case SMOOTHAF_RUNTIME_ERROR_TASK_CREATE: return "TASK CREATE";
         case SMOOTHAF_RUNTIME_ERROR_FIO_TASK: return "FIO TASK";
+        case SMOOTHAF_RUNTIME_ERROR_READY: return "READY INVARIANT";
         default: return "NONE";
     }
 }
@@ -4068,6 +4093,16 @@ static unsigned int smoothaf_init(void)
     if (!smoothaf_sem)
     {
         smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_SEM_CREATE, 0,
+                                    SMOOTHAF_RUNTIME_STAGE_SEM_CREATE);
+        return 1;
+    }
+    /* READY is a published invariant, not merely the next source line:
+     * retain the create result and handle check at the publication boundary. */
+    if (smoothaf_runtime_sem_create_result != 1 || !smoothaf_runtime_sem_handle)
+    {
+        smoothaf_runtime_stage = SMOOTHAF_RUNTIME_STAGE_SEM_CREATE;
+        smoothaf_runtime_note_error(SMOOTHAF_RUNTIME_ERROR_READY,
+                                    smoothaf_runtime_sem_create_result,
                                     SMOOTHAF_RUNTIME_STAGE_SEM_CREATE);
         return 1;
     }
