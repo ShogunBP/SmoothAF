@@ -86,7 +86,7 @@ The diagnostic candidate instruments the real `smoothaf_init()` -> `smoothaf_loc
 
 Host coverage in `tests/test_smoothaf_runtime.c` covers create NULL/non-NULL, invalid handles, take/give success/failure, optional FIO OFF and FIO-task failure, cleanup, STOP/PANIC and no-movement gating. `src/smoothaf_runtime.h` is a host-only lifecycle seam and is not used as a substitute for the ARM DryOS path; host tests cannot prove camera object validity or runtime ABI. The seam is therefore evidence for lifecycle expectations only, not a reproduction of `src/smoothaf.c` or DryOS.
 
-**Current conclusion: root cause remains unconfirmed; physical status remains NO-GO.** The single diagnostic ARM candidate was built from the dirty working tree and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
+**Current conclusion: root cause remains unconfirmed; physical status remains NO-GO.** The final diagnostic ARM candidate is built from the clean HEAD after validation and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
 
 ## SmoothAF v0.6 validation record
 
