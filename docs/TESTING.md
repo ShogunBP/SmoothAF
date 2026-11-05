@@ -33,7 +33,7 @@ The normal module path contains no direct FIO calls in the AF task or menu callb
 
 1. Run `.\build-smoothaf.ps1 -TestOnly` and preserve the `(SIMULATION)` label on benchmark output.
 2. Use host tests to validate mode, arm, episode, 4/6/8/12 command limits, AUTO and recovery reservations, fixed deadline, settle, cooldown, cancellation, failure policy and STOP/PANIC. Host tests do not prove lens movement safety on camera.
-3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, the generated `DEP` count and ELF ARM/EABI5. Save the experimental module only as `artifacts/v0.8/smoothaf.mo`.
+3. Build ARM only in an isolated staging copy. Validate `Will load on: 600D`, the generated `DEP` count and ELF ARM/EABI5. For the semaphore diagnosis, preserve only the identified candidate at `artifacts/v0.8/smoothaf.mo`; do not install it automatically. Record the final clean-commit size, hash and Build ID with the build output.
 4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
 5. Test Movie Dry Run separately in normal H.264 recording. Start the monitor before recording, select `Vlog AF Mode=DRY RUN`, manually arm one episode, and use a second phone/camera to record the ML display. Confirm recording start/end events, sample count, validity/confidence, score, duration, blur transitions and zero `AF Lens Calls`; custom and RAW recording must remain blocked. The existing menu is the least-invasive visibility path, but it may not remain open or refresh over the recording UI; treat its values as opportunistic and use the fixed RAM Log Page/Log Entry after the clip as the authoritative fallback.
 6. Exercise four short scenes: initially focused static target, nearly focused target, heavily defocused target and a subject approaching/receding. Use short clips first; stop immediately on recording corruption, task stall, abnormal heat, battery/card warning or any unexpected lens command.
@@ -55,7 +55,8 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
 - ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
 - Historical pre-commit ARM evidence is preserved separately: `Will load on: 600D`, `DEP=36`, `SIZE=98324`, SHA-256 `4940383799aafb6c6bfb8fb9c5b3ea44e90ac61ffe57a6ee52c76b2cd3af5b51`, Build ID `01020cee8635-dirty-600D.102`. It is not a release artifact.
-- Final immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99180`, SHA-256 `5d876a06fe8bd3a1d0b869b6adecad78fd55576c8c44220a1d819e8cc13e42eb`, embedded Build ID `eb32bdb36824-600D.102`; format is ARM/EABI5 relocatable.
+- Historical immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99052`, SHA-256 `2f679ed6f8fa2ca83b9b62c57a5088858f065cd4fb52f919e0bc3ee74bd4537c`, embedded Build ID `5de054e07d96-600D.102`; format is ARM/EABI5 relocatable.
+- Previous dirty diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `106072`, SHA-256 `71e9975a01377bd56387ad41775e18ad423bdbb0b89b82c92204a8bdec0a37c1`, embedded Build ID `5d5ef1406810-dirty-600D.102`; it remains historical evidence only and has not been installed.
 
 ## Phase 3A audit matrix
 
@@ -75,6 +76,16 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - The embedded Build ID is checked against the final commit. The pre-build v0.8 artifacts remain preserved in the existing untracked `artifacts/v0.8/smoothaf.mo.pre-*` backups; no backup was deleted.
 - No physical v0.8 or Movie validation or SD-card installation has been performed. All camera results, including zero lens movement in Dry Run and optical focus/displacement, remain pending. Movie Dry Run must have zero physical lens commands; Movie ACTIVE is not enabled for recording.
 - FIO export is disabled by default and host validation covers only the simulated consumer, rotation, short-write retry, card removal/recovery and configuration ownership. No physical SD, cache/DMA or camera-runtime evidence is claimed.
+
+## Semaphore startup diagnosis (2026-11-04)
+
+The Legacy Lua Fix source used by the ARM staging build defines the semaphore ABI in `docs/references/magic-lantern-branch-lua_fix/src/dryos.h`: `create_named_semaphore(const char *, int)` returns `struct semaphore *`; `take_semaphore(struct semaphore *, int)` and `give_semaphore(struct semaphore *)` return `int`. The Legacy self-test at `modules/selftest/selftest.c:1081-1086` verifies a non-null handle and `0` as success for take/give. The 600D.102 stubs and symbol table resolve these functions to `0xFF070E90`, `0xFF070FF0` and `0xFF0710D8`.
+
+The diagnostic candidate instruments the real `smoothaf_init()` -> `smoothaf_lock()` -> `smoothaf_start_task()` path. It records first/last semaphore take and give results and durations, saturating call counters, acquisition latency, current/last hold duration, task-pointer provenance and first/last diagnostic error categories with raw API results, without dereferencing returned objects. The read-only `Diagnostic > Runtime Diagnostics` page is registered before the mandatory semaphore attempt, so semaphore-create failure remains visible in RAM-backed fields; task-creation and runtime semaphore failures are also visible. The production take timeout remains 50 ms; there are no retries, extra diagnostic tasks, FIO calls for telemetry, movement changes or AF algorithm/limit changes.
+
+Host coverage in `tests/test_smoothaf_runtime.c` covers create NULL/non-NULL, invalid handles, take/give success/failure, optional FIO OFF and FIO-task failure, cleanup, STOP/PANIC and no-movement gating. `src/smoothaf_runtime.h` is a host-only lifecycle seam and is not used as a substitute for the ARM DryOS path; host tests cannot prove camera object validity or runtime ABI. The seam is therefore evidence for lifecycle expectations only, not a reproduction of `src/smoothaf.c` or DryOS.
+
+**Current conclusion: root cause remains unconfirmed; physical status remains NO-GO.** The single diagnostic ARM candidate was built from the dirty working tree and is not a replacement for the historical `eb32bdb36824-600D.102` artifact. No SD-card installation, release, push, merge, rebase, reset or tag operation was performed.
 
 ## SmoothAF v0.6 validation record
 
