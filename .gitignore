@@ -52,6 +52,7 @@ hgdiff.tmp
 /docs/internal/
 /docs/_internal/
 /docs/tmp/
+/docs/dev/
 
 # Python
 __pycache__/
