@@ -29,6 +29,7 @@
 #include "smoothaf_menu_toggle.h"
 #include "smoothaf_task_lifecycle.h"
 #include "smoothaf_d1.h"
+#include "smoothaf_observability.h"
 
 #define SMOOTHAF_HC_LEGACY       0
 #define SMOOTHAF_HC_ADAPTIVE     1
@@ -225,6 +226,13 @@ static volatile uint32_t smoothaf_af_episode_id;
 static volatile int smoothaf_measure_requested;
 static volatile int smoothaf_d1_active;
 static volatile uint32_t smoothaf_d1_series_id;
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+static uint8_t smoothaf_observability_identity_namespace;
+static uint32_t smoothaf_observability_identity_generation;
+static uint16_t smoothaf_observability_wire_episode_id;
+static uint16_t smoothaf_observability_next_wire_episode_id;
+static uint32_t smoothaf_observability_generation_counter;
+#endif
 static volatile int smoothaf_d1_reject_reason;
 static volatile uint32_t smoothaf_d1_next_due_ms;
 static volatile uint32_t smoothaf_d1_last_timestamp_ms;
@@ -251,7 +259,82 @@ static struct smoothaf_episode_log smoothaf_episode_log;
 static struct smoothaf_persist_log_buffer smoothaf_persist_log;
 static struct smoothaf_log_fio_backend smoothaf_persist_fio;
 static struct smoothaf_persist_log_batch smoothaf_persist_batch;
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+static struct smoothaf_observability_controller smoothaf_observability;
+#endif
 /* Note: smoothaf_logger_enabled, smoothaf_logger_fio_enabled, etc. are defined via CONFIG_INT above */
+
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+static bool smoothaf_observability_publish(
+    void *context, const struct smoothaf_observability_event *event)
+{
+    int32_t payload[SMOOTHAF_OBS_PAYLOAD_SLOTS];
+    (void)context;
+    if (!smoothaf_persist_logger_is_enabled(&smoothaf_persist_log) ||
+        !smoothaf_observability_event_payload(event, payload))
+        return false;
+    return smoothaf_persist_log_obs_snapshot_v1(
+        &smoothaf_persist_log, event->timestamp_ms, event->episode_id, payload);
+}
+
+static void smoothaf_observability_flush_pending_best_effort(void)
+{
+    /* This is a producer-side, bounded operation.  The logger helper uses a
+     * try-lock and the ring can only accept/drop; no FIO service or wait is
+     * introduced at lifecycle boundaries. */
+    (void)smoothaf_observability_flush_pending(
+        &smoothaf_observability, smoothaf_observability_publish, 0);
+}
+
+static void smoothaf_observability_end_context_best_effort(void)
+{
+    smoothaf_observability_flush_pending_best_effort();
+    smoothaf_observability_identity_namespace = SMOOTHAF_OBS_IDENTITY_NONE;
+    smoothaf_observability_identity_generation = 0u;
+    smoothaf_observability_wire_episode_id = 0u;
+    smoothaf_observability_controller_set_identity(
+        &smoothaf_observability, SMOOTHAF_OBS_IDENTITY_NONE, 0u);
+}
+
+static uint16_t smoothaf_observability_next_wire_id(void)
+{
+    uint16_t value = smoothaf_observability_next_wire_episode_id;
+    if (value == 0u || value == UINT16_MAX) value = 1u;
+    smoothaf_observability_next_wire_episode_id =
+        value == (uint16_t)(UINT16_MAX - 1u) ? 1u : (uint16_t)(value + 1u);
+    return value;
+}
+
+static void smoothaf_observability_begin_context(
+    uint8_t identity_namespace, uint32_t identity_generation,
+    uint16_t wire_episode_id)
+{
+    smoothaf_observability_flush_pending_best_effort();
+    smoothaf_observability_identity_namespace = identity_namespace;
+    smoothaf_observability_identity_generation = identity_generation;
+    smoothaf_observability_wire_episode_id = wire_episode_id
+        ? wire_episode_id : smoothaf_observability_next_wire_id();
+    smoothaf_observability_controller_set_identity(
+        &smoothaf_observability, identity_namespace, identity_generation);
+}
+
+static void smoothaf_observability_snapshot_from_vram(
+    struct smoothaf_observability_snapshot *snapshot,
+    const struct vram_info *vram, uint32_t timestamp_ms)
+{
+    smoothaf_observability_snapshot_init(snapshot);
+    snapshot->timestamp_ms = timestamp_ms;
+    snapshot->available_mask = SMOOTHAF_OBS_CORE_FIELDS;
+    snapshot->yuv_buffer_address = (uint32_t)(uintptr_t)vram->vram;
+    snapshot->width = vram->width;
+    snapshot->pitch = vram->pitch;
+    snapshot->height = vram->height;
+    snapshot->liveview = lv ? 1u : 0u;
+    snapshot->movie_mode = is_movie_mode() ? 1u : 0u;
+    snapshot->recording_class = (uint8_t)smoothaf_movie_recording_class(
+        RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW);
+}
+#endif
 
 static void smoothaf_persist_logger_record_fio_errors(void)
 {
@@ -486,6 +569,10 @@ static void smoothaf_persist_no_episode_cancellations(uint32_t now,
                                                      uint8_t origin);
 static int smoothaf_start_fio_task(void);
 static void smoothaf_measure_task(void);
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+static void smoothaf_observability_prepare_manual_context(void);
+static void smoothaf_observability_prepare_monitor_context(void);
+#endif
 static void smoothaf_d1_task(void);
 static void smoothaf_cancel_pending_measure(void);
 static int smoothaf_start_task(int task_id, int requires_enable);
@@ -850,6 +937,15 @@ static void smoothaf_episode_begin(smoothaf_episode_event_type_t type)
 {
     uint32_t now = (uint32_t)get_ms_clock();
     if (++smoothaf_af_episode_id == 0) smoothaf_af_episode_id = 1;
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    if (type != SMOOTHAF_EPISODE_EVENT_ARM) {
+        if (++smoothaf_observability_generation_counter == 0u)
+            smoothaf_observability_generation_counter = 1u;
+        smoothaf_observability_begin_context(
+            SMOOTHAF_OBS_IDENTITY_AF, smoothaf_observability_generation_counter,
+            smoothaf_observability_next_wire_id());
+    }
+#endif
     smoothaf_d1_gate_set_episode(&smoothaf_d1_gate, 1);
     smoothaf_af_episode_complete = 0;
     smoothaf_af_cancel_published = 0;
@@ -903,6 +999,9 @@ static void smoothaf_persist_session_start(void)
 
 static void smoothaf_persist_session_end(uint8_t reason)
 {
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_flush_pending_best_effort();
+#endif
     if (!smoothaf_persist_session_active)
         return;
     if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
@@ -973,6 +1072,11 @@ static void smoothaf_persist_no_episode_cancellations(uint32_t now,
 static void smoothaf_episode_stop(void)
 {
     uint32_t ended_ms = (uint32_t)get_ms_clock();
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    /* Terminal boundaries flush only the bounded in-memory pair.  The logger
+     * remains best-effort: disabled, full, or contended publication drops. */
+    smoothaf_observability_flush_pending_best_effort();
+#endif
     smoothaf_d1_gate_set_episode(&smoothaf_d1_gate, 0);
     int cancelled = smoothaf_episode_cancel_requested() ||
                     smoothaf_vlog_af.episode_result ==
@@ -1456,6 +1560,34 @@ static int smoothaf_block_reason(void)
     return SMOOTHAF_BLOCK_NONE;
 }
 
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+static void smoothaf_observability_prepare_manual_context(void)
+{
+    if (smoothaf_observability_identity_namespace == SMOOTHAF_OBS_IDENTITY_AF ||
+        smoothaf_observability_identity_namespace == SMOOTHAF_OBS_IDENTITY_D1)
+        return;
+    if (++smoothaf_observability_generation_counter == 0u)
+        smoothaf_observability_generation_counter = 1u;
+    smoothaf_observability_begin_context(
+        SMOOTHAF_OBS_IDENTITY_MANUAL,
+        smoothaf_observability_generation_counter,
+        smoothaf_observability_next_wire_id());
+}
+
+static void smoothaf_observability_prepare_monitor_context(void)
+{
+    if (smoothaf_observability_identity_namespace == SMOOTHAF_OBS_IDENTITY_MONITOR ||
+        smoothaf_observability_identity_namespace == SMOOTHAF_OBS_IDENTITY_AF)
+        return;
+    if (++smoothaf_observability_generation_counter == 0u)
+        smoothaf_observability_generation_counter = 1u;
+    smoothaf_observability_begin_context(
+        SMOOTHAF_OBS_IDENTITY_MONITOR,
+        smoothaf_observability_generation_counter,
+        smoothaf_observability_next_wire_id());
+}
+#endif
+
 static int smoothaf_measure_with_metric(int metric, int *score_out,
                                         int *mean_out, int *sad_out,
                                         int *laplacian_out)
@@ -1467,6 +1599,14 @@ static int smoothaf_measure_with_metric(int metric, int *score_out,
     int sad;
     int laplacian;
     int mean;
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    struct smoothaf_observability_snapshot before_snapshot;
+    struct smoothaf_observability_snapshot after_snapshot;
+    struct smoothaf_observability_result observation;
+    struct smoothaf_observability_event before_event;
+    struct smoothaf_observability_event after_event;
+    uint16_t logical_id;
+#endif
     if (score_out) *score_out = -1;
     if (mean_out) *mean_out = 0;
     if (sad_out) *sad_out = 0;
@@ -1486,7 +1626,38 @@ static int smoothaf_measure_with_metric(int metric, int *score_out,
     left = smoothaf_roi_left(vram->width);
     top = smoothaf_roi_top(vram->height);
     base = vram->vram + top * vram->pitch + left * 2;
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_snapshot_from_vram(
+        &before_snapshot, vram, (uint32_t)get_ms_clock());
+    logical_id = smoothaf_observability_next_logical_id(&smoothaf_observability);
+#endif
     smoothaf_measure_all(base, vram->pitch, &sad, &laplacian, &mean);
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_snapshot_from_vram(
+        &after_snapshot, vram, (uint32_t)get_ms_clock());
+    if (smoothaf_observability_classify(
+            &before_snapshot, &after_snapshot,
+            SMOOTHAF_OBS_PROFILE_CORE, &observation) &&
+        smoothaf_observability_make_event(
+            &before_event, &before_snapshot, &observation,
+            smoothaf_observability_wire_episode_id, 0u, logical_id,
+            SMOOTHAF_OBS_PHASE_BEFORE) &&
+        smoothaf_observability_make_event(
+            &after_event, &after_snapshot, &observation,
+            smoothaf_observability_wire_episode_id, 0u, logical_id,
+            SMOOTHAF_OBS_PHASE_AFTER))
+    {
+        smoothaf_observability_event_set_identity(
+            &before_event, smoothaf_observability_identity_namespace,
+            smoothaf_observability_identity_generation);
+        smoothaf_observability_event_set_identity(
+            &after_event, smoothaf_observability_identity_namespace,
+            smoothaf_observability_identity_generation);
+        (void)smoothaf_observability_submit_pair(
+            &smoothaf_observability, &before_event, &after_event,
+            smoothaf_observability_publish, 0);
+    }
+#endif
     if (score_out) *score_out = metric == SMOOTHAF_METRIC_LAPLACIAN
                                ? laplacian : sad;
     if (mean_out) *mean_out = mean;
@@ -1928,6 +2099,9 @@ static void smoothaf_vlog_af_fail(int result, int block)
 
 static void smoothaf_monitor_task(void)
 {
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_prepare_monitor_context();
+#endif
     uint32_t completed;
     uint32_t start;
     int score = -1;
@@ -2644,6 +2818,9 @@ static void smoothaf_monitor_task(void)
 
     smoothaf_persist_session_end(smoothaf_cancel ?
                                  (smoothaf_panic ? 3 : 2) : 1);
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_end_context_best_effort();
+#endif
     smoothaf_persist_no_episode_cancellations(
         (uint32_t)get_ms_clock(), SMOOTHAF_MOVIE_REJECT_SOURCE_CANCEL_PATH);
 
@@ -2653,6 +2830,9 @@ static void smoothaf_monitor_task(void)
 
 static void smoothaf_measure_task(void)
 {
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_prepare_manual_context();
+#endif
     uint32_t start = (uint32_t)get_ms_clock();
     int score = -1;
     int mean = 0;
@@ -2913,6 +3093,9 @@ static void smoothaf_d1_task(void)
         smoothaf_d1_series_finish(&smoothaf_d1_series,
                                   smoothaf_d1_series.status,
                                   (uint32_t)get_ms_clock());
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_end_context_best_effort();
+#endif
     smoothaf_d1_active = 0;
     smoothaf_status = smoothaf_d1_series.status == SMOOTHAF_D1_STATUS_NORMAL
                     ? SMOOTHAF_STATUS_IDLE
@@ -3044,6 +3227,9 @@ static enum smoothaf_result smoothaf_adaptive_run(
 
 static void smoothaf_search_task(void)
 {
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_prepare_manual_context();
+#endif
     uint32_t start = (uint32_t)get_ms_clock();
     struct smoothaf_adaptive_hc adaptive;
     struct smoothaf_normal_af normal;
@@ -3204,6 +3390,9 @@ static void smoothaf_task_entry(void *arg)
     }
     if (task_id == SMOOTHAF_TASK_MONITOR)
         smoothaf_d1_gate_set_episode(&smoothaf_d1_gate, 0);
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_end_context_best_effort();
+#endif
     smoothaf_d1_end_task_owner(task_id);
     smoothaf_session_finished_ms = (uint32_t)get_ms_clock();
     if (smoothaf_lock())
@@ -3520,6 +3709,13 @@ static MENU_SELECT_FUNC(smoothaf_d1_select)
         smoothaf_d1_active = 0;
         return;
     }
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    if (++smoothaf_observability_generation_counter == 0)
+        smoothaf_observability_generation_counter = 1u;
+    smoothaf_observability_begin_context(
+        SMOOTHAF_OBS_IDENTITY_D1, smoothaf_observability_generation_counter,
+        smoothaf_observability_next_wire_id());
+#endif
     smoothaf_d1_series.rec_class_initial = smoothaf_movie_recording_class(
         RECORDING_H264, RECORDING_CUSTOM, RECORDING_RAW);
     smoothaf_d1_series.rec_class_current = smoothaf_d1_series.rec_class_initial;
@@ -3618,6 +3814,9 @@ static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)
             smoothaf_af_episode_result = smoothaf_vlog_af.episode_result;
         smoothaf_af_episode_reason = smoothaf_vlog_af.episode_result;
         smoothaf_cancel_pending_measure();
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+        smoothaf_observability_flush_pending_best_effort();
+#endif
         smoothaf_task_stop_requested = 1;
         smoothaf_monitor_stop(&smoothaf_monitor);
         smoothaf_monitor_task_requested = 0;
@@ -5206,6 +5405,14 @@ static unsigned int smoothaf_init(void)
 
     /* Persistent Logger (Phase 3A) - initialize but keep disabled by default */
     smoothaf_persist_logger_init(&smoothaf_persist_log);
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_controller_init(&smoothaf_observability, 100u);
+    smoothaf_observability_identity_namespace = SMOOTHAF_OBS_IDENTITY_NONE;
+    smoothaf_observability_identity_generation = 0u;
+    smoothaf_observability_generation_counter = 0u;
+    smoothaf_observability_wire_episode_id = 0u;
+    smoothaf_observability_next_wire_episode_id = 1u;
+#endif
     smoothaf_persist_logger_set_enabled(&smoothaf_persist_log, smoothaf_logger_enabled ? true : false);
     smoothaf_log_fio_init(&smoothaf_persist_fio);
     smoothaf_log_fio_request_enabled(&smoothaf_persist_fio,
@@ -5277,6 +5484,9 @@ static unsigned int smoothaf_deinit(void)
     smoothaf_d1_gate_signal_stop_urgent(&smoothaf_d1_gate, 0);
     smoothaf_fio_shutdown_requested = 0;
     smoothaf_cancel_pending_measure();
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    smoothaf_observability_flush_pending_best_effort();
+#endif
     smoothaf_monitor_stop(&smoothaf_monitor);
     if (smoothaf_lock())
     {
@@ -5300,6 +5510,15 @@ static unsigned int smoothaf_deinit(void)
         smoothaf_last_block = SMOOTHAF_BLOCK_CANCELLED;
     }
 
+#if SMOOTHAF_OBSERVABILITY_ENABLED
+    /* The worker has exited before logger resources are disabled.  End the
+     * identity only now, after the final producer-side flush opportunity.  If
+     * a non-cancellable worker remains active, retain the identity and leave
+     * the module in its existing unload-hazard state instead of clearing
+     * controller state underneath a producer. */
+    if (!smoothaf_is_task_running() && smoothaf_task_exited)
+        smoothaf_observability_end_context_best_effort();
+#endif
     /* Stop the independent consumer without waiting for card I/O. The task
      * owns FILE * and will close it as part of its own exit path. If it is
      * already inside a non-cancellable FIO/lens primitive, leave the menu in

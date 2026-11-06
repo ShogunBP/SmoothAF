@@ -103,6 +103,10 @@ typedef enum smoothaf_persist_log_event_type {
     /* Versioned Movie/REC rejection evidence.  This is additive: the fixed
      * record ABI and every event value above remain unchanged. */
     SMOOTHAF_PERSIST_LOG_MOVIE_GATE_REJECT = 23,  /* v1 Movie/REC gate rejection */
+
+    /* B2-O3.3 passive observation snapshot.  This is additive; the fixed
+     * record ABI and all historical payload contracts remain unchanged. */
+    SMOOTHAF_PERSIST_LOG_OBS_SNAPSHOT_V1  = 24,  /* B2-O3.2 OBS_SNAPSHOT_V1 */
 } smoothaf_persist_log_event_type_e;
 
 /* MOVIE_GATE_REJECT payload contract (schema version 1).
@@ -455,6 +459,8 @@ bool smoothaf_persist_log_d1_sample(struct smoothaf_persist_log_buffer *buf, uin
                               uint16_t series_id, uint32_t sequence,
                               int32_t score, int32_t mean,
                               uint8_t valid, uint8_t confident);
+/* OBS_SNAPSHOT_V1 uses payload[0] for the B2-O3.2 control word and payload[1] through payload[5] for YUV, EDMAC, display, MVR and packed exposure. B2-O3.1 availability/change masks are not persisted in V1. */
+bool smoothaf_persist_log_obs_snapshot_v1(struct smoothaf_persist_log_buffer *buf, uint32_t ts, uint16_t episode_id, const int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD]);
 bool smoothaf_persist_log_d1_end(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                               uint16_t series_id, uint8_t status,
                               uint32_t produced, uint32_t dropped,

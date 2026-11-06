@@ -45,6 +45,18 @@ class B2O32SerializationTests(unittest.TestCase):
             logical_id=logical_id, status=status, profile=profile,
         )
 
+    def test_core_fixture_matches_python_wire_bytes(self) -> None:
+        event = self.event(
+            phase=MODULE.SnapshotPhase.BEFORE,
+            profile=O31.Profile.CORE,
+            edmac_write_address=None,
+            display_buffer_address=None,
+            exposure=None,
+            mvr_frame_number=None,
+        )
+        expected = (ROOT / "tests" / "fixtures" / "obs_snapshot_v1_core.hex").read_text().strip()
+        self.assertEqual(MODULE.serialize_record(event.to_record()).hex(), expected)
+
     def test_record_is_exactly_36_bytes_and_round_trips(self) -> None:
         event = self.event(phase=MODULE.SnapshotPhase.BEFORE)
         data = MODULE.serialize_record(event.to_record())
@@ -123,6 +135,7 @@ class B2O32SerializationTests(unittest.TestCase):
 
     def test_pair_complete_before_after_order_and_interleaving(self) -> None:
         pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
         before = self.event(phase=MODULE.SnapshotPhase.BEFORE)
         other = self.event(phase=MODULE.SnapshotPhase.BEFORE, logical_id=2, sequence=8)
         after = self.event(phase=MODULE.SnapshotPhase.AFTER, sequence=9, timestamp=1002)
@@ -141,6 +154,7 @@ class B2O32SerializationTests(unittest.TestCase):
 
     def test_missing_sides_duplicates_and_invalid_events(self) -> None:
         pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
         before = self.event(phase=MODULE.SnapshotPhase.BEFORE)
         pairer.add(before)
         pairer.add(before)
@@ -151,6 +165,7 @@ class B2O32SerializationTests(unittest.TestCase):
         self.assertEqual(len(report.invalid), 1)
 
         pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
         pairer.add(self.event(phase=MODULE.SnapshotPhase.AFTER))
         report = pairer.finish()
         self.assertEqual(report.incomplete[0].status, MODULE.PairStatus.BEFORE_MISSING)
@@ -158,6 +173,7 @@ class B2O32SerializationTests(unittest.TestCase):
 
     def test_sequence_wrap_does_not_break_pairing(self) -> None:
         pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
         pairer.add(self.event(phase=MODULE.SnapshotPhase.BEFORE, sequence=0xFFFFFFFF))
         pairer.add(self.event(phase=MODULE.SnapshotPhase.AFTER, sequence=0))
         report = pairer.finish()
@@ -166,6 +182,7 @@ class B2O32SerializationTests(unittest.TestCase):
 
     def test_reused_logical_id_is_separated_by_episode(self) -> None:
         pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
         for episode_id, timestamp in ((3, 1000), (4, 2000)):
             pairer.add(MODULE.observation_event_from_snapshot(
                 self.snapshot(timestamp_ms=timestamp),
@@ -190,6 +207,7 @@ class B2O32SerializationTests(unittest.TestCase):
             status=O31.Status.STABLE_METADATA, profile=O31.Profile.EXTENDED,
         )
         pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
         pairer.add(first)
         pairer.add(second)
         pairer.add(self.event(phase=MODULE.SnapshotPhase.AFTER, timestamp=1001))
@@ -200,6 +218,43 @@ class B2O32SerializationTests(unittest.TestCase):
         ))
         report = pairer.finish()
         self.assertEqual({pair.key for pair in report.complete}, {(3, 1), (4, 1)})
+
+    def test_v1_reused_session_is_ambiguous_not_stable(self) -> None:
+        pairer = MODULE.Pairer()
+        pairer.boundary("file-a")
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.BEFORE))
+        pairer.end_source()
+        pairer.boundary("file-a")
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.AFTER))
+        report = pairer.finish()
+        self.assertEqual(len(report.complete), 0)
+        self.assertTrue(any("AMBIGUOUS_PAIR" in message for message in report.invalid))
+        self.assertEqual(report.incomplete[-1].status, MODULE.PairStatus.AMBIGUOUS_PAIR)
+        self.assertFalse(report.incomplete[-1].stable_metadata)
+
+    def test_explicit_session_boundary_prevents_cross_session_pairing(self) -> None:
+        pairer = MODULE.Pairer()
+        pairer.boundary("file-a")
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.BEFORE))
+        pairer.end_source()
+        pairer.boundary("file-b")
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.AFTER))
+        report = pairer.finish()
+        self.assertEqual(len(report.complete), 0)
+        self.assertEqual({item.status for item in report.incomplete}, {
+            MODULE.PairStatus.AFTER_MISSING, MODULE.PairStatus.BEFORE_MISSING,
+        })
+
+    def test_reused_wire_identity_is_ambiguous(self) -> None:
+        pairer = MODULE.Pairer()
+        pairer.boundary("session-a")
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.BEFORE))
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.AFTER, timestamp=1001))
+        pairer.add(self.event(phase=MODULE.SnapshotPhase.BEFORE, timestamp=2000))
+        report = pairer.finish()
+        self.assertEqual(len(report.complete), 1)
+        self.assertEqual(report.incomplete[-1].status, MODULE.PairStatus.AMBIGUOUS_PAIR)
+        self.assertFalse(report.incomplete[-1].stable_metadata)
 
     def test_logical_id_wrap_skips_zero(self) -> None:
         self.assertEqual(MODULE.next_logical_id(0), 1)

@@ -54,6 +54,9 @@ class PairStatus(str, Enum):
     COMPLETE = "COMPLETE"
     BEFORE_MISSING = "BEFORE_MISSING"
     AFTER_MISSING = "AFTER_MISSING"
+    # V1 does not serialize namespace/generation or file/session identity.
+    # This status is deliberately not a stable pair claim.
+    AMBIGUOUS_PAIR = "AMBIGUOUS_PAIR"
 
 
 class PairTransportStatus(str, Enum):
@@ -181,6 +184,9 @@ class PairResult:
     after: Optional[ObservationEvent]
     status: PairStatus
     stable_metadata: bool
+    # A source/session label is host provenance, not a V1 wire field.  It lets
+    # callers keep concatenated files distinct without changing the ABI.
+    source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -476,12 +482,64 @@ def _stable_pair(before: ObservationEvent, after: ObservationEvent) -> bool:
 
 
 class Pairer:
+    """Pair V1 events only within an explicitly bounded source/session.
+
+    The wire record has no namespace, generation, file ID, or session marker.
+    Therefore a caller that concatenates sources must call ``boundary`` before
+    adding the next source.  If the caller instead supplies the same source
+    label after it has already ended, the pairer refuses to claim stability
+    and emits ``AMBIGUOUS_PAIR``.  No sequence or timestamp heuristic is used
+    as a substitute for persistent identity.
+    """
+
     def __init__(self) -> None:
         self._pending: dict[tuple[int, int], dict[SnapshotPhase, ObservationEvent]] = {}
         self._complete: list[PairResult] = []
         self._duplicates: list[ObservationEvent] = []
         self._invalid: list[str] = []
         self._opaque: list[OpaqueRecord] = []
+        self._incomplete: list[PairResult] = []
+        # No implicit source is safe: V1 has no persistent session marker.
+        # Callers must establish provenance explicitly before pairing.
+        self._source: Optional[str] = None
+        self._ended_sources: set[str] = set()
+        self._seen_keys: set[tuple[int, int]] = set()
+
+    def boundary(self, source: str) -> None:
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty label")
+        if self._pending:
+            self._emit_pending()
+        self._seen_keys.clear()
+        if source in self._ended_sources:
+            self._invalid.append(f"AMBIGUOUS_PAIR: reused source/session {source!r}")
+            self._source = None
+        else:
+            self._source = source
+
+    def end_source(self) -> None:
+        if self._pending:
+            self._emit_pending()
+        if self._source is not None:
+            self._ended_sources.add(self._source)
+            self._source = None
+
+    def _emit_pending(self) -> None:
+        for key, bucket in sorted(self._pending.items()):
+            before = bucket.get(SnapshotPhase.BEFORE)
+            after = bucket.get(SnapshotPhase.AFTER)
+            status = PairStatus.AFTER_MISSING if before is not None else PairStatus.BEFORE_MISSING
+            self._incomplete_result(key, before, after, status)
+        self._pending.clear()
+
+    def _incomplete_result(
+        self, key: tuple[int, int], before: Optional[ObservationEvent],
+        after: Optional[ObservationEvent], status: PairStatus,
+    ) -> None:
+        self._incomplete.append(PairResult(
+            key=key, before=before, after=after, status=status,
+            stable_metadata=False, source=self._source,
+        ))
 
     def add(self, event: Union[ObservationEvent, OpaqueRecord]) -> None:
         if isinstance(event, OpaqueRecord):
@@ -489,6 +547,23 @@ class Pairer:
             return
         _validate_logical_id(event.logical_id)
         key = event.key
+        if self._source is None:
+            self._invalid.append("AMBIGUOUS_PAIR: event has no active source/session boundary")
+            self._incomplete_result(key, event if event.phase is SnapshotPhase.BEFORE else None,
+                                    event if event.phase is SnapshotPhase.AFTER else None,
+                                    PairStatus.AMBIGUOUS_PAIR)
+            return
+        if key in self._seen_keys:
+            self._invalid.append(
+                f"AMBIGUOUS_PAIR: reused wire identity {key!r} in source {self._source!r}"
+            )
+            self._incomplete_result(
+                key,
+                event if event.phase is SnapshotPhase.BEFORE else None,
+                event if event.phase is SnapshotPhase.AFTER else None,
+                PairStatus.AMBIGUOUS_PAIR,
+            )
+            return
         bucket = self._pending.setdefault(key, {})
         if event.phase in bucket:
             self._duplicates.append(event)
@@ -498,10 +573,11 @@ class Pairer:
             before = bucket.pop(SnapshotPhase.BEFORE)
             after = bucket.pop(SnapshotPhase.AFTER)
             self._pending.pop(key, None)
+            self._seen_keys.add(key)
             self._complete.append(PairResult(
                 key=key, before=before, after=after,
                 status=PairStatus.COMPLETE,
-                stable_metadata=_stable_pair(before, after),
+                stable_metadata=_stable_pair(before, after), source=self._source,
             ))
 
     def add_bytes(self, data: bytes) -> None:
@@ -511,18 +587,11 @@ class Pairer:
             self._invalid.append(str(exc))
 
     def finish(self) -> PairingReport:
-        incomplete: list[PairResult] = []
-        for key, bucket in sorted(self._pending.items()):
-            before = bucket.get(SnapshotPhase.BEFORE)
-            after = bucket.get(SnapshotPhase.AFTER)
-            status = PairStatus.AFTER_MISSING if before is not None else PairStatus.BEFORE_MISSING
-            incomplete.append(PairResult(
-                key=key, before=before, after=after,
-                status=status, stable_metadata=False,
-            ))
+        if self._pending:
+            self._emit_pending()
         return PairingReport(
             complete=tuple(self._complete),
-            incomplete=tuple(incomplete),
+            incomplete=tuple(self._incomplete),
             duplicates=tuple(self._duplicates),
             invalid=tuple(self._invalid),
             opaque=tuple(self._opaque),

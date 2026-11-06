@@ -287,6 +287,15 @@ bool smoothaf_persist_log_measurement(struct smoothaf_persist_log_buffer *buf, u
     return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_MEASUREMENT, episode_id, payload);
 }
 
+bool smoothaf_persist_log_obs_snapshot_v1(
+    struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+    uint16_t episode_id, const int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD])
+{
+    return smoothaf_persist_log_record(buf, ts,
+                                       SMOOTHAF_PERSIST_LOG_OBS_SNAPSHOT_V1,
+                                       episode_id, payload);
+}
+
 bool smoothaf_persist_log_timeout(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                            uint16_t episode_id, uint8_t phase,
                            uint32_t budget_used_ms, uint8_t cmds_executed)
@@ -526,6 +535,7 @@ static const char *event_name(uint16_t type) {
         case SMOOTHAF_PERSIST_LOG_D1_CONTEXT:      return "D1_CONTEXT";
         case SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX:  return "D1_CONTEXT_AUX";
         case SMOOTHAF_PERSIST_LOG_MOVIE_GATE_REJECT: return "MOVIE_GATE_REJECT";
+        case SMOOTHAF_PERSIST_LOG_OBS_SNAPSHOT_V1: return "OBS_SNAPSHOT_V1";
         default:                            return "UNKNOWN";
     }
 }
