@@ -16,31 +16,23 @@
 
 #ifdef SMOOTHAF_HOST_TEST
 #include <sys/stat.h>
+
+/* Host-only stand-ins.  The ARM translation unit below includes the Legacy
+ * declarations verbatim; these declarations are deliberately kept out of the
+ * target build so they cannot silently become a second ABI. */
+FILE *FIO_CreateFile(const char *name);
+int FIO_WriteFile(FILE *stream, const void *ptr, size_t count);
+void FIO_CloseFile(FILE *stream);
+int get_numbered_file_name(const char *pattern, int nmax, char *filename, int maxlen);
+int is_dir(const char *path);
+#else
+/* These are the canonical Legacy declarations.  In particular, fio-ml.h
+ * supplies the FILE/FIO signatures and mem.h supplies __mem_free(void *),
+ * not the old, incompatible file/line form. */
+#include "fio-ml.h"
+#include "mem.h"
+#include "arm-mcr.h"
 #endif
-
-/* ML cache functions - only available on ARM target */
-#ifndef SMOOTHAF_HOST_TEST
-#include <arm-mcr.h>
-#endif
-
-/* ============================================================
- * ML FIO API Declarations (from 600D_102.SYM verified symbols)
- * ============================================================ */
-
-extern FILE* FIO_CreateFile(const char* name);
-extern int FIO_WriteFile(FILE* stream, const void* ptr, size_t count);
-extern void FIO_CloseFile(FILE* stream);
-extern int get_numbered_file_name(const char* pattern, int nmax, char* filename, int maxlen);
-
-/* Memory allocation (fio_malloc macro -> __mem_malloc) */
-extern void* __mem_malloc(size_t len, int flags, const char* file, int line);
-extern void __mem_free(void* ptr, const char* file, int line);
-
-#define fio_malloc(len)  __mem_malloc(len, MEM_DMA | MEM_TEMPORARY, __FILE__, __LINE__)
-#define fio_free(ptr)    __mem_free(ptr, __FILE__, __LINE__)
-
-/* Card presence */
-extern int is_dir(const char* path);
 
 /* ============================================================
  * Host Simulation Stubs (for host tests)
@@ -431,6 +423,9 @@ bool smoothaf_log_fio_service(struct smoothaf_log_fio_backend *fio,
 
     bool work_done = false;
 
+    /* A failed batch is a durable consumer-side retry obligation. */
+    if (buf->consumer_pending) fio->flush_pending = true;
+
     if (fio->config_pending) {
         bool requested = fio->requested_enabled;
         uint32_t requested_size = fio->requested_max_file_size_bytes;
@@ -471,8 +466,9 @@ bool smoothaf_log_fio_service(struct smoothaf_log_fio_backend *fio,
             work_done = true;
             if (result != SMOOTHAF_PERSIST_LOG_WRITE_OK) {
                 fio->last_error = (result == SMOOTHAF_PERSIST_LOG_WRITE_PARTIAL) ? -5 : fio->last_error;
-                /* Do not continue draining after a failed write. */
-                fio->flush_pending = false;
+                /* Keep the request pending: the batch and ring reservation are
+                 * still retryable, and a later consumer pass must retry it. */
+                fio->flush_pending = true;
                 return work_done;
             }
         }

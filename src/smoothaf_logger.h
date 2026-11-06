@@ -19,7 +19,8 @@
  * ============================================================ */
 
 /* Ring buffer capacity: power of 2 for fast modulo.
- * 256 entries = 256 * 40 bytes = 10.24 KB persistent RAM.
+ * 256 slots; the head/tail sentinel leaves 255 usable records. Each record
+ * is 36 bytes, so the ring storage is 9216 bytes.
  * Host tests can override via -DSMOOTHAF_LOG_BUF_ENTRIES=1024. */
 #ifndef SMOOTHAF_LOG_BUF_ENTRIES
 #define SMOOTHAF_LOG_BUF_ENTRIES    256
@@ -84,6 +85,20 @@ typedef enum smoothaf_persist_log_event_type {
 
     /* Logger self-diagnostics */
     SMOOTHAF_PERSIST_LOG_WRITE_ERROR_EVT   = 15,  /* Dropped count, error code */
+
+    /* Additive observability records.  Existing fixed-width records and
+     * payloads remain unchanged; consumers that do not know these events can
+     * continue parsing the original event vocabulary. */
+    SMOOTHAF_PERSIST_LOG_AUTO_PROBE_DECISION = 16, /* Origin, post, delta, best pos, dir, reason */
+    SMOOTHAF_PERSIST_LOG_COMMAND_ORIGIN    = 17,  /* Cmd#, origin, dir, step, physical result */
+
+    /* Stationary D1 diagnostic lifecycle.  The series ID is carried in the
+     * record identity column for these event types, never as an AF episode. */
+    SMOOTHAF_PERSIST_LOG_D1_SERIES_START   = 18,  /* series, requested, cadence, context */
+    SMOOTHAF_PERSIST_LOG_D1_SAMPLE         = 19,  /* series, seq, score, mean, valid, confident */
+    SMOOTHAF_PERSIST_LOG_D1_SERIES_END     = 20,  /* series, status, produced, drops, errors, gaps */
+    SMOOTHAF_PERSIST_LOG_D1_CONTEXT        = 21,  /* scene, distance, lighting, exposure, ROI, metric hashes */
+    SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX    = 22,  /* focus, capture, REC, cadence, build hashes */
 } smoothaf_persist_log_event_type_e;
 
 /* Reference qualification types */
@@ -145,7 +160,7 @@ typedef enum smoothaf_persist_log_limit_type {
 struct smoothaf_persist_log_record {
     uint32_t timestamp_ms;              /* Monotonic ms (get_ms_clock equivalent) */
     uint16_t event_type;                /* smoothaf_persist_log_event_type_e */
-    uint16_t episode_id;                /* Current episode (0 = session-level) */
+    uint16_t episode_id;                /* Episode/series identity (0 = session-level) */
     uint32_t sequence;                  /* Monotonic sequence for ordering */
     int32_t  payload[SMOOTHAF_LOG_MAX_PAYLOAD];  /* Typed per event_type */
 };
@@ -158,7 +173,8 @@ struct smoothaf_persist_log_buffer {
     struct smoothaf_persist_log_record ring[SMOOTHAF_LOG_BUF_ENTRIES];
     volatile uint32_t head;              /* Next write index (published producer) */
     volatile uint32_t tail;              /* Next committed read index */
-    volatile uint32_t reserved_tail;     /* Oldest slot reserved by consumer */
+    volatile uint32_t reserved_tail;     /* First slot after consumer reservation */
+    volatile uint32_t consumer_source_tail; /* Tail before the pending batch */
     volatile bool consumer_pending;      /* A formatted batch owns the range */
     volatile uint32_t dropped_count;     /* Records lost due to full buffer */
     volatile uint32_t published_count;   /* Records published by producers */
@@ -273,6 +289,13 @@ bool smoothaf_persist_log_reference_set(struct smoothaf_persist_log_buffer *buf,
 bool smoothaf_persist_log_auto_probe(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                                   uint16_t episode_id, uint8_t phase, int8_t direction,
                                   int32_t score, int32_t delta, uint8_t lighting_valid);
+bool smoothaf_persist_log_auto_probe_decision(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                                   uint16_t episode_id, int32_t origin_score,
+                                   int32_t post_score, int32_t delta, int32_t best_position,
+                                   int8_t selected_direction, uint8_t reason);
+bool smoothaf_persist_log_command_origin(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                                   uint16_t episode_id, uint8_t cmd_index, uint8_t origin,
+                                   int8_t direction, uint8_t step, uint8_t physical_result);
 bool smoothaf_persist_log_controller(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                                   uint16_t episode_id, uint8_t state, uint8_t action,
                                   uint8_t confidence, int32_t best_score);
@@ -323,6 +346,27 @@ bool smoothaf_persist_log_is_full(const struct smoothaf_persist_log_buffer *buf)
 void smoothaf_persist_log_signal_stop(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                                uint16_t episode_id, uint8_t cancel_reason,
                                uint8_t cmds_executed);
+bool smoothaf_persist_log_d1_start(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint16_t series_id, uint32_t requested,
+                              uint32_t cadence_ms, uint32_t context_code);
+bool smoothaf_persist_log_d1_context(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                               uint16_t series_id, uint32_t scene_hash,
+                               uint32_t distance_hash, uint32_t lighting_hash,
+                               uint32_t exposure_hash, uint32_t roi_hash,
+                               uint32_t metric_hash);
+bool smoothaf_persist_log_d1_context_aux(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                               uint16_t series_id, uint32_t focus_hash,
+                               uint32_t capture_hash, uint32_t recording_hash,
+                               uint32_t cadence_hash, uint32_t build_hash);
+bool smoothaf_persist_log_d1_sample(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint16_t series_id, uint32_t sequence,
+                              int32_t score, int32_t mean,
+                              uint8_t valid, uint8_t confident);
+bool smoothaf_persist_log_d1_end(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint16_t series_id, uint8_t status,
+                              uint32_t produced, uint32_t dropped,
+                              uint32_t errors, uint32_t gaps,
+                              uint32_t partials);
 
 /* ============================================================
  * Mock / Test Support
@@ -333,8 +377,13 @@ void smoothaf_persist_log_set_mock_clock(uint32_t (*mock_get_ms)(void));
 /* Restore real clock (host simulation uses get_ms_clock equivalent) */
 void smoothaf_persist_log_clear_mock_clock(void);
 
-/* Simulate slow consumer (delay between consume calls) */
+/* Simulate slow consumer (delay between consume calls). Host support only;
+ * production FIO remains asynchronous and never sleeps in a producer. */
 void smoothaf_persist_log_set_consumer_delay_ms(uint32_t delay_ms);
+
+/* Host observability for a bounded diagnostic series. These counters do not
+ * change ring capacity or permit producer-side FIO. */
+uint32_t smoothaf_persist_log_get_contention(const struct smoothaf_persist_log_buffer *buf);
 
 /* Simulate write failure (next flush_batch returns error) */
 void smoothaf_persist_log_set_write_fail_next(bool fail);
@@ -360,6 +409,20 @@ void smoothaf_persist_log_set_write_fail_next(bool fail);
  * SAFETY_PAUSED:      [0]=reason, [1]=remaining_ms
  * ENVIRONMENTAL:      [0]=sub_type, [1]=value1, [2]=value2
  * WRITE_ERROR:        [0]=dropped_count, [1]=error_code
+  * D1_SERIES_START:    [0]=requested (uint32 samples), [1]=cadence_ms (uint32 ms), [2]=build_hash (uint32 FNV-1a)
+  * D1_CONTEXT:         [0]=scene_hash, [1]=distance_hash, [2]=lighting_hash,
+  *                     [3]=exposure_hash, [4]=roi_hash, [5]=metric_hash
+  * D1_CONTEXT_AUX:     [0]=focus_hash, [1]=capture_hash, [2]=recording_hash,
+  *                     [3]=cadence_hash, [4]=build_hash, [5]=reserved
+  * D1_SAMPLE:          [0]=sequence (uint32), [1]=score (signed), [2]=mean,
+  *                     [3]=valid, [4]=confident, [5]=reserved
+  * D1_SERIES_END:      [0]=status, [1]=produced, [2]=dropped, [3]=errors,
+  *                     [4]=gaps, [5]=partials (uint32 counters)
+  *
+  * D1 context hashes are deterministic FNV-1a over bounded text. They are
+  * identifiers, not reversible values; the external experiment sheet is the
+  * legend needed to recover human meaning. Each context half is published
+  * independently and a rejected half makes the series non-integral. (uint32 counters)
  *
  * The SESSION_START build ID is copied into the logger state so formatting and
  * persistence never depend on a truncated pointer or caller-owned storage.

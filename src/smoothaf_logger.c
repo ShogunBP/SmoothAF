@@ -84,6 +84,7 @@ static void producer_unlock(struct smoothaf_persist_log_buffer *buf)
 
 static uint32_t (*s_mock_get_ms)(void) = NULL;
 static uint32_t s_consumer_delay_ms = 0;
+static uint32_t s_consumer_next_allowed_ms = 0;
 static bool s_write_fail_next = false;
 
 /* Default clock function (host simulation) */
@@ -112,6 +113,8 @@ static inline uint32_t buf_mask(const struct smoothaf_persist_log_buffer *buf) {
 
 static inline uint32_t buf_producer_tail(const struct smoothaf_persist_log_buffer *buf) {
     if (buf->consumer_pending) {
+        /* Formatting copies records into the batch. Slots before reserved_tail
+         * are therefore reusable while the stable batch is being flushed. */
         SMOOTHAF_PERSIST_LOG_BARRIER();
         return buf->reserved_tail;
     }
@@ -125,10 +128,15 @@ static inline bool buf_is_full(const struct smoothaf_persist_log_buffer *buf) {
 }
 
 static inline bool buf_is_empty(const struct smoothaf_persist_log_buffer *buf) {
+    /* tail advances when records are reserved for formatting.  Persistence of
+     * that reservation is tracked separately by consumer_pending. */
     return buf->head == buf->tail;
 }
 
 static inline uint32_t buf_fill(const struct smoothaf_persist_log_buffer *buf) {
+    /* This is the number of records still available in the RAM ring.  A
+     * pending batch has already left the ring and is accounted for by the
+     * consumer reservation, not counted twice here. */
     return (buf->head - buf->tail) & buf_mask(buf);
 }
 
@@ -327,6 +335,33 @@ bool smoothaf_persist_log_auto_probe(struct smoothaf_persist_log_buffer *buf, ui
                                        episode_id, payload);
 }
 
+bool smoothaf_persist_log_auto_probe_decision(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                                   uint16_t episode_id, int32_t origin_score,
+                                   int32_t post_score, int32_t delta, int32_t best_position,
+                                   int8_t selected_direction, uint8_t reason)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        origin_score, post_score, delta, best_position,
+        (int32_t)selected_direction, (int32_t)reason
+    };
+    return smoothaf_persist_log_record(buf, ts,
+                                       SMOOTHAF_PERSIST_LOG_AUTO_PROBE_DECISION,
+                                       episode_id, payload);
+}
+
+bool smoothaf_persist_log_command_origin(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                                   uint16_t episode_id, uint8_t cmd_index, uint8_t origin,
+                                   int8_t direction, uint8_t step, uint8_t physical_result)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)cmd_index, (int32_t)origin, (int32_t)direction,
+        (int32_t)step, (int32_t)physical_result, 0
+    };
+    return smoothaf_persist_log_record(buf, ts,
+                                       SMOOTHAF_PERSIST_LOG_COMMAND_ORIGIN,
+                                       episode_id, payload);
+}
+
 bool smoothaf_persist_log_controller(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                                   uint16_t episode_id, uint8_t state, uint8_t action,
                                   uint8_t confidence, int32_t best_score)
@@ -372,6 +407,71 @@ bool smoothaf_persist_log_cancelled(struct smoothaf_persist_log_buffer *buf, uin
     return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_CANCELLED, episode_id, payload);
 }
 
+bool smoothaf_persist_log_d1_start(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint16_t series_id, uint32_t requested,
+                              uint32_t cadence_ms, uint32_t context_code)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)requested, (int32_t)cadence_ms, (int32_t)context_code, 0, 0, 0
+    };
+    return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_D1_SERIES_START,
+                                       (uint16_t)series_id, payload);
+}
+
+bool smoothaf_persist_log_d1_context(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                               uint16_t series_id, uint32_t scene_hash,
+                               uint32_t distance_hash, uint32_t lighting_hash,
+                               uint32_t exposure_hash, uint32_t roi_hash,
+                               uint32_t metric_hash)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)scene_hash, (int32_t)distance_hash, (int32_t)lighting_hash,
+        (int32_t)exposure_hash, (int32_t)roi_hash, (int32_t)metric_hash
+    };
+    return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_D1_CONTEXT,
+                                       series_id, payload);
+}
+
+bool smoothaf_persist_log_d1_context_aux(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                               uint16_t series_id, uint32_t focus_hash,
+                               uint32_t capture_hash, uint32_t recording_hash,
+                               uint32_t cadence_hash, uint32_t build_hash)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)focus_hash, (int32_t)capture_hash, (int32_t)recording_hash,
+        (int32_t)cadence_hash, (int32_t)build_hash, 0
+    };
+    return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX,
+                                       series_id, payload);
+}
+
+bool smoothaf_persist_log_d1_sample(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint16_t series_id, uint32_t sequence,
+                              int32_t score, int32_t mean,
+                              uint8_t valid, uint8_t confident)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)sequence, score, mean, (int32_t)valid,
+        (int32_t)confident, 0
+    };
+    return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_D1_SAMPLE,
+                                       (uint16_t)series_id, payload);
+}
+
+bool smoothaf_persist_log_d1_end(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint16_t series_id, uint8_t status,
+                              uint32_t produced, uint32_t dropped,
+                              uint32_t errors, uint32_t gaps,
+                              uint32_t partials)
+{
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)status, (int32_t)produced, (int32_t)dropped,
+        (int32_t)errors, (int32_t)gaps, (int32_t)partials
+    };
+    return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_D1_SERIES_END,
+                                       (uint16_t)series_id, payload);
+}
+
 /* ============================================================
  * Formatting (Consumer Path — Simulated Batch Write)
  * ============================================================ */
@@ -393,6 +493,13 @@ static const char *event_name(uint16_t type) {
         case SMOOTHAF_PERSIST_LOG_SAFETY_PAUSED:    return "SAFETY_PAUSED";
         case SMOOTHAF_PERSIST_LOG_ENVIRONMENTAL:    return "ENVIRONMENTAL";
         case SMOOTHAF_PERSIST_LOG_WRITE_ERROR_EVT:  return "WRITE_ERROR";
+        case SMOOTHAF_PERSIST_LOG_AUTO_PROBE_DECISION: return "AUTO_PROBE_DECISION";
+        case SMOOTHAF_PERSIST_LOG_COMMAND_ORIGIN:  return "COMMAND_ORIGIN";
+        case SMOOTHAF_PERSIST_LOG_D1_SERIES_START: return "D1_SERIES_START";
+        case SMOOTHAF_PERSIST_LOG_D1_SAMPLE:       return "D1_SAMPLE";
+        case SMOOTHAF_PERSIST_LOG_D1_SERIES_END:   return "D1_SERIES_END";
+        case SMOOTHAF_PERSIST_LOG_D1_CONTEXT:      return "D1_CONTEXT";
+        case SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX:  return "D1_CONTEXT_AUX";
         default:                            return "UNKNOWN";
     }
 }
@@ -457,9 +564,23 @@ static int format_record(const struct smoothaf_persist_log_record *rec, char *ou
         return -1;
 
     for (int i = 0; i < SMOOTHAF_LOG_MAX_PAYLOAD; i++) {
-        if (append_text(out, maxlen, &len, "\t") < 0 ||
-            append_signed_decimal(out, maxlen, &len, rec->payload[i]) < 0)
+        if (append_text(out, maxlen, &len, "\t") < 0)
             return -1;
+        /* Payload slots are signed for the historical in-memory ABI.  Events
+         * whose contract is uint32_t use the same bits but serialize as
+         * unsigned decimal, preserving high-bit values and old signed events. */
+        if ((rec->event_type == SMOOTHAF_PERSIST_LOG_D1_SERIES_START && i < 3) ||
+            rec->event_type == SMOOTHAF_PERSIST_LOG_D1_CONTEXT ||
+            rec->event_type == SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX ||
+            (rec->event_type == SMOOTHAF_PERSIST_LOG_D1_SAMPLE && i == 0) ||
+            rec->event_type == SMOOTHAF_PERSIST_LOG_D1_SERIES_END)
+        {
+            if (append_unsigned_decimal(out, maxlen, &len,
+                                        (uint32_t)rec->payload[i]) < 0)
+                return -1;
+        } else if (append_signed_decimal(out, maxlen, &len, rec->payload[i]) < 0) {
+            return -1;
+        }
     }
     return (int)len;
 }
@@ -469,20 +590,23 @@ uint32_t smoothaf_persist_log_consume_batch(struct smoothaf_persist_log_buffer *
 {
     if (!buf || !out) return 0;
 
-    /* Simulate consumer delay for testing */
+    /* Host-only pacing: do not sleep in the consumer and never delay a
+     * producer.  A delayed consumer simply leaves the ring untouched until
+     * the injected/mock clock reaches the next service time. */
     if (s_consumer_delay_ms) {
-        /* In host test, we can't actually sleep without threads. */
+        uint32_t now = get_timestamp_ms();
+        if (s_consumer_next_allowed_ms &&
+            (int32_t)(now - s_consumer_next_allowed_ms) < 0)
+            return 0;
+        s_consumer_next_allowed_ms = 0;
     }
 
-    /* A caller may use consume_batch as a RAM-only drain without calling
-     * flush_batch. Treat the previous reservation as committed before making
-     * the next batch; a failed flush keeps using the same batch object. */
-    /* A direct RAM-only consumer commits the previous snapshot. The FIO
-     * service handles a pending snapshot through flush_batch instead. */
+    /* Direct RAM consumers intentionally treat formatting as consumption. The
+     * FIO service never enters here while a reservation is pending; it keeps
+     * the stable batch and calls flush_batch instead. */
     if (buf->consumer_pending) {
-        /* A direct consumer call starts a new snapshot. The FIO service does
-         * not call this function while a previous batch is pending. */
         buf->consumer_pending = false;
+        buf->consumer_source_tail = buf->tail;
         buf->reserved_tail = buf->tail;
     }
 
@@ -496,6 +620,7 @@ uint32_t smoothaf_persist_log_consume_batch(struct smoothaf_persist_log_buffer *
 
     /* Reserve the current tail while formatting. Producers may continue into
      * free slots, but cannot overwrite the records owned by this batch. */
+    buf->consumer_source_tail = buf->tail;
     buf->reserved_tail = buf->tail;
     SMOOTHAF_PERSIST_LOG_BARRIER();
     buf->consumer_pending = true;
@@ -526,6 +651,9 @@ uint32_t smoothaf_persist_log_consume_batch(struct smoothaf_persist_log_buffer *
     if (consumed != 0) buf->reserved_tail = cursor;
     if (consumed == 0) {
         buf->consumer_pending = false;
+    } else if (s_consumer_delay_ms) {
+        uint32_t now = get_timestamp_ms();
+        s_consumer_next_allowed_ms = now + s_consumer_delay_ms;
     }
     return consumed;
 }
@@ -565,6 +693,7 @@ smoothaf_persist_log_write_result_e smoothaf_persist_log_flush_batch(
     if (!buf->consumer_pending) return SMOOTHAF_PERSIST_LOG_WRITE_ERR;
     if (batch->count == 0) {
         buf->consumer_pending = false;
+        buf->consumer_source_tail = buf->tail;
         return SMOOTHAF_PERSIST_LOG_WRITE_OK;
     }
 
@@ -601,6 +730,7 @@ smoothaf_persist_log_write_result_e smoothaf_persist_log_flush_batch(
             line_with_newline, (uint32_t)line_len + 1, backend->ctx);
         if (result != SMOOTHAF_PERSIST_LOG_WRITE_OK) {
             buf->tail = current_tail;
+            buf->consumer_source_tail = batch->source_tail;
             buf->reserved_tail = current_tail;
             buf->consumer_pending = true;
             return result;
@@ -613,6 +743,7 @@ smoothaf_persist_log_write_result_e smoothaf_persist_log_flush_batch(
 
     buf->consumer_pending = false;
     buf->tail = current_tail;
+    buf->consumer_source_tail = current_tail;
     buf->reserved_tail = current_tail;
     logger_atomic_add(&buf->flushed_count, batch->count - start_line);
     return SMOOTHAF_PERSIST_LOG_WRITE_OK;
@@ -623,6 +754,7 @@ void smoothaf_persist_log_abort_batch(struct smoothaf_persist_log_buffer *buf,
 {
     if (!buf || !batch || !buf->consumer_pending) return;
     buf->tail = batch->source_tail;
+    buf->consumer_source_tail = batch->source_tail;
     buf->reserved_tail = batch->source_tail;
     buf->consumer_pending = false;
     batch->next_line = 0;
@@ -667,6 +799,10 @@ uint32_t smoothaf_persist_log_get_flushed(const struct smoothaf_persist_log_buff
     return buf ? buf->flushed_count : 0;
 }
 
+uint32_t smoothaf_persist_log_get_contention(const struct smoothaf_persist_log_buffer *buf) {
+    return buf ? buf->producer_contention_count : 0;
+}
+
 bool smoothaf_persist_log_is_empty(const struct smoothaf_persist_log_buffer *buf) {
     return buf ? buf_is_empty(buf) : true;
 }
@@ -699,6 +835,7 @@ void smoothaf_persist_log_clear_mock_clock(void) {
 
 void smoothaf_persist_log_set_consumer_delay_ms(uint32_t delay_ms) {
     s_consumer_delay_ms = delay_ms;
+    s_consumer_next_allowed_ms = 0;
 }
 
 void smoothaf_persist_log_set_write_fail_next(bool fail) {

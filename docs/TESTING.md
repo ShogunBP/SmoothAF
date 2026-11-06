@@ -37,7 +37,9 @@ The normal module path contains no direct FIO calls in the AF task or menu callb
 4. Test DRY RUN first in photographic LiveView with recording stopped. Confirm state/request changes and zero lens movement.
 5. Test Movie Dry Run separately in normal H.264 recording. Start the monitor before recording, select `Vlog AF Mode=DRY RUN`, manually arm one episode, and use a second phone/camera to record the ML display. Confirm recording start/end events, sample count, validity/confidence, score, duration, blur transitions and zero `AF Lens Calls`; custom and RAW recording must remain blocked. The existing menu is the least-invasive visibility path, but it may not remain open or refresh over the recording UI; treat its values as opportunistic and use the fixed RAM Log Page/Log Entry after the clip as the authoritative fallback.
 6. Exercise four short scenes: initially focused static target, nearly focused target, heavily defocused target and a subject approaching/receding. Use short clips first; stop immediately on recording corruption, task stall, abnormal heat, battery/card warning or any unexpected lens command.
-7. Movie ACTIVE is now available only as an explicitly authorized experiment: set `Movie Active Experimental=ON`, `Enable=ON`, select one-shot `ACTIVE` or persistent `ACTIVE CONTINUOUS`, start monitoring, and manually arm. Use normal H.264 Movie only; RAW/custom, MF and competing focus controllers remain blocked. Begin with Test A (one command), then bounded Test B, and only then Test C continuous episodes. Do not enable B or C automatically. Do not unload/reload while the shared task is active. Far Focus Recovery remains Movie-disabled unless this same explicit authorization is enabled; any recovery result is experimental and must be recorded separately from controller results.
+7. B2-D1 physical collection remains **NO-GO** until the dedicated ARM candidate is built and reviewed. When separately authorized, use only `Diagnostic > D1 Collect` with `Enable=OFF`, no monitor, no Focus Test, no Focus Step, no AF episode, and no `ACTIVE CONTINUOUS`. D1 is read-only and must not call `lens_focus()`. First test LiveView with REC OFF; Movie H.264 REC ON may be tested only if the existing `smoothaf_measure_block_reason()` gate permits it. RAW/custom recording, MF, continuous AF, follow/rack/stack focus and competing controllers must remain blocked. Record the 30-sample terminal event, real completion timestamps, cadence, validity, context and loss counters. Stop on any movement, task stall, recording corruption, abnormal heat, battery/card warning or unexpected state. Do not unload/reload while the shared task is active.
+
+8. Movie ACTIVE is now available only as an explicitly authorized experiment: set `Movie Active Experimental=ON`, `Enable=ON`, select one-shot `ACTIVE` or persistent `ACTIVE CONTINUOUS`, start monitoring, and manually arm. Use normal H.264 Movie only; RAW/custom, MF and competing focus controllers remain blocked. Begin with Test A (one command), then bounded Test B, and only then Test C continuous episodes. Do not enable B or C automatically. Do not unload/reload while the shared task is active. Far Focus Recovery remains Movie-disabled unless this same explicit authorization is enabled; any recovery result is experimental and must be recorded separately from controller results.
 
 Test A: H.264 recording, experimental ON, one-shot ACTIVE, episode limit 1, verify at most one STM command and intact clip. Test B: H.264 recording, one-shot ACTIVE, bounded episode search, verify controlled completion. Test C: H.264 recording, ACTIVE CONTINUOUS, one manual arm, multiple episodes, verify cooldown/blur-clear latch and STOP/PANIC interruption.
 8. For Movie Active tests record `Movie Recording State`, mode, `AF Move Attempts`, `AF Lens Calls`, `AF Last Block`, `AF Last Move Result`, `AF Commands This Episode`, `AF Episode Result`, scores, delta, direction, cooldown and episode count. `AF Lens Calls=1` proves only API invocation, not physical displacement. Stop immediately on recording corruption, unexpected lens activity, task stall, abnormal heat or battery/card warning.
@@ -54,7 +56,7 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 - Episode telemetry host coverage includes bounded RAM event/summary records, timestamp wraparound, overflow accounting and retained terminal summaries. Physical lifecycle behavior remains pending.
 - `git diff --check`: passed; line-ending conversion warnings are non-fatal.
 - ARM staging build: passed in a temporary copy of the Legacy Lua Fix tree with `600D_102.SYM`; the source Legacy tree was not modified.
-- The final post-fix candidate was rebuilt from clean commit `ebc2b5e65bc26eaf160f7ace415eb74dbc592461`: `Will load on: 600D`, `DEP=38`, size `107788`, SHA-256 `a5945b7f5d68d9179be513cc25a17204b24d78ac7b613982b014ee152cb3da1a`, Build ID `ebc2b5e65bc2-600D.102`, format ARM/EABI5 relocatable. This is the only current candidate; it was not installed.
+- Historical final diagnostic candidate (not the current dirty worktree): `Will load on: 600D`, `DEP=38`, size `107788`, SHA-256 `a5945b7f5d68d9179be513cc25a17204b24d78ac7b613982b014ee152cb3da1a`, Build ID `ebc2b5e65bc2-600D.102`, format ARM/EABI5 relocatable. It was not installed.
 - Historical pre-commit ARM evidence is preserved separately: `Will load on: 600D`, `DEP=36`, `SIZE=98324`, SHA-256 `4940383799aafb6c6bfb8fb9c5b3ea44e90ac61ffe57a6ee52c76b2cd3af5b51`, Build ID `01020cee8635-dirty-600D.102`. It is not a release artifact.
 - Historical immutable-commit ARM output: `Will load on: 600D`, `DEP=36`, size `99052`, SHA-256 `2f679ed6f8fa2ca83b9b62c57a5088858f065cd4fb52f919e0bc3ee74bd4537c`, embedded Build ID `5de054e07d96-600D.102`; format is ARM/EABI5 relocatable.
 - Previous dirty diagnostic candidate ARM output: `Will load on: 600D`, `DEP=37`, size `106072`, SHA-256 `71e9975a01377bd56387ad41775e18ad423bdbb0b89b82c92204a8bdec0a37c1`, embedded Build ID `5d5ef1406810-dirty-600D.102`; it remains historical evidence only and has not been installed.
@@ -74,9 +76,30 @@ A synchronous `lens_focus(wait=1)` may finish after Stop. The Legacy loader has 
 
 **Recomendação física:** **NO-GO**. Não instalar no SD nem executar validação física até o build pós-commit ser conferido e a quiescência do loader/tarefas ser observada em câmera controlada.
 - The staged module is an `ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV)` `.mo`; undefined symbols are Legacy-resolved imports, including `lens_focus`, `get_ms_clock`, VRAM, task, menu and semaphore APIs. The Legacy build does not emit a separate `.elf`; the `.mo` is the inspected relocatable ELF.
-- The embedded Build ID is checked against the final commit. The pre-build v0.8 artifacts remain preserved in the existing untracked `artifacts/v0.8/smoothaf.mo.pre-*` backups; no backup was deleted.
+- The embedded Build ID is checked against the build source state. The pre-build v0.8 artifact is preserved as `artifacts/v0.8/smoothaf.mo.pre-d1-review`; no historical artifact was deleted.
+- Current dirty-worktree ARM evidence (2026-11-05, after final host fixes): `Will load on: 600D`, `DEP=39`, size `128940`, SHA-256 `6db509a0a23e7d9124d98110e3019145441baefbd0471475dd0343706eeaf2bf`, Build ID `6ac6b877d541-dirty-600D.102`, format ARM/EABI5 relocatable. The `.mo` is the relocatable ELF; no separate `.elf` was emitted. Undefined imports are resolved by the supplied Legacy/symbol inputs at build time only.
 - No physical v0.8 or Movie validation or SD-card installation has been performed. All camera results, including zero lens movement in Dry Run and optical focus/displacement, remain pending. Movie Dry Run must have zero physical lens commands; Movie ACTIVE is not enabled for recording.
 - FIO export is disabled by default and host validation covers only the simulated consumer, rotation, short-write retry, card removal/recovery and configuration ownership. No physical SD, cache/DMA or camera-runtime evidence is claimed.
+
+## B2-D1 ARM and RAM record (2026-11-05)
+
+The dirty-worktree D1 candidate above has `.bss=21144` bytes and initialized writable
+sections `.data=17192`, `.config_vars=368` and `.module_strings=119`, for an
+inferred static writable footprint of 38823 bytes before loader/task overhead.
+The persistent logger ring remains 9216 bytes (255 usable records) and its batch
+buffer is 4096 bytes; the two configured task stacks are each `0x1000` bytes and
+actual DryOS allocation/quiescence remains unverified. The candidate was built in
+an isolated staging copy with Legacy Lua Fix and `600D_102.SYM`; it was not copied
+to an SD card and no physical collection was performed.
+
+For any later authorized D1 camera procedure: keep Enable OFF and all AF/monitor
+controls inactive; use `Diagnostic > D1 Collect`, first in LiveView REC OFF.
+Movie H.264 REC ON is permitted only if the existing measurement gate allows it.
+RAW/custom, MF, continuous AF and competing-controller states are blocked. D1
+must remain read-only with no `lens_focus()`, no AF episode and no `ACTIVE CONTINUOUS`.
+Record Build ID, mode, REC state, 30-sample terminal status, completion timestamps,
+cadence, context hashes/text and all loss counters. Stop immediately for movement,
+recording corruption, task stall, abnormal heat, battery/card warning or a mismatch.
 
 ## Semaphore startup diagnosis (2026-11-04)
 

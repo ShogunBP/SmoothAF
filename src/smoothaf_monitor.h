@@ -1062,6 +1062,7 @@ static inline void smoothaf_vlog_af_new_episode(struct smoothaf_vlog_af *af,
     af->dry_run_requests = 0;
     af->episode_result = SMOOTHAF_VLOG_AF_RESULT_NONE;
     af->controller_initialized = 0;
+    af->controller_action = 0;
     af->controller_pending = 0;
     af->controller_step = 1;
     af->command_step = 1;

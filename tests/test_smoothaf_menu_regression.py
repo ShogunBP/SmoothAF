@@ -342,9 +342,50 @@ def test_production_menu_and_task_start_paths():
     )
 
 
+def test_production_d1_lifecycle_synchronization():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert '#include "smoothaf_d1.h"' in source
+    assert source.count("smoothaf_d1_gate_start_monitor(&smoothaf_d1_gate") == 1
+    assert source.count("smoothaf_d1_gate_start_focus_test(&smoothaf_d1_gate") == 1
+    assert source.count("smoothaf_d1_gate_start_measurement(") == 1
+    assert source.count("smoothaf_d1_end_task_owner(task_id)") >= 3
+    assert source.count("smoothaf_d1_gate_signal_stop_urgent") >= 3
+    assert "smoothaf_d1_gate_signal_stop_urgent(&smoothaf_d1_gate, 1);" in source
+    assert "smoothaf_d1_sync_stop_state();" in source
+    assert "smoothaf_d1_gate_set_episode(&smoothaf_d1_gate, 1);" in source
+    assert "smoothaf_d1_gate_set_episode(&smoothaf_d1_gate, 0);" in source
+
+    task_entry = source.split("static void smoothaf_task_entry(void *arg)", 1)[1].split(
+        "static void smoothaf_fio_task(void *arg)", 1
+    )[0]
+    assert "smoothaf_d1_end_task_owner(task_id);" in task_entry
+    assert "smoothaf_task_stop_requested = 0;" in task_entry
+    assert task_entry.index("smoothaf_d1_end_task_owner(task_id)") < task_entry.index(
+        "smoothaf_task_stop_requested = 0;"
+    )
+
+    # Monitor ownership is acquired before monitor_start in both production
+    # entry paths and is rolled back if the common task cannot be created.
+    movie_start = source.split(
+        "static void smoothaf_movie_start_automatic(void)", 1
+    )[1].split("static void smoothaf_movie_stop_automatic(void)\n{", 1)[0]
+    monitor_select = source.split(
+        "static MENU_SELECT_FUNC(smoothaf_monitor_toggle_select)", 1
+    )[1].split("static const char *smoothaf_monitor_task_state_name", 1)[0]
+    assert movie_start.index("smoothaf_d1_start_monitor_owner()") < movie_start.index(
+        "smoothaf_monitor_start"
+    )
+    assert monitor_select.index("smoothaf_d1_start_monitor_owner()") < monitor_select.index(
+        "smoothaf_monitor_start"
+    )
+    assert "smoothaf_d1_gate_end(&smoothaf_d1_gate, SMOOTHAF_D1_OWNER_MONITOR)" in movie_start
+    assert "smoothaf_d1_gate_end(&smoothaf_d1_gate, SMOOTHAF_D1_OWNER_MONITOR)" in monitor_select
+
+
 if __name__ == "__main__":
     test_production_runtime_diagnostics_invariants()
     test_production_menu_and_task_start_paths()
+    test_production_d1_lifecycle_synchronization()
 
     test_menu_shape_and_lifecycle()
     test_removed_integration_files_are_not_present()

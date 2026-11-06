@@ -453,6 +453,157 @@ static void test_stop_panic_non_blocking(void) {
     PASS();
 }
 
+static void test_consumer_delay_and_ring_pressure(void) {
+    TEST("consumer_delay_and_ring_pressure");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    reset_logger(&buf);
+    enable_logger(&buf);
+
+    /* Normal consumer: a short series drains immediately. */
+    for (int i = 0; i < 3; i++) {
+        int32_t payload[6] = {i, 0, 0, 0, 0, 0};
+        ASSERT_TRUE(smoothaf_persist_log_record(
+                        &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                        payload), "normal consumer producer succeeds");
+    }
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 3u,
+              "normal consumer drains the batch");
+
+    /* A delayed consumer is paced by the injected clock, never by sleeping
+     * in the producer or consumer call. */
+    smoothaf_persist_log_set_consumer_delay_ms(100);
+    for (int i = 0; i < 3; i++) {
+        int32_t payload[6] = {10 + i, 0, 0, 0, 0, 0};
+        ASSERT_TRUE(smoothaf_persist_log_record(
+                        &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                        payload), "delayed consumer producer remains non-blocking");
+    }
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 3u,
+              "delayed consumer takes the first batch");
+    advance_time(99);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 0u,
+              "consumer remains delayed before its deadline");
+    advance_time(1);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 0u,
+              "delay deadline can expire with no new records");
+
+    /* Near-full/full pressure retains FIFO records and reports the rejected
+     * publication; the delayed consumer can subsequently make progress. */
+    smoothaf_persist_log_set_consumer_delay_ms(1000);
+    for (uint32_t i = 0; i < SMOOTHAF_LOG_BUF_ENTRIES - 1; i++) {
+        int32_t payload[6] = {(int32_t)(1000 + i), 0, 0, 0, 0, 0};
+        ASSERT_TRUE(smoothaf_persist_log_record(
+                        &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                        payload), "ring accepts all usable slots");
+    }
+    ASSERT_TRUE(smoothaf_persist_log_is_full(&buf),
+                "ring reaches the fixed usable capacity");
+    {
+        int32_t payload[6] = {9999, 0, 0, 0, 0, 0};
+        ASSERT_FALSE(smoothaf_persist_log_record(
+                         &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                         payload), "full ring rejects without overwrite");
+    }
+    ASSERT_EQ(smoothaf_persist_log_get_dropped(&buf), 1u,
+              "full ring exposes one dropped record");
+    advance_time(1000);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch),
+              SMOOTHAF_LOG_BATCH_LINES,
+              "delayed consumer drains a bounded full-ring batch");
+    ASSERT_TRUE(strstr(batch.lines[0], "COMMAND") != NULL,
+                "full-ring batch remains formatted and ordered");
+    PASS();
+}
+
+static void test_variable_delay_and_cancel_during_delay(void) {
+    TEST("variable_delay_and_cancel_during_delay");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    reset_logger(&buf);
+    enable_logger(&buf);
+    smoothaf_persist_log_set_consumer_delay_ms(25);
+
+    for (int i = 0; i < 2; i++) {
+        int32_t payload[6] = {20 + i, 0, 0, 0, 0, 0};
+        ASSERT_TRUE(smoothaf_persist_log_record(
+                        &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                        payload), "variable-delay producer succeeds");
+    }
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 2u,
+              "variable-delay first batch consumes");
+    advance_time(10);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 0u,
+              "variable delay blocks an early service");
+    advance_time(15);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 0u,
+              "variable delay releases at the next service point");
+
+    /* Cancellation is still published while the consumer is delayed and is
+     * retained until the next permitted consumer pass. */
+    smoothaf_persist_log_set_consumer_delay_ms(100);
+    {
+        int32_t payload[6] = {30, 0, 0, 0, 0, 0};
+        ASSERT_TRUE(smoothaf_persist_log_record(
+                        &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                        payload), "record before delayed cancellation");
+    }
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 1u,
+              "pre-cancellation record is consumed");
+    smoothaf_persist_log_signal_stop(&buf, g_mock_time, 1,
+                                     SMOOTHAF_PERSIST_LOG_CANCEL_STOP, 1);
+    advance_time(99);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 0u,
+              "consumer remains blocked during cancellation delay");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 1u,
+              "cancellation remains queued while consumer is delayed");
+    advance_time(1);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 1u,
+              "consumer drains cancellation after delay");
+    ASSERT_TRUE(strstr(batch.lines[0], "CANCELLED") != NULL,
+                "delayed cancellation is observable");
+    PASS();
+}
+
+static void test_fio_blocked_consumer(void) {
+    TEST("fio_blocked_consumer");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_log_fio_backend fio;
+    struct smoothaf_persist_log_batch batch;
+    int32_t payload[6] = {40, 0, 0, 0, 0, 0};
+
+    reset_logger(&buf);
+    enable_logger(&buf);
+    smoothaf_log_fio_init(&fio);
+    smoothaf_log_fio_set_enabled(&fio, true);
+    smoothaf_log_fio_set_card_present(false);
+    ASSERT_TRUE(smoothaf_persist_log_record(
+                    &buf, g_mock_time, SMOOTHAF_PERSIST_LOG_COMMAND, 1,
+                    payload), "blocked-consumer record publishes");
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "blocked consumer reports an attempted service");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 1u,
+              "blocked consumer retains the record");
+    ASSERT_TRUE(fio.write_errors > 0u,
+                "blocked consumer exposes the backend error");
+
+    smoothaf_persist_log_signal_stop(&buf, g_mock_time, 1,
+                                     SMOOTHAF_PERSIST_LOG_CANCEL_PANIC, 0);
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 2u,
+              "cancellation publishes while consumer is blocked");
+    smoothaf_log_fio_set_card_present(true);
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer retries after backend recovery");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 1u,
+              "recovery commits the blocked batch before the next pass");
+    ASSERT_TRUE(smoothaf_log_fio_service(&fio, &buf, &batch),
+                "consumer services the queued cancellation after recovery");
+    ASSERT_EQ(smoothaf_persist_log_get_fill(&buf), 0u,
+              "recovered consumer drains retained records");
+    smoothaf_log_fio_set_enabled(&fio, false);
+    PASS();
+}
+
 static void test_timestamp_wrap_around(void) {
     TEST("timestamp_wrap_around");
     struct smoothaf_persist_log_buffer buf;
@@ -539,6 +690,62 @@ static void test_format_unsigned_contract(void) {
                  "unsigned and signed fields serialize exactly");
     ASSERT_TRUE(strstr(batch.lines[0], "u") == NULL,
                 "formatter must not leak unsupported conversion suffixes");
+    PASS();
+}
+
+static void test_d1_unsigned_round_trip(void) {
+    TEST("d1_unsigned_round_trip");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        INT32_MAX, (int32_t)0x80000000u, (int32_t)UINT32_MAX,
+        0, (int32_t)UINT32_MAX, 0
+    };
+
+    reset_logger(&buf);
+    enable_logger(&buf);
+    ASSERT_TRUE(smoothaf_persist_log_record(
+                    &buf, 1000u, SMOOTHAF_PERSIST_LOG_D1_CONTEXT,
+                    7u, payload), "D1 high-bit payload accepted");
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 1u,
+              "D1 high-bit payload consumed");
+    ASSERT_STREQ(batch.lines[0],
+                 "1000\tD1_CONTEXT\t7\t2147483647\t2147483648\t4294967295\t0\t4294967295\t0",
+                 "D1 uint32 fields preserve high-bit values");
+    PASS();
+}
+
+static void test_semantic_result_values(void) {
+    TEST("semantic_result_values");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    const uint8_t results[] = {
+        SMOOTHAF_PERSIST_LOG_RESULT_CONVERGED,
+        SMOOTHAF_PERSIST_LOG_RESULT_IMPROVED,
+        SMOOTHAF_PERSIST_LOG_RESULT_SEARCH_LIMIT,
+        SMOOTHAF_PERSIST_LOG_RESULT_BLOCKED,
+        SMOOTHAF_PERSIST_LOG_RESULT_UNCERTAIN,
+        SMOOTHAF_PERSIST_LOG_RESULT_CANCELLED,
+        SMOOTHAF_PERSIST_LOG_RESULT_LENS_FAILED,
+        SMOOTHAF_PERSIST_LOG_RESULT_TIMEOUT,
+        SMOOTHAF_PERSIST_LOG_RESULT_BEST_RECOVERED
+    };
+    size_t i;
+
+    reset_logger(&buf);
+    enable_logger(&buf);
+    for (i = 0; i < sizeof(results) / sizeof(results[0]); i++)
+        smoothaf_persist_log_episode_end(&buf, 1000u + (uint32_t)i, 1,
+                                         results[i], 0, 0, 0, 0, 0);
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch),
+              (uint32_t)(sizeof(results) / sizeof(results[0])),
+              "all canonical result records consumed");
+    for (i = 0; i < sizeof(results) / sizeof(results[0]); i++) {
+        char expected[24];
+        snprintf(expected, sizeof(expected), "\t%d\t", results[i]);
+        ASSERT_TRUE(strstr(batch.lines[i], expected) != NULL,
+                    "EPISODE_END keeps canonical result value");
+    }
     PASS();
 }
 
@@ -1032,14 +1239,19 @@ int main(void) {
     test_overflow_ordering();
     test_record_integrity();
     test_format_unsigned_contract();
+    test_d1_unsigned_round_trip();
     test_producer_consumer_concurrency();
     test_real_pthread_producer_consumer();
     test_dropped_counter();
     test_consumer_failure();
     test_stop_panic_non_blocking();
+    test_consumer_delay_and_ring_pressure();
+    test_variable_delay_and_cancel_during_delay();
+    test_fio_blocked_consumer();
     test_timestamp_wrap_around();
     test_logging_off_no_interference();
     test_specific_events();
+    test_semantic_result_values();
     test_small_batches();
     test_flush_batch();
     test_integrated_active_continuous_pipeline();

@@ -1,0 +1,7 @@
+# Curated semantic fixtures from SMTH001.LOG. Fields are:
+# timestamp<TAB>event<TAB>episode<TAB>payload0..payload5
+# Episodes 2, 5, 6, and 7 retain their lifecycle/event shape and summaries.
+EPISODE 2 1 1 13 8 3 6351 6 6138 6
+EPISODE 5 1 1 10 7 3 6682 3 6147 3
+EPISODE 6 1 1 12 8 3 6565 0 6100 0
+EPISODE 7 1 1 12 8 8 6628 0 6628 0 LIMIT 2

@@ -1,0 +1,9 @@
+SmoothAF B2-A host analysis: PASS
+input_sha256=13d90a6b1df73a078e0b4d3e9e51f8cc00d72a2677264d051528058600a5f4bb
+calibration=EP2,EP5 validation_frozen=EP6,EP7
+EP2: observed=6060ms timeout_margin=1940ms samples=[3, 4, 3, 4]
+EP5: observed=5728ms timeout_margin=2272ms samples=[4, 4, 2]
+EP6: observed=6263ms timeout_margin=1737ms samples=[4, 3, 3, 2]
+EP7: observed=7004ms timeout_margin=996ms samples=[4, 4, 4, 4]
+adversarial_false_converged=0 budget_violations=0 return_drift_confirmed=0 stop_panic_moves=0
+production_algorithm_changes=0 arm_builds=0 sd_installs=0
