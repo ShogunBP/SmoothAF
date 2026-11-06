@@ -99,7 +99,94 @@ typedef enum smoothaf_persist_log_event_type {
     SMOOTHAF_PERSIST_LOG_D1_SERIES_END     = 20,  /* series, status, produced, drops, errors, gaps */
     SMOOTHAF_PERSIST_LOG_D1_CONTEXT        = 21,  /* scene, distance, lighting, exposure, ROI, metric hashes */
     SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX    = 22,  /* focus, capture, REC, cadence, build hashes */
+
+    /* Versioned Movie/REC rejection evidence.  This is additive: the fixed
+     * record ABI and every event value above remain unchanged. */
+    SMOOTHAF_PERSIST_LOG_MOVIE_GATE_REJECT = 23,  /* v1 Movie/REC gate rejection */
 } smoothaf_persist_log_event_type_e;
+
+/* MOVIE_GATE_REJECT payload contract (schema version 1).
+ *
+ * payload[0] = (schema_version << 16) | origin.  Both fields are unsigned;
+ * the complete word is serialized as signed int32 bits in RAM and as an
+ * unsigned decimal value in TSV.
+ * payload[1] = rejection code (unsigned enum).
+ * payload[2] = failed Movie/REC gate mask (uint32 bitset).
+ * payload[3] = active control exclusion mask (uint32 bitset).
+ * payload[4] = compact runtime state (uint32 bitfield).
+ * payload[5] = packed counters: low16 saturated no-executable-episode
+ * cancellation count, high16 saturated rejection occurrences suppressed by
+ * rate limiting. Both halves are unsigned; each saturates at UINT16_MAX.
+ *
+ * The in-memory payload remains int32_t for ABI compatibility. Consumers must
+ * recover unsigned fields with (uint32_t)payload[n]; signed score/result
+ * fields in legacy events retain their historical signed serialization.
+ */
+#define SMOOTHAF_MOVIE_REJECT_SCHEMA_VERSION 1u
+
+typedef enum smoothaf_movie_reject_origin {
+    SMOOTHAF_MOVIE_REJECT_SOURCE_REC_EDGE = 1,
+    SMOOTHAF_MOVIE_REJECT_SOURCE_REC_RETRY = 2,
+    SMOOTHAF_MOVIE_REJECT_SOURCE_MANUAL_MONITOR = 3,
+    SMOOTHAF_MOVIE_REJECT_SOURCE_MODE_CHANGE = 4,
+    SMOOTHAF_MOVIE_REJECT_SOURCE_ENABLE_CHANGE = 5,
+    SMOOTHAF_MOVIE_REJECT_SOURCE_OPTION_CHANGE = 6,
+    SMOOTHAF_MOVIE_REJECT_SOURCE_CANCEL_PATH = 7,
+} smoothaf_movie_reject_origin_e;
+
+typedef enum smoothaf_movie_reject_reason {
+    SMOOTHAF_MOVIE_REJECT_REASON_NONE = 0,
+    SMOOTHAF_MOVIE_REJECT_REASON_MODE = 1,
+    SMOOTHAF_MOVIE_REJECT_REASON_EXPERIMENTAL = 2,
+    SMOOTHAF_MOVIE_REJECT_REASON_ENABLE = 3,
+    SMOOTHAF_MOVIE_REJECT_REASON_PANIC = 4,
+    SMOOTHAF_MOVIE_REJECT_REASON_MONITOR_ACTIVE = 5,
+    SMOOTHAF_MOVIE_REJECT_REASON_CANCEL = 6,
+    SMOOTHAF_MOVIE_REJECT_REASON_TASK_RUNNING = 7,
+    SMOOTHAF_MOVIE_REJECT_REASON_GATE = 8,
+    SMOOTHAF_MOVIE_REJECT_REASON_D1_OWNER = 9,
+    SMOOTHAF_MOVIE_REJECT_REASON_TASK_CREATE = 10,
+    SMOOTHAF_MOVIE_REJECT_REASON_NO_EXECUTABLE_EPISODE = 11,
+} smoothaf_movie_reject_reason_e;
+
+/* Failed gate bits.  A record may carry several bits when a complete state
+ * snapshot proves more than one prerequisite was absent. */
+#define SMOOTHAF_MOVIE_GATE_LIVEVIEW       (1u << 0)
+#define SMOOTHAF_MOVIE_GATE_MOVIE_MODE     (1u << 1)
+#define SMOOTHAF_MOVIE_GATE_H264           (1u << 2)
+#define SMOOTHAF_MOVIE_GATE_CUSTOM         (1u << 3)
+#define SMOOTHAF_MOVIE_GATE_RAW            (1u << 4)
+#define SMOOTHAF_MOVIE_GATE_EXPERIMENTAL   (1u << 5)
+#define SMOOTHAF_MOVIE_GATE_ENABLE         (1u << 6)
+#define SMOOTHAF_MOVIE_GATE_MODE           (1u << 7)
+#define SMOOTHAF_MOVIE_GATE_PANIC          (1u << 8)
+#define SMOOTHAF_MOVIE_GATE_CANCEL         (1u << 9)
+#define SMOOTHAF_MOVIE_GATE_D1_OWNER       (1u << 10)
+#define SMOOTHAF_MOVIE_GATE_TASK_LIFECYCLE (1u << 11)
+
+/* Control exclusions. */
+#define SMOOTHAF_MOVIE_EXCLUDE_MF          (1u << 0)
+#define SMOOTHAF_MOVIE_EXCLUDE_CAF         (1u << 1)
+#define SMOOTHAF_MOVIE_EXCLUDE_FOLLOW      (1u << 2)
+#define SMOOTHAF_MOVIE_EXCLUDE_RACK        (1u << 3)
+#define SMOOTHAF_MOVIE_EXCLUDE_STACK       (1u << 4)
+
+/* compact_state layout: mode[1:0], enable[2], experiment[3], LV[4],
+ * movie[5], recording class[7:6], monitor.enabled[8], monitor.state[11:9],
+ * task_running[12], task_stop_requested[13], monitor_task_requested[14],
+ * D1 owner[17:15]. */
+#define SMOOTHAF_MOVIE_STATE_MODE_SHIFT       0u
+#define SMOOTHAF_MOVIE_STATE_ENABLE_BIT       (1u << 2)
+#define SMOOTHAF_MOVIE_STATE_EXPERIMENTAL_BIT (1u << 3)
+#define SMOOTHAF_MOVIE_STATE_LV_BIT           (1u << 4)
+#define SMOOTHAF_MOVIE_STATE_MOVIE_BIT        (1u << 5)
+#define SMOOTHAF_MOVIE_STATE_REC_SHIFT        6u
+#define SMOOTHAF_MOVIE_STATE_MONITOR_BIT      (1u << 8)
+#define SMOOTHAF_MOVIE_STATE_MONITOR_STATE_SHIFT 9u
+#define SMOOTHAF_MOVIE_STATE_TASK_BIT         (1u << 12)
+#define SMOOTHAF_MOVIE_STATE_STOP_BIT         (1u << 13)
+#define SMOOTHAF_MOVIE_STATE_REQUESTED_BIT    (1u << 14)
+#define SMOOTHAF_MOVIE_STATE_D1_SHIFT         15u
 
 /* Reference qualification types */
 typedef enum smoothaf_persist_log_ref_type {
@@ -308,6 +395,12 @@ bool smoothaf_persist_log_write_error(struct smoothaf_persist_log_buffer *buf, u
 bool smoothaf_persist_log_cancelled(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                              uint16_t episode_id, uint8_t cancel_reason,
                              uint8_t cmds_executed);
+bool smoothaf_persist_log_movie_gate_reject(
+                              struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint8_t origin, uint8_t reason, uint32_t gates,
+                              uint32_t exclusions, uint32_t compact_state,
+                              uint32_t no_episode_cancellations,
+                              uint32_t suppressed_occurrences);
 
 /* Consumer: extract available records as formatted lines (up to batch limit)
  * Returns number of records consumed. Non-blocking. */
@@ -418,6 +511,12 @@ void smoothaf_persist_log_set_write_fail_next(bool fail);
   *                     [3]=valid, [4]=confident, [5]=reserved
   * D1_SERIES_END:      [0]=status, [1]=produced, [2]=dropped, [3]=errors,
   *                     [4]=gaps, [5]=partials low16 | foreign producers high16
+  *
+  * MOVIE_GATE_REJECT: [0]=schema_version<<16 | origin, [1]=reason,
+  *                     [2]=gate_mask, [3]=exclusion_mask, [4]=compact_state,
+  *                     [5] packs low16 no-episode cancellations and high16
+  *                     suppressed rejection occurrences. Decode all slots as
+  *                     uint32_t bit patterns; each counter saturates at 65535.
   *
   * D1 context hashes are deterministic FNV-1a over bounded text. They are
   * identifiers, not reversible values; the external experiment sheet is the

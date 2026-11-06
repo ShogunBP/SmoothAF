@@ -213,6 +213,14 @@ static volatile int smoothaf_af_episode_cancel_reason;
 static volatile int smoothaf_af_episode_lens_return;
 static volatile int smoothaf_af_episode_summary_pending;
 static volatile int smoothaf_persist_episode_started;
+/* ARM prepares controller state but only BLUR/ACQUIRE is executable.  The
+ * terminal marker is per generation and prevents duplicate CANCELLED records
+ * without changing the controller's existing stop/cancel transitions. */
+static volatile int smoothaf_af_episode_executable;
+static volatile int smoothaf_af_cancel_published;
+static volatile uint32_t smoothaf_af_no_episode_cancellations;
+static volatile uint32_t smoothaf_af_no_episode_cancellations_persisted;
+static volatile int smoothaf_af_no_episode_cancel_reason;
 static volatile uint32_t smoothaf_af_episode_id;
 static volatile int smoothaf_measure_requested;
 static volatile int smoothaf_d1_active;
@@ -301,6 +309,19 @@ static volatile int smoothaf_monitor_deinit;
 static struct smoothaf_movie_recording_state smoothaf_movie_recording;
 static volatile int smoothaf_movie_automatic_session;
 static volatile int smoothaf_movie_start_pending;
+static volatile uint8_t smoothaf_movie_attempt_origin =
+    SMOOTHAF_MOVIE_REJECT_SOURCE_REC_EDGE;
+
+#define SMOOTHAF_MOVIE_REJECT_ORIGIN_SLOTS 8
+struct smoothaf_movie_reject_dedup
+{
+    uint32_t signature;
+    uint32_t last_publish_ms;
+    uint32_t suppressed;
+    int seen;
+};
+static struct smoothaf_movie_reject_dedup smoothaf_movie_reject_dedup[
+    SMOOTHAF_MOVIE_REJECT_ORIGIN_SLOTS];
 static struct semaphore *smoothaf_sem;
 static int smoothaf_search_direction = -1;
 
@@ -458,6 +479,11 @@ static void smoothaf_runtime_init_reset_attempt_fields(void)
 #define SMOOTHAF_MEASURE_WAITING  3
 
 static int smoothaf_is_task_running(void);
+static void smoothaf_episode_cancel_observe_and_publish(uint32_t ended_ms,
+                                                        int publish_pending,
+                                                        int cancel_reason);
+static void smoothaf_persist_no_episode_cancellations(uint32_t now,
+                                                     uint8_t origin);
 static int smoothaf_start_fio_task(void);
 static void smoothaf_measure_task(void);
 static void smoothaf_d1_task(void);
@@ -826,6 +852,9 @@ static void smoothaf_episode_begin(smoothaf_episode_event_type_t type)
     if (++smoothaf_af_episode_id == 0) smoothaf_af_episode_id = 1;
     smoothaf_d1_gate_set_episode(&smoothaf_d1_gate, 1);
     smoothaf_af_episode_complete = 0;
+    smoothaf_af_cancel_published = 0;
+    smoothaf_af_episode_executable =
+        type != SMOOTHAF_EPISODE_EVENT_ARM;
     smoothaf_af_episode_block_reason = 0;
     smoothaf_af_episode_cancel_reason = 0;
     smoothaf_af_episode_lens_return = 0;
@@ -865,6 +894,8 @@ static void smoothaf_persist_session_start(void)
             (uint8_t)smoothaf_vlog_episode_limit,
             (uint8_t)smoothaf_vlog_direction_auto_selected()))
     {
+        memset(smoothaf_movie_reject_dedup, 0,
+               sizeof(smoothaf_movie_reject_dedup));
         smoothaf_persist_session_episodes = 0;
         smoothaf_persist_session_active = 1;
     }
@@ -872,14 +903,16 @@ static void smoothaf_persist_session_start(void)
 
 static void smoothaf_persist_session_end(uint8_t reason)
 {
-    if (!smoothaf_persist_session_active ||
-        !smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+    if (!smoothaf_persist_session_active)
         return;
-    smoothaf_persist_log_session_end(
-        &smoothaf_persist_log, (uint32_t)get_ms_clock(), reason,
-        (uint32_t)get_ms_clock() - smoothaf_session_started_ms,
-        (uint16_t)(smoothaf_persist_session_episodes > UINT16_MAX
-                   ? UINT16_MAX : smoothaf_persist_session_episodes));
+    if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+        smoothaf_persist_log_session_end(
+            &smoothaf_persist_log, (uint32_t)get_ms_clock(), reason,
+            (uint32_t)get_ms_clock() - smoothaf_session_started_ms,
+            (uint16_t)(smoothaf_persist_session_episodes > UINT16_MAX
+                       ? UINT16_MAX : smoothaf_persist_session_episodes));
+    /* Clear the producer-side lifecycle latch even if logging was disabled
+     * while the session was active.  A later session may then start normally. */
     smoothaf_persist_session_active = 0;
 }
 
@@ -893,6 +926,50 @@ static int smoothaf_episode_cancel_requested(void)
             !smoothaf_enabled);
 }
 
+static void smoothaf_episode_cancel_observe_and_publish(uint32_t ended_ms,
+                                                        int publish_pending,
+                                                        int cancel_reason)
+{
+    /* This boundary is terminal for the current generation.  Treat the
+     * marker as consumed even when logging is disabled so a later retry cannot
+     * manufacture a second cancellation or inflate the no-episode count. */
+    if (smoothaf_af_cancel_published)
+        return;
+    if (!smoothaf_af_episode_executable)
+    {
+        if (smoothaf_af_no_episode_cancellations != UINT32_MAX)
+            smoothaf_af_no_episode_cancellations++;
+        smoothaf_af_no_episode_cancel_reason = cancel_reason;
+        smoothaf_af_cancel_published = 1;
+        return;
+    }
+    if (!smoothaf_af_episode_id)
+        return;
+    if (!publish_pending ||
+        !smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
+        return;
+    if (smoothaf_persist_log_cancelled(&smoothaf_persist_log, ended_ms,
+                                       (uint16_t)smoothaf_af_episode_id,
+                                       (uint8_t)cancel_reason,
+                                       (uint8_t)smoothaf_vlog_af.commands))
+        smoothaf_af_cancel_published = 1;
+}
+
+static void smoothaf_persist_no_episode_cancellations(uint32_t now,
+                                                     uint8_t origin)
+{
+    uint32_t pending;
+    if (!smoothaf_persist_logger_is_enabled(&smoothaf_persist_log) ||
+        smoothaf_af_no_episode_cancellations == smoothaf_af_no_episode_cancellations_persisted)
+        return;
+    pending = smoothaf_af_no_episode_cancellations;
+    if (smoothaf_persist_log_movie_gate_reject(
+            &smoothaf_persist_log, now, origin,
+            SMOOTHAF_MOVIE_REJECT_REASON_NO_EXECUTABLE_EPISODE,
+            0, 0, 0, pending, 0))
+        smoothaf_af_no_episode_cancellations_persisted = pending;
+}
+
 static void smoothaf_episode_stop(void)
 {
     uint32_t ended_ms = (uint32_t)get_ms_clock();
@@ -901,7 +978,8 @@ static void smoothaf_episode_stop(void)
                     smoothaf_vlog_af.episode_result ==
                     SMOOTHAF_VLOG_AF_RESULT_CANCELLED;
     int publish_pending = !smoothaf_af_episode_complete;
-    if (cancelled && smoothaf_vlog_af.armed)
+    if (cancelled && (smoothaf_vlog_af.armed ||
+                      smoothaf_vlog_af.continuous_armed))
         smoothaf_vlog_af.episode_result = SMOOTHAF_VLOG_AF_RESULT_CANCELLED;
     smoothaf_vlog_af_stop(&smoothaf_vlog_af);
     smoothaf_af_commands_episode = (int)smoothaf_vlog_af.commands;
@@ -914,19 +992,16 @@ static void smoothaf_episode_stop(void)
         smoothaf_af_episode_cancel_reason = smoothaf_last_block;
     }
     smoothaf_af_episode_state_before_error = smoothaf_vlog_af.state;
+    if (smoothaf_vlog_af.episode_result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
+        smoothaf_episode_cancel_observe_and_publish(
+            ended_ms, publish_pending,
+            smoothaf_panic ? 2 :
+            (smoothaf_task_stop_requested ? 1 :
+             (smoothaf_last_block == SMOOTHAF_BLOCK_DISABLED ? 3 : 4)));
     smoothaf_episode_summary_publish(
         (smoothaf_episode_result_t)smoothaf_episode_result_map(
             smoothaf_vlog_af.episode_result), ended_ms);
-    if (publish_pending &&
-        smoothaf_vlog_af.episode_result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED &&
-        smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
-        smoothaf_persist_log_cancelled(&smoothaf_persist_log, ended_ms,
-                                       (uint16_t)smoothaf_af_episode_id,
-                                       smoothaf_panic ? 2 :
-                                       (smoothaf_task_stop_requested ? 1 :
-                                        (smoothaf_last_block == SMOOTHAF_BLOCK_DISABLED
-                                         ? 3 : 4)),
-                                       (uint8_t)smoothaf_vlog_af.commands);
+    /* Cancellation publication was handled at the lifecycle boundary above. */
 }
 
 static void smoothaf_episode_cancel(void)
@@ -1125,6 +1200,7 @@ static int smoothaf_measure_block_reason(void)
 
 static void smoothaf_movie_recording_transition(int recording_class, uint32_t now);
 static void smoothaf_movie_start_automatic(void);
+static int smoothaf_movie_reject_publish(uint8_t origin, uint8_t reason);
 static void smoothaf_movie_stop_automatic(void);
 
 static unsigned int smoothaf_movie_recording_cbr(unsigned int ctx)
@@ -1139,23 +1215,115 @@ static unsigned int smoothaf_movie_recording_cbr(unsigned int ctx)
     if (recording_class == SMOOTHAF_MOVIE_RECORDING_H264 &&
         smoothaf_movie_start_pending && !smoothaf_monitor.enabled &&
         !smoothaf_is_task_running())
+    {
+        smoothaf_movie_attempt_origin = SMOOTHAF_MOVIE_REJECT_SOURCE_REC_RETRY;
         smoothaf_movie_start_automatic();
+    }
     return CBR_RET_CONTINUE;
+}
+
+static int smoothaf_movie_reject_publish(uint8_t origin, uint8_t reason)
+{
+    uint32_t gates = 0;
+    uint32_t exclusions = 0;
+    uint32_t state = 0;
+    uint32_t now = (uint32_t)get_ms_clock();
+    uint32_t signature;
+    struct smoothaf_movie_reject_dedup *dedup;
+    int recording_class = smoothaf_movie_recording.class_id;
+
+    if (origin == 0 || origin >= SMOOTHAF_MOVIE_REJECT_ORIGIN_SLOTS)
+        origin = SMOOTHAF_MOVIE_REJECT_SOURCE_REC_EDGE;
+    if (!lv) gates |= SMOOTHAF_MOVIE_GATE_LIVEVIEW;
+    if (!is_movie_mode()) gates |= SMOOTHAF_MOVIE_GATE_MOVIE_MODE;
+    if (!RECORDING_H264) gates |= SMOOTHAF_MOVIE_GATE_H264;
+    if (RECORDING_CUSTOM) gates |= SMOOTHAF_MOVIE_GATE_CUSTOM;
+    if (RECORDING_RAW) gates |= SMOOTHAF_MOVIE_GATE_RAW;
+    if (!smoothaf_movie_active_experimental) gates |= SMOOTHAF_MOVIE_GATE_EXPERIMENTAL;
+    if (!smoothaf_enabled) gates |= SMOOTHAF_MOVIE_GATE_ENABLE;
+    if (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS)
+        gates |= SMOOTHAF_MOVIE_GATE_MODE;
+    if (smoothaf_panic) gates |= SMOOTHAF_MOVIE_GATE_PANIC;
+    if (smoothaf_cancel) gates |= SMOOTHAF_MOVIE_GATE_CANCEL;
+    if (smoothaf_d1_gate.state.owner != SMOOTHAF_D1_OWNER_NONE)
+        gates |= SMOOTHAF_MOVIE_GATE_D1_OWNER;
+    if (smoothaf_is_task_running() || smoothaf_monitor_task_requested)
+        gates |= SMOOTHAF_MOVIE_GATE_TASK_LIFECYCLE;
+
+    if (is_manual_focus()) exclusions |= SMOOTHAF_MOVIE_EXCLUDE_MF;
+    if (is_continuous_af()) exclusions |= SMOOTHAF_MOVIE_EXCLUDE_CAF;
+    if (is_follow_focus_active()) exclusions |= SMOOTHAF_MOVIE_EXCLUDE_FOLLOW;
+    if (is_rack_focus_enabled()) exclusions |= SMOOTHAF_MOVIE_EXCLUDE_RACK;
+    if (is_focus_stack_enabled()) exclusions |= SMOOTHAF_MOVIE_EXCLUDE_STACK;
+
+    state = ((uint32_t)smoothaf_vlog_af_mode << SMOOTHAF_MOVIE_STATE_MODE_SHIFT) |
+            (smoothaf_enabled ? SMOOTHAF_MOVIE_STATE_ENABLE_BIT : 0u) |
+            (smoothaf_movie_active_experimental ? SMOOTHAF_MOVIE_STATE_EXPERIMENTAL_BIT : 0u) |
+            (lv ? SMOOTHAF_MOVIE_STATE_LV_BIT : 0u) |
+            (is_movie_mode() ? SMOOTHAF_MOVIE_STATE_MOVIE_BIT : 0u) |
+            ((uint32_t)recording_class << SMOOTHAF_MOVIE_STATE_REC_SHIFT) |
+            (smoothaf_monitor.enabled ? SMOOTHAF_MOVIE_STATE_MONITOR_BIT : 0u) |
+            ((uint32_t)smoothaf_monitor.state << SMOOTHAF_MOVIE_STATE_MONITOR_STATE_SHIFT) |
+            (smoothaf_is_task_running() ? SMOOTHAF_MOVIE_STATE_TASK_BIT : 0u) |
+            (smoothaf_task_stop_requested ? SMOOTHAF_MOVIE_STATE_STOP_BIT : 0u) |
+            (smoothaf_monitor_task_requested ? SMOOTHAF_MOVIE_STATE_REQUESTED_BIT : 0u) |
+            ((uint32_t)smoothaf_d1_gate.state.owner << SMOOTHAF_MOVIE_STATE_D1_SHIFT);
+    signature = ((uint32_t)reason * 0x9e3779b9u) ^ gates ^
+                (exclusions * 33u) ^ (state * 65599u);
+    dedup = &smoothaf_movie_reject_dedup[origin];
+    if (!smoothaf_persist_logger_is_enabled(&smoothaf_persist_log)) return 0;
+    smoothaf_persist_no_episode_cancellations(now, origin);
+    if (dedup->seen && dedup->signature == signature &&
+        (uint32_t)(now - dedup->last_publish_ms) < 1000u)
+    {
+        if (dedup->suppressed != UINT32_MAX) dedup->suppressed++;
+        return 0;
+    }
+    if (dedup->seen && (uint32_t)(now - dedup->last_publish_ms) < 1000u)
+    {
+        if (dedup->suppressed != UINT32_MAX) dedup->suppressed++;
+        return 0;
+    }
+    if (!smoothaf_persist_log_movie_gate_reject(
+            &smoothaf_persist_log, now, origin, reason, gates, exclusions, state,
+            smoothaf_af_no_episode_cancellations,
+            dedup->suppressed))
+        return 0;
+    smoothaf_af_no_episode_cancellations_persisted =
+        smoothaf_af_no_episode_cancellations;
+    dedup->seen = 1;
+    dedup->signature = signature;
+    dedup->last_publish_ms = now;
+    dedup->suppressed = 0;
+    return 1;
 }
 
 static void smoothaf_movie_start_automatic(void)
 {
+    uint8_t origin = smoothaf_movie_attempt_origin;
     if (smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS ||
         !smoothaf_movie_active_experimental || !smoothaf_enabled ||
         smoothaf_panic || smoothaf_monitor.enabled)
+    {
+        smoothaf_movie_reject_publish(origin,
+            smoothaf_vlog_af_mode != SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS
+                ? SMOOTHAF_MOVIE_REJECT_REASON_MODE
+                : (!smoothaf_movie_active_experimental
+                   ? SMOOTHAF_MOVIE_REJECT_REASON_EXPERIMENTAL
+                   : (!smoothaf_enabled ? SMOOTHAF_MOVIE_REJECT_REASON_ENABLE
+                      : (smoothaf_panic ? SMOOTHAF_MOVIE_REJECT_REASON_PANIC
+                                         : SMOOTHAF_MOVIE_REJECT_REASON_MONITOR_ACTIVE))));
         return;
+    }
     if (smoothaf_cancel)
     {
+        smoothaf_movie_reject_publish(origin, SMOOTHAF_MOVIE_REJECT_REASON_CANCEL);
         smoothaf_movie_start_pending = 0;
         return;
     }
     if (smoothaf_is_task_running())
     {
+        smoothaf_movie_reject_publish(origin, SMOOTHAF_MOVIE_REJECT_REASON_TASK_RUNNING);
         smoothaf_movie_start_pending = 1;
         return;
     }
@@ -1167,9 +1335,13 @@ static void smoothaf_movie_start_automatic(void)
             smoothaf_cancel, is_manual_focus(), is_continuous_af(),
             is_follow_focus_active(), is_rack_focus_enabled(),
             is_focus_stack_enabled()))
+    {
+        smoothaf_movie_reject_publish(origin, SMOOTHAF_MOVIE_REJECT_REASON_GATE);
         return;
+    }
     if (!smoothaf_d1_start_monitor_owner())
     {
+        smoothaf_movie_reject_publish(origin, SMOOTHAF_MOVIE_REJECT_REASON_D1_OWNER);
         smoothaf_movie_start_pending = 0;
         return;
     }
@@ -1237,8 +1409,17 @@ static void smoothaf_movie_recording_transition(int recording_class, uint32_t no
         smoothaf_log_event_extended(SMOOTHAF_LOG_RECORDING, 1,
                                     recording_class, 0, 0, 0);
         if (recording_class == SMOOTHAF_MOVIE_RECORDING_H264)
+        {
+            smoothaf_movie_attempt_origin = SMOOTHAF_MOVIE_REJECT_SOURCE_REC_EDGE;
             smoothaf_movie_start_automatic();
-        else if (smoothaf_movie_automatic_session)
+        }
+        else
+        {
+            smoothaf_movie_attempt_origin = SMOOTHAF_MOVIE_REJECT_SOURCE_REC_EDGE;
+            smoothaf_movie_reject_publish(
+                smoothaf_movie_attempt_origin, SMOOTHAF_MOVIE_REJECT_REASON_GATE);
+        }
+        if (smoothaf_movie_automatic_session)
             smoothaf_request_episode_stop();
     }
     else if (edge == 2)
@@ -1670,6 +1851,10 @@ static void smoothaf_vlog_af_fail(int result, int block)
     smoothaf_af_episode_state_before_error = smoothaf_vlog_af.state;
     smoothaf_af_episode_reason = result;
     smoothaf_af_episode_result = result;
+    if (result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
+        smoothaf_af_episode_cancel_reason = smoothaf_panic ? 2 :
+                                           (smoothaf_task_stop_requested ? 1 :
+                                            (block == SMOOTHAF_VLOG_AF_BLOCK_DISABLED ? 3 : 4));
     if (result == SMOOTHAF_VLOG_AF_RESULT_FAILED)
         smoothaf_af_episode_lens_return = 0;
     if (block != SMOOTHAF_VLOG_AF_BLOCK_NONE)
@@ -1681,8 +1866,6 @@ static void smoothaf_vlog_af_fail(int result, int block)
     {
         if (smoothaf_vlog_af.acquisition_attempt_active)
             smoothaf_vlog_af_note_acquisition_failure(&smoothaf_vlog_af, now);
-        if (result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
-            smoothaf_af_episode_cancel_reason = result;
         smoothaf_vlog_af_pause_continuous(&smoothaf_vlog_af, result, now);
     }
     else
@@ -1701,6 +1884,15 @@ static void smoothaf_vlog_af_fail(int result, int block)
                                 block);
 
     /* Persistent Logger: TIMEOUT/CANCELLED/LIMIT hooks (non-blocking producer) */
+    if (result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
+    {
+        uint8_t cancel_reason = (smoothaf_panic ? 2 :
+                                 (smoothaf_task_stop_requested ? 1 :
+                                  (block == SMOOTHAF_VLOG_AF_BLOCK_DISABLED ? 3 : 4)));
+        smoothaf_episode_cancel_observe_and_publish(now,
+                                                     !smoothaf_af_episode_complete,
+                                                     cancel_reason);
+    }
     if (smoothaf_persist_logger_is_enabled(&smoothaf_persist_log))
     {
         if (result == SMOOTHAF_VLOG_AF_RESULT_TIMEOUT)
@@ -1719,17 +1911,6 @@ static void smoothaf_vlog_af_fail(int result, int block)
                                  (uint16_t)smoothaf_af_episode_id,
                                  phase, now - smoothaf_vlog_af.started_ms,
                                  (uint8_t)smoothaf_vlog_af.commands);
-        }
-        else if (result == SMOOTHAF_VLOG_AF_RESULT_CANCELLED)
-        {
-            uint8_t cancel_reason = (smoothaf_panic ? 2 :
-                                     (smoothaf_task_stop_requested ? 1 :
-                                      (block == SMOOTHAF_VLOG_AF_BLOCK_DISABLED ? 3 : 4)));
-            smoothaf_persist_log_cancelled(&smoothaf_persist_log, now,
-                                           (uint16_t)smoothaf_af_episode_id,
-                                           cancel_reason,
-                                           (uint8_t)smoothaf_vlog_af.commands);
-
         }
         else if (result == SMOOTHAF_VLOG_AF_RESULT_SEARCH_LIMIT ||
                  result == SMOOTHAF_VLOG_AF_RESULT_BLOCKED)
@@ -2463,6 +2644,8 @@ static void smoothaf_monitor_task(void)
 
     smoothaf_persist_session_end(smoothaf_cancel ?
                                  (smoothaf_panic ? 3 : 2) : 1);
+    smoothaf_persist_no_episode_cancellations(
+        (uint32_t)get_ms_clock(), SMOOTHAF_MOVIE_REJECT_SOURCE_CANCEL_PATH);
 
     smoothaf_persist_logger_sync_config();
     smoothaf_monitor_task_requested = 0;
@@ -3571,6 +3754,18 @@ static MENU_UPDATE_FUNC(smoothaf_movie_recording_update)
                   (unsigned)smoothaf_movie_recording.ended_ms);
 }
 
+static MENU_UPDATE_FUNC(smoothaf_af_no_episode_cancellations_update)
+{
+    MENU_SET_VALUE("%u", (unsigned)smoothaf_af_no_episode_cancellations);
+    MENU_SET_HELP("last=%d", (int)smoothaf_af_no_episode_cancel_reason);
+}
+
+static MENU_UPDATE_FUNC(smoothaf_af_episode_lifecycle_update)
+{
+    MENU_SET_VALUE("%s pub=%s", smoothaf_af_episode_executable ? "EXEC" : "ARM",
+                   smoothaf_af_cancel_published ? "DONE" : "PENDING");
+}
+
 static const char *smoothaf_vlog_af_mode_name(void)
 {
     return smoothaf_vlog_af_mode == SMOOTHAF_VLOG_AF_ACTIVE_CONTINUOUS
@@ -4627,6 +4822,8 @@ static struct menu_entry smoothaf_menu[] =
           .help = "Periodic read-only sharpness monitoring; details appear below when selected." },
         { .name = "EP Result", .update = smoothaf_vlog_af_result_update,
           .help = "Latest bounded episode outcome and reason." },
+        { .name = "EP Lifecycle", .update = smoothaf_af_episode_lifecycle_update },
+        { .name = "No-EP Cancels", .update = smoothaf_af_no_episode_cancellations_update },
         MENU_EOL,
     } },
     { .name = "Diagnostic", .select = menu_open_submenu,
@@ -4955,6 +5152,11 @@ static unsigned int smoothaf_init(void)
     smoothaf_af_episode_complete = 0;
     smoothaf_af_episode_summary_pending = 0;
     smoothaf_persist_episode_started = 0;
+    smoothaf_af_episode_executable = 0;
+    smoothaf_af_cancel_published = 0;
+    smoothaf_af_no_episode_cancellations = 0;
+    smoothaf_af_no_episode_cancellations_persisted = 0;
+    smoothaf_af_no_episode_cancel_reason = 0;
     smoothaf_af_episode_block_reason = 0;
     smoothaf_af_episode_cancel_reason = 0;
     smoothaf_af_episode_lens_return = 0;
@@ -4967,6 +5169,7 @@ static unsigned int smoothaf_init(void)
     smoothaf_fio_task_exited = 1;
     smoothaf_fio_seen_errors = 0;
     smoothaf_fio_seen_partials = 0;
+    memset(smoothaf_movie_reject_dedup, 0, sizeof(smoothaf_movie_reject_dedup));
     smoothaf_episode_log_init(&smoothaf_episode_log);
     smoothaf_episode_summary_count = 0;
     smoothaf_episode_summary_page = 0;

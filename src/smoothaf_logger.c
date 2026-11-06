@@ -407,6 +407,29 @@ bool smoothaf_persist_log_cancelled(struct smoothaf_persist_log_buffer *buf, uin
     return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_CANCELLED, episode_id, payload);
 }
 
+bool smoothaf_persist_log_movie_gate_reject(
+                              struct smoothaf_persist_log_buffer *buf, uint32_t ts,
+                              uint8_t origin, uint8_t reason, uint32_t gates,
+                              uint32_t exclusions, uint32_t compact_state,
+                              uint32_t no_episode_cancellations,
+                              uint32_t suppressed_occurrences)
+{
+    uint32_t schema_origin = (SMOOTHAF_MOVIE_REJECT_SCHEMA_VERSION << 16) |
+                             (uint32_t)origin;
+    uint32_t packed_counts = (no_episode_cancellations > 0xffffu
+                              ? 0xffffu : no_episode_cancellations) |
+                             ((suppressed_occurrences > 0xffffu
+                               ? 0xffffu : suppressed_occurrences) << 16);
+    int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
+        (int32_t)schema_origin, (int32_t)reason, (int32_t)gates,
+        (int32_t)exclusions, (int32_t)compact_state,
+        (int32_t)packed_counts
+    };
+    return smoothaf_persist_log_record(buf, ts,
+                                       SMOOTHAF_PERSIST_LOG_MOVIE_GATE_REJECT,
+                                       0, payload);
+}
+
 bool smoothaf_persist_log_d1_start(struct smoothaf_persist_log_buffer *buf, uint32_t ts,
                               uint16_t series_id, uint32_t requested,
                               uint32_t cadence_ms, uint32_t context_code)
@@ -502,6 +525,7 @@ static const char *event_name(uint16_t type) {
         case SMOOTHAF_PERSIST_LOG_D1_SERIES_END:   return "D1_SERIES_END";
         case SMOOTHAF_PERSIST_LOG_D1_CONTEXT:      return "D1_CONTEXT";
         case SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX:  return "D1_CONTEXT_AUX";
+        case SMOOTHAF_PERSIST_LOG_MOVIE_GATE_REJECT: return "MOVIE_GATE_REJECT";
         default:                            return "UNKNOWN";
     }
 }
@@ -574,6 +598,7 @@ static int format_record(const struct smoothaf_persist_log_record *rec, char *ou
         if ((rec->event_type == SMOOTHAF_PERSIST_LOG_D1_SERIES_START && i < 3) ||
             rec->event_type == SMOOTHAF_PERSIST_LOG_D1_CONTEXT ||
             rec->event_type == SMOOTHAF_PERSIST_LOG_D1_CONTEXT_AUX ||
+            rec->event_type == SMOOTHAF_PERSIST_LOG_MOVIE_GATE_REJECT ||
             (rec->event_type == SMOOTHAF_PERSIST_LOG_D1_SAMPLE && i == 0) ||
             rec->event_type == SMOOTHAF_PERSIST_LOG_D1_SERIES_END)
         {

@@ -715,6 +715,42 @@ static void test_d1_unsigned_round_trip(void) {
     PASS();
 }
 
+static void test_movie_gate_reject_contract(void) {
+    TEST("movie_gate_reject_contract");
+    struct smoothaf_persist_log_buffer buf;
+    struct smoothaf_persist_log_batch batch;
+    uint32_t gates = SMOOTHAF_MOVIE_GATE_LIVEVIEW |
+                     SMOOTHAF_MOVIE_GATE_ENABLE;
+    uint32_t exclusions = SMOOTHAF_MOVIE_EXCLUDE_MF |
+                          SMOOTHAF_MOVIE_EXCLUDE_STACK;
+    uint32_t state = SMOOTHAF_MOVIE_STATE_ENABLE_BIT |
+                     (2u << SMOOTHAF_MOVIE_STATE_REC_SHIFT);
+
+    reset_logger(&buf);
+    enable_logger(&buf);
+    ASSERT_TRUE(smoothaf_persist_log_movie_gate_reject(
+                    &buf, 4000u, SMOOTHAF_MOVIE_REJECT_SOURCE_REC_EDGE,
+                    SMOOTHAF_MOVIE_REJECT_REASON_GATE, gates, exclusions,
+                    state, 37u, 132u), "Movie rejection event accepted");
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 1u,
+              "Movie rejection event consumed");
+    ASSERT_STREQ(batch.lines[0],
+                 "4000\tMOVIE_GATE_REJECT\t0\t65537\t8\t65\t17\t132\t8650789",
+                 "versioned Movie rejection payload serializes unsigned fields");
+    ASSERT_TRUE(smoothaf_persist_log_movie_gate_reject(
+                    &buf, 4001u, SMOOTHAF_MOVIE_REJECT_SOURCE_REC_RETRY,
+                    SMOOTHAF_MOVIE_REJECT_REASON_NO_EXECUTABLE_EPISODE,
+                    0x80000000u, 0x80000000u, 0x80000000u,
+                    UINT32_MAX, UINT32_MAX),
+                "Movie rejection counters accept saturated values");
+    ASSERT_EQ(smoothaf_persist_log_consume_batch(&buf, &batch), 1u,
+              "saturated Movie rejection event consumed");
+    ASSERT_STREQ(batch.lines[0],
+                 "4001\tMOVIE_GATE_REJECT\t0\t65538\t11\t2147483648\t2147483648\t2147483648\t4294967295",
+                 "Movie rejection counters saturate at uint16 and preserve unsigned masks");
+    PASS();
+}
+
 static void test_semantic_result_values(void) {
     TEST("semantic_result_values");
     struct smoothaf_persist_log_buffer buf;
@@ -1251,6 +1287,7 @@ int main(void) {
     test_timestamp_wrap_around();
     test_logging_off_no_interference();
     test_specific_events();
+    test_movie_gate_reject_contract();
     test_semantic_result_values();
     test_small_batches();
     test_flush_batch();
