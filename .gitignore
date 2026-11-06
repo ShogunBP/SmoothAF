@@ -1,34 +1,57 @@
-# Generated ARM and host build artifacts
+# Generated build outputs and diagnostics
 *.o
 *.d
 *.dep
 *.sym
+*.SYM
 *.mo
+*.mo.*
 *.obj
 *.exe
 *.panic
+/*.log
+/*.tmp
+/*.temp
+/*.bak
+/*.backup
+/*.orig
+/*.old
+/*.zip
+/*.elf
+/*.map
 hgstamp
 hgdiff.tmp
 
-# Keep validated artifacts explicitly tracked
-!artifacts/baseline/*.mo
-!artifacts/consolidated/
-!artifacts/consolidated/smoothaf.mo
-!artifacts/releases/**/smoothaf.mo
+# Local release staging and build directories
+/artifacts/
+/build/
+/dist/
+/out/
+/release/
+/tmp/
+/temp/
+/logs/
+
+# Local agent configuration and worktrees
+/.claude/
 
 # Local camera data and symbol tables
-600D_102.SYM
-*.SYM
-platform/
-card-backups/
-firmware-dumps/
+/600D_102.SYM
+/platform/
+/card-backups/
+/firmware-dumps/
 
-# Local reports and releases
-artifacts/releases/
-artifacts/consolidated/*.dep
-artifacts/consolidated/*.sym
-artifacts/*.log
-*.log
+# External/local-only dependencies
+/ML/
+/docs/references/
+
+# Exploratory Lua proof of concept (not production source)
+/poc/lua/
+
+# Selective internal and temporary documentation
+/docs/internal/
+/docs/_internal/
+/docs/tmp/
 
 # Python
 __pycache__/
@@ -50,6 +73,3 @@ Desktop.ini
 *.token
 *.secret
 credentials.*
-
-# Local Magic Lantern source tree and camera references
-/docs/references/

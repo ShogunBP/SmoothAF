@@ -26,6 +26,26 @@ Required integration inputs are:
 
 Never substitute a symbol table from another camera or firmware.
 
+## Obtaining private ARM-build dependencies
+
+The public repository intentionally does not distribute the Legacy Lua Fix tree or
+`600D_102.SYM`. Obtain a compatible Legacy Lua Fix checkout from the project's
+approved upstream/source archive, subject to its license and redistribution terms,
+and obtain the camera-specific `600D_102.SYM` privately from the camera owner or
+maintainer. Do not commit, upload, or package either input.
+
+Configure paths outside the repository before an ARM build:
+
+```powershell
+$env:SMOOTHAF_LEGACY_ROOT = 'D:\path\to\magic-lantern-legacy-lua-fix'
+$env:SMOOTHAF_SYMBOL_SOURCE = 'D:\private\600D_102.SYM'
+```
+
+The Legacy tree must match the expected Lua Fix integration and the symbol table
+must target Canon EOS 600D firmware 1.0.2. Verify both paths locally; never
+substitute another camera, firmware, or symbol table. The build copies these inputs
+only into a temporary staging directory and removes the staging directory on exit.
+
 ## Build and test commands
 
 From the repository root, with Docker Desktop running:
@@ -37,7 +57,7 @@ From the repository root, with Docker Desktop running:
 .\build-smoothaf.ps1 -Release
 ```
 
-The full build creates or uses the `smoothaf-legacy-build:bookworm` image, runs host tests, copies the project into a temporary Legacy tree, generates module strings, builds the ARM module with `make clean all` (never `nodep`), checks dependencies and computes SHA-256. `-TestOnly` runs local checks without ARM integration; `-Release` writes a hash-named local artifact.
+The full build creates or uses the `smoothaf-legacy-build:bookworm` image, runs host tests, copies the project into a temporary Legacy tree, generates module strings, builds the ARM module with `make clean all` (never `nodep`), checks dependencies and computes SHA-256. `-TestOnly` runs local checks without ARM integration; `-Release` writes a hash-named local artifact. For the v0.8 pre-release candidate, keep the verified module local and publish it later as a GitHub Release attachment only after recording its SHA-256, Build ID, source commit and matching release-tag commit.
 
 Host benchmark output is deterministic controller simulation. It must remain labeled `(SIMULATION)` and must not be presented as physical focus evidence.
 
