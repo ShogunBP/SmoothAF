@@ -462,11 +462,13 @@ bool smoothaf_persist_log_d1_end(struct smoothaf_persist_log_buffer *buf, uint32
                               uint16_t series_id, uint8_t status,
                               uint32_t produced, uint32_t dropped,
                               uint32_t errors, uint32_t gaps,
-                              uint32_t partials)
+                              uint32_t partials, uint32_t foreign_producers)
 {
+    uint32_t integrity_counts = (partials & 0xffffu) |
+                                ((foreign_producers & 0xffffu) << 16);
     int32_t payload[SMOOTHAF_LOG_MAX_PAYLOAD] = {
         (int32_t)status, (int32_t)produced, (int32_t)dropped,
-        (int32_t)errors, (int32_t)gaps, (int32_t)partials
+        (int32_t)errors, (int32_t)gaps, (int32_t)integrity_counts
     };
     return smoothaf_persist_log_record(buf, ts, SMOOTHAF_PERSIST_LOG_D1_SERIES_END,
                                        (uint16_t)series_id, payload);

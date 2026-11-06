@@ -71,7 +71,8 @@
 #define SMOOTHAF_D1_CADENCE_MIN_MS 100
 #define SMOOTHAF_D1_CADENCE_MAX_MS 120
 #define SMOOTHAF_D1_LOG_ID_MAX 65535u
-#define SMOOTHAF_D1_CONTEXT_UNKNOWN "unknown"
+#define SMOOTHAF_D1_CONTEXT_SCENE "SMTH001 reference scene"
+#define SMOOTHAF_D1_CONTEXT_EXTERNAL "see D1-01 sheet"
 
 #define SMOOTHAF_FIO_TASK_PRIORITY 0x1d
 #define SMOOTHAF_FIO_TASK_STACK    0x1000
@@ -2615,7 +2616,8 @@ static int smoothaf_d1_publish_end(const void *value, void *context)
                &smoothaf_persist_log, series->ended_ms, (uint16_t)series->id,
                (uint8_t)series->status, series->produced,
                series->dropped_count, series->error_count,
-               series->sequence_gaps, series->partial_count)
+               series->sequence_gaps, series->partial_count,
+               series->foreign_producer_count)
          ? SMOOTHAF_D1_PUBLISH_OK : SMOOTHAF_D1_PUBLISH_DROP;
 }
 
@@ -2626,13 +2628,13 @@ static void smoothaf_d1_context_prepare(struct smoothaf_d1_context *context)
                                                      RECORDING_RAW);
     smoothaf_d1_context_clear(context);
     smoothaf_d1_copy_text(context->scene, sizeof(context->scene),
-                          SMOOTHAF_D1_CONTEXT_UNKNOWN);
+                          SMOOTHAF_D1_CONTEXT_SCENE);
     smoothaf_d1_copy_text(context->distance, sizeof(context->distance),
-                          SMOOTHAF_D1_CONTEXT_UNKNOWN);
+                          SMOOTHAF_D1_CONTEXT_EXTERNAL);
     smoothaf_d1_copy_text(context->lighting, sizeof(context->lighting),
-                          SMOOTHAF_D1_CONTEXT_UNKNOWN);
+                          SMOOTHAF_D1_CONTEXT_EXTERNAL);
     smoothaf_d1_copy_text(context->exposure, sizeof(context->exposure),
-                          SMOOTHAF_D1_CONTEXT_UNKNOWN);
+                          SMOOTHAF_D1_CONTEXT_EXTERNAL);
     smoothaf_d1_copy_text(context->roi, sizeof(context->roi), "64x64 central");
     smoothaf_d1_copy_text(context->metric, sizeof(context->metric),
                           smoothaf_vlog_metric == SMOOTHAF_METRIC_LAPLACIAN
@@ -3361,9 +3363,10 @@ static MENU_UPDATE_FUNC(smoothaf_d1_status_update)
     MENU_SET_VALUE("%s %d/%d", smoothaf_d1_active ? "ACTIVE" :
                    smoothaf_d1_series.status == SMOOTHAF_D1_STATUS_NORMAL ? "OK" :
                    smoothaf_d1_series.status == SMOOTHAF_D1_STATUS_CANCELLED ? "CANCEL" :
+                   smoothaf_d1_series.status == SMOOTHAF_D1_STATUS_CONTEXT_INVALID ? "CONTEXT" :
                    smoothaf_d1_series.status == SMOOTHAF_D1_STATUS_ERROR ? "ERROR" : "IDLE",
                    (int)smoothaf_d1_series.produced, (int)smoothaf_d1_series.requested);
-    MENU_SET_HELP("id=%u cadence=%ums ts=%ums score=%d mean=%d valid=%d drops=%u errors=%u gaps=%u partial=%u",
+    MENU_SET_HELP("id=%u cadence=%ums ts=%ums score=%d mean=%d valid=%d drops=%u errors=%u gaps=%u partial=%u foreign=%u",
                   (unsigned)smoothaf_d1_series.id,
                   (unsigned)smoothaf_d1_cadence_value(),
                   (unsigned)smoothaf_d1_last_timestamp_ms,
@@ -3372,7 +3375,8 @@ static MENU_UPDATE_FUNC(smoothaf_d1_status_update)
                   (unsigned)smoothaf_d1_series.dropped_count,
                   (unsigned)smoothaf_d1_series.error_count,
                   (unsigned)smoothaf_d1_series.sequence_gaps,
-                  (unsigned)smoothaf_d1_series.partial_count);
+                  (unsigned)smoothaf_d1_series.partial_count,
+                  (unsigned)smoothaf_d1_series.foreign_producer_count);
 }
 
 static MENU_UPDATE_FUNC(smoothaf_d1_cadence_update)

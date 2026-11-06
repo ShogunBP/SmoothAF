@@ -366,7 +366,7 @@ bool smoothaf_persist_log_d1_end(struct smoothaf_persist_log_buffer *buf, uint32
                               uint16_t series_id, uint8_t status,
                               uint32_t produced, uint32_t dropped,
                               uint32_t errors, uint32_t gaps,
-                              uint32_t partials);
+                              uint32_t partials, uint32_t foreign_producers);
 
 /* ============================================================
  * Mock / Test Support
@@ -417,7 +417,7 @@ void smoothaf_persist_log_set_write_fail_next(bool fail);
   * D1_SAMPLE:          [0]=sequence (uint32), [1]=score (signed), [2]=mean,
   *                     [3]=valid, [4]=confident, [5]=reserved
   * D1_SERIES_END:      [0]=status, [1]=produced, [2]=dropped, [3]=errors,
-  *                     [4]=gaps, [5]=partials (uint32 counters)
+  *                     [4]=gaps, [5]=partials low16 | foreign producers high16
   *
   * D1 context hashes are deterministic FNV-1a over bounded text. They are
   * identifiers, not reversible values; the external experiment sheet is the
