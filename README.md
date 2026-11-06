@@ -1,10 +1,10 @@
 # SmoothAF
 
-**SmoothAF v0.2.0 - Experimental**
+**SmoothAF v0.8.0-beta.1 - Experimental pre-release**
 
 **Fast focus. Minimal movement.**
 
-SmoothAF is an experimental autofocus module for Magic Lantern, designed to achieve fast, accurate and smooth focusing with minimal lens movement. Built for Canon EOS cameras, it aims to reduce focus hunting through efficient contrast detection, optimized focus control and lightweight algorithms.
+SmoothAF is an experimental autofocus module for Magic Lantern, designed to achieve fast, accurate and smooth focusing with minimal lens movement. The v0.8.0-beta.1 release is validated only on the Canon EOS 600D / Rebel T3i target documented below; it aims to reduce focus hunting through efficient contrast detection, optimized focus control and lightweight algorithms without claiming compatibility with other cameras.
 
 ## Overview
 
@@ -38,7 +38,7 @@ No compatibility claim is made for other cameras, firmware versions, Magic Lante
 
 ## Installation
 
-Make an SD-card backup first. Copy the built module manually to:
+See [INSTALL.md](INSTALL.md) for the complete manual installation, checksum, backup, recovery and STOP/PANIC procedure. Make an SD-card backup first. Copy the verified release module manually to:
 
 ```text
 ML/MODULES/smoothaf.mo
@@ -85,14 +85,16 @@ Do not unload or reload the module while a task is active.
 
 ## Known Limitations
 
+See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the complete experimental-status, compatibility, Movie and recovery limitations.
+
 - Physical tests with the Canon EF 50mm f/1.8 STM found Step Size 3 working and stopping automatically.
 - Step Sizes 1 and 2 did not work in the recorded tests with that lens.
 - The search can fail when the lens starts very far out of focus.
-- Continuous AF is not implemented.
+- `ACTIVE CONTINUOUS` is implemented as an explicitly experimental, bounded path; it is not stable, is not guaranteed to avoid hunting, and is not validated for normal use.
 - Other cameras, firmware versions, and lenses are not validated.
 - The module is experimental; static build validation does not prove runtime ABI compatibility or physical lens movement.
 - `lens_focus()` returning success does not by itself prove physical movement.
-- SmoothAF v0.2.0 is experimental and has no continuous AF.
+- The v0.8.0-beta.1 continuous path remains experimental and must not be interpreted as stable or hunting-free.
 - The recorded physical tests reported successful module loading, working menus and micro-adjustments, but did not recover large focus-distance changes reliably.
 - Persistent logging and FIO export are optional, disabled by default, and not physically validated; runtime telemetry remains fixed-size RAM state.
 - The recorded EF 50mm f/1.8 STM tests used Step Size 3; Step Sizes 1 and 2 did not work in those tests.

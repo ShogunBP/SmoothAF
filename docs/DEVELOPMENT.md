@@ -71,7 +71,7 @@ The module depends on Legacy interfaces for menu registration, LiveView VRAM, ta
 
 - Keep `Enable=0` at initialization.
 - Preserve PANIC, explicit Rearm and bounded command/reversal budgets.
-- Keep lens movement blocked in Movie Mode and recording; only the explicit H.264 Movie Dry Run may read VRAM, never move the lens. Keep Continuous AF, MF, Follow Focus, Rack Focus and Focus Stacking blocked.
+- Keep Movie Active movement behind its explicit experimental authorization and normal H.264 recording gates; RAW/custom recording and competing controllers remain blocked. Movie Dry Run may read VRAM but never move the lens. Keep MF, Follow Focus, Rack Focus and Focus Stacking blocked.
 - Do not add continuous card logging; use the fixed in-memory diagnostic history.
 - Do not treat `lens_focus()` success as proof of physical movement.
 - Preserve the separation between host simulation, ARM build validation and controlled camera testing.
